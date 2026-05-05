@@ -1,0 +1,20 @@
+version: "3.8"
+services:
+  ingest:
+    image: needs_tick:latest
+    container_name: needs_tick_ingest
+    volumes:
+      - /mnt/tse_data:/data/input:ro
+      - /mnt/parquet_store:/data/output
+    command:
+      - ingest
+      - --data-type
+      - individual_stock
+      - --years
+      - 2016-2023
+      - --input-root
+      - /data/input
+      - --output-root
+      - /data/output
+      - --parallel
+      - "4"
