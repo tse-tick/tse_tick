@@ -1,6 +1,3 @@
-# Reference materials (not tracked)
-descriptions/
-
 # Data files
 *.zip
 *.parquet
@@ -92,10 +89,10 @@ docs/_build/
 docs/build/
 site/
 
+# Reference materials (not tracked)
+descriptions/
+
 # Project specific
-data/*.csv
-data/*.zip
-!data/sample_data_info.txt
 *.log
 temp/
 tmp/
