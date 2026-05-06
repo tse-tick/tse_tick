@@ -2,6 +2,7 @@
 _MAX_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
 _MAX_ZIP_ENTRIES = 5
 
+import datetime
 import re
 import zipfile
 import io
@@ -9,8 +10,9 @@ import glob
 import warnings
 import gc
 import logging
+from collections import defaultdict
 from pathlib import Path
-from typing import Optional, Literal, Tuple, List
+from typing import Optional, Literal, Tuple, List, Dict, Union
 
 import polars as pl
 
@@ -35,6 +37,85 @@ _CODE_TYPE_MAP = {
     "indices": "HTICIT110",
     "indices_summary": "HTICIS110",
 }
+
+
+def _expand_date_range(from_date: str, to_date: str) -> List[str]:
+    start = datetime.datetime.strptime(from_date, "%Y%m%d")
+    end = datetime.datetime.strptime(to_date, "%Y%m%d")
+    if start > end:
+        raise ValueError(f"Start date {from_date} is after end date {to_date}")
+    dates = []
+    current = start
+    while current <= end:
+        dates.append(current.strftime("%Y%m%d"))
+        current += datetime.timedelta(days=1)
+    return dates
+
+
+def _expand_month_range(from_str: str, to_str: str) -> List[Tuple[int, int]]:
+    from_year, from_month = int(from_str[:4]), int(from_str[4:6])
+    to_year, to_month = int(to_str[:4]), int(to_str[4:6])
+    if (from_year, from_month) > (to_year, to_month):
+        raise ValueError(f"Start month {from_str} is after end month {to_str}")
+    months = []
+    year, month = from_year, from_month
+    while (year < to_year) or (year == to_year and month <= to_month):
+        months.append((year, month))
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return months
+
+
+def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, List[int]], List[str]]]:
+    """Parse a period string into structured parameters.
+
+    Accepted formats:
+        YYYY                         -> process entire year
+        YYYYMM-YYYYMM                -> process all trading days from start month to end month
+        YYYYMMDD-YYYYMMDD            -> process all trading days from start date to end date
+
+    Returns dict with keys:
+        granularity: "year" | "month" | "date"
+        years: list of years covered
+        months_by_year (month): {year: [month, ...]}
+        dates (date): list of YYYYMMDD strings
+    """
+    period_str = str(period_str).strip()
+
+    if "-" in period_str:
+        parts = period_str.split("-")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid period format: {period_str!r}. Expected YYYY, YYYYMM-YYYYMM, or YYYYMMDD-YYYYMMDD")
+        from_part, to_part = parts[0].strip(), parts[1].strip()
+
+        if len(from_part) == 8 and len(to_part) == 8 and from_part.isdigit() and to_part.isdigit():
+            dates = _expand_date_range(from_part, to_part)
+            years = sorted(set(int(d[:4]) for d in dates))
+            return {"granularity": "date", "years": years, "dates": dates}
+
+        elif len(from_part) == 6 and len(to_part) == 6 and from_part.isdigit() and to_part.isdigit():
+            months = _expand_month_range(from_part, to_part)
+            months_by_year: Dict[int, List[int]] = defaultdict(list)
+            for y, m in months:
+                months_by_year[y].append(m)
+            years = sorted(months_by_year.keys())
+            return {"granularity": "month", "years": years, "months_by_year": dict(months_by_year)}
+
+        else:
+            raise ValueError(
+                f"Invalid period format: {period_str!r}. "
+                f"Expected YYYY, YYYYMM-YYYYMM (6-digit months), or YYYYMMDD-YYYYMMDD (8-digit dates)"
+            )
+    else:
+        if len(period_str) == 4 and period_str.isdigit():
+            return {"granularity": "year", "years": [int(period_str)]}
+        else:
+            raise ValueError(
+                f"Invalid period: {period_str!r}. "
+                f"Expected YYYY, YYYYMM-YYYYMM, or YYYYMMDD-YYYYMMDD"
+            )
 
 
 def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
@@ -88,6 +169,7 @@ def discover_zips(
     data_type: str,
     years: List[int],
     months: Optional[List[int]] = None,
+    dates: Optional[List[str]] = None,
 ) -> List[Path]:
     prefix = _CODE_TYPE_MAP.get(data_type)
     if prefix is None:
@@ -104,9 +186,17 @@ def discover_zips(
     for year in years:
         for month in months:
             month_str = f"{year}{month:02d}"
-            pattern = str(root / str(year) / month_str / f"{prefix}.*.zip")
-            matched = sorted(glob.glob(pattern))
-            all_zips.extend(Path(p) for p in matched)
+            if dates is not None:
+                for date_str in dates:
+                    if date_str[:6] != month_str:
+                        continue
+                    pattern = str(root / str(year) / month_str / f"{prefix}.{date_str}.*.zip")
+                    matched = sorted(glob.glob(pattern))
+                    all_zips.extend(Path(p) for p in matched)
+            else:
+                pattern = str(root / str(year) / month_str / f"{prefix}.*.zip")
+                matched = sorted(glob.glob(pattern))
+                all_zips.extend(Path(p) for p in matched)
 
     return all_zips
 

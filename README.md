@@ -42,17 +42,38 @@ df = tse_tick.create_df(
 
 ### CLI Ingest (Batch ZIP → Parquet)
 
-Convert entire years of data into a partitioned Parquet store with one command:
+Convert entire years, months, or specific date ranges of data into a partitioned Parquet store with one command:
 
 ```bash
-# Ingest all TICST120 data for 2016-2023
+# Ingest a specific date range (YYYYMMDD-YYYYMMDD)
+tse-tick ingest \
+    --data-type individual_stock \
+    --period 20240201-20240205 \
+    --input-root /Volumes/TSE_DATA \
+    --output-root /Volumes/PARQUET_STORE
+
+# Ingest a month range (YYYYMM-YYYYMM)
+tse-tick ingest \
+    --data-type individual_stock \
+    --period 202401-202403 \
+    --input-root /Volumes/TSE_DATA \
+    --output-root /Volumes/PARQUET_STORE
+
+# Ingest a full year (YYYY)
+tse-tick ingest \
+    --data-type individual_stock \
+    --period 2024 \
+    --input-root /Volumes/TSE_DATA \
+    --output-root /Volumes/PARQUET_STORE
+
+# Legacy: Ingest all TICST120 data for 2016-2023 using --years
 tse-tick ingest \
     --data-type individual_stock \
     --years 2016-2023 \
     --input-root /Volumes/TSE_DATA \
     --output-root /Volumes/PARQUET_STORE
 
-# Ingest a single year
+# Legacy: Ingest a single year using --year
 tse-tick ingest \
     --data-type indices \
     --year 2022 \
@@ -78,6 +99,15 @@ tse-tick ingest \
 # Skip resume (reprocess all files)
 tse-tick ingest --no-resume ...
 ```
+
+| Flag | Description |
+|------|-------------|
+| `--period` | Date range: `YYYY` (year), `YYYYMM-YYYYMM` (month range), or `YYYYMMDD-YYYYMMDD` (day range). Takes precedence over `--years`/`--year`. |
+| `--years` | Legacy: year range like `"2016-2023"` or `"2018,2019,2020"` |
+| `--year` | Legacy: single year |
+| `--flat` | Treat input-root as a flat folder of ZIPs (no year/month subdirectories) |
+| `--no-resume` | Reprocess all files even if output exists |
+| `--parallel` | Number of parallel worker processes (max 8) |
 
 ### Query Parquet Store
 

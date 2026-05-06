@@ -5,7 +5,7 @@ import logging
 import sys
 from pathlib import Path
 
-from tse_tick.ingest import ingest_directory, ingest_year_from_root
+from tse_tick.ingest import ingest_directory, ingest_year_from_root, ingest_period
 
 logger = logging.getLogger(__name__)
 
@@ -52,18 +52,30 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print(f"Error: --data-type must be one of {sorted(valid_types)}", file=sys.stderr)
         sys.exit(1)
 
-    years = _parse_years(args.years) if args.years else [args.year] if args.year else None
-    if years is None:
-        print("Error: --years or --year is required", file=sys.stderr)
-        sys.exit(1)
-
-    for y in years:
-        if not (2016 <= y <= 2023):
-            print(f"Error: year {y} is outside supported range (2016-2023)", file=sys.stderr)
-            sys.exit(1)
-
     input_root = args.input_root
     output_root = args.output_root
+
+    if args.period is not None:
+        print(f"Ingesting by period: {args.period}")
+        print(f"  Data type: {args.data_type}")
+        print(f"  Output: {output_root}")
+        results = ingest_period(
+            input_root, output_root,
+            period=args.period,
+            data_type=args.data_type,
+            language=args.language,
+            resume=not args.no_resume,
+            max_workers=args.parallel,
+        )
+        success = sum(1 for r in results if "error" not in r)
+        failed = sum(1 for r in results if "error" in r)
+        print(f"Done: {success} succeeded, {failed} failed")
+        return
+
+    years = _parse_years(args.years) if args.years else [args.year] if args.year else None
+    if years is None:
+        print("Error: --years, --year, or --period is required", file=sys.stderr)
+        sys.exit(1)
 
     if args.flat:
         print(f"Ingesting all ZIPs from flat directory: {input_root}")
@@ -122,6 +134,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Single year to process (alternative to --years)",
+    )
+    ingest_parser.add_argument(
+        "--period",
+        type=str,
+        default=None,
+        help=(
+            "Date range to process: YYYY (entire year), "
+            "YYYYMM-YYYYMM (month range), or YYYYMMDD-YYYYMMDD (day range). "
+            "Takes precedence over --years/--year."
+        ),
     )
     ingest_parser.add_argument(
         "--input-root",

@@ -112,9 +112,13 @@ def test_ingest_event_windows_missing_zip_skipped(tmp_path):
 
 
 def test_ingest_year_invalid_year_raises(tmp_path):
-    """ingest_year raises ValueError for year outside 2016–2023."""
-    with pytest.raises(ValueError, match="2016"):
-        ingest_year(str(tmp_path), str(tmp_path), year=2000, data_type="individual_stock")
+    """ingest_year no longer validates year range — any year is accepted."""
+    in_dir = tmp_path / "in"
+    in_dir.mkdir()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    result = ingest_year(str(in_dir), str(out_dir), year=2000, data_type="individual_stock")
+    assert len(result) == 0
 
 
 def test_ingest_year_unknown_data_type_raises(tmp_path):
@@ -234,11 +238,6 @@ def test_ingest_directory_with_explicit_data_type(tmp_path):
     out_dir.mkdir()
     results = ingest_directory(str(in_dir), str(out_dir), data_type="individual_stock")
     assert results[0]["data_type"] == "individual_stock"
-
-
-def test_ingest_year_invalid_year_raises(tmp_path):
-    with pytest.raises(ValueError, match="2016"):
-        ingest_year(str(tmp_path), str(tmp_path), year=2000, data_type="individual_stock")
 
 
 def test_ingest_year_unknown_data_type_raises(tmp_path):
