@@ -9,7 +9,7 @@ from typing import Optional
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 
@@ -103,9 +103,6 @@ def ingest_year(
     language: str = "en",
     max_workers: int = 1,
 ) -> list[dict]:
-    if not (2016 <= year <= 2023):
-        raise ValueError(f"year must be in 2016-2023, got {year}")
-
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
         raise ValueError(
@@ -137,9 +134,6 @@ def ingest_year_from_root(
     language: str = "en",
     resume: bool = True,
 ) -> list[dict]:
-    if not (2016 <= year <= 2023):
-        raise ValueError(f"year must be in 2016-2023, got {year}")
-
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
         raise ValueError(
@@ -163,6 +157,100 @@ def ingest_year_from_root(
             expected_ticker_files = list(
                 (output_root_path / f"date={date_str}").glob("ticker=*.parquet")
             ) if (output_root_path / f"date={date_str}").exists() else []
+            if expected_ticker_files:
+                continue
+
+        try:
+            meta = ingest_single_zip(
+                str(zip_path), str(output_dir), data_type=data_type, year=year, language=language
+            )
+        except Exception as exc:
+            meta = {"zip_path": str(zip_path), "error": str(exc)}
+        results.append(meta)
+        print(f"  {zip_basename} -> {meta.get('rows', 'error')} rows")
+
+    return results
+
+
+def ingest_period(
+    input_root: str,
+    output_dir: str,
+    period: str,
+    data_type: str,
+    language: str = "en",
+    resume: bool = True,
+    max_workers: int = 1,
+) -> list[dict]:
+    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
+    if data_type not in valid_types:
+        raise ValueError(
+            f"Unknown data_type {data_type!r}. Must be one of {sorted(valid_types)}"
+        )
+
+    parsed = parse_period(period)
+    granularity = parsed["granularity"]
+    years = parsed["years"]
+
+    if granularity == "year":
+        results: list[dict] = []
+        for year in years:
+            results.extend(
+                ingest_year_from_root(
+                    input_root, output_dir, year, data_type, language, resume
+                )
+            )
+        return results
+
+    if granularity == "month":
+        results = []
+        months_by_year: dict = parsed["months_by_year"]
+        for year, months in months_by_year.items():
+            zip_paths = discover_zips(input_root, data_type, [year], months=list(months))
+            results.extend(
+                _process_zips(zip_paths, output_dir, data_type, year, language, resume)
+            )
+        return results
+
+    if granularity == "date":
+        results = []
+        dates: list = parsed["dates"]
+        date_years = sorted(set(int(d[:4]) for d in dates))
+        for year in date_years:
+            year_dates = [d for d in dates if d.startswith(str(year))]
+            year_months = sorted(set(int(d[4:6]) for d in year_dates))
+            zip_paths = discover_zips(input_root, data_type, [year], months=year_months, dates=year_dates)
+            results.extend(
+                _process_zips(zip_paths, output_dir, data_type, year, language, resume)
+            )
+        return results
+
+    raise ValueError(f"Unknown granularity: {granularity}")
+
+
+def _process_zips(
+    zip_paths: list,
+    output_dir: str,
+    data_type: str,
+    year: int,
+    language: str = "en",
+    resume: bool = True,
+) -> list[dict]:
+    results: list[dict] = []
+    output_root_path = Path(output_dir) / data_type
+
+    for zip_path in zip_paths:
+        zip_basename = Path(zip_path).name
+        date_str = None
+        for part in zip_basename.split("."):
+            if len(part) == 8 and part.isdigit() and part.startswith("20"):
+                date_str = part
+                break
+
+        if date_str and resume and output_root_path.exists():
+            date_dir = output_root_path / f"date={date_str}"
+            expected_ticker_files = (
+                list(date_dir.glob("ticker=*.parquet")) if date_dir.exists() else []
+            )
             if expected_ticker_files:
                 continue
 

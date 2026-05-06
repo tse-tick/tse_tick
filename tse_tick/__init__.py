@@ -14,7 +14,7 @@ __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
 __copyright__ = "Copyright 2024-2025"
 
-from .enhanced import create_df, export_to_csv, discover_zips
+from .enhanced import create_df, export_to_csv, discover_zips, parse_period
 
 from .schemas import (
     get_schema_individual_stock_95,
@@ -29,6 +29,7 @@ from .ingest import (
     ingest_directory,
     ingest_year,
     ingest_year_from_root,
+    ingest_period,
     ingest_event_windows,
 )
 
@@ -74,6 +75,7 @@ __all__ = [
     "create_df",
     "export_to_csv",
     "discover_zips",
+    "parse_period",
     "get_schema_individual_stock_95",
     "get_schema_summary_83",
     "get_schema_indices_23",
@@ -83,6 +85,7 @@ __all__ = [
     "ingest_directory",
     "ingest_year",
     "ingest_year_from_root",
+    "ingest_period",
     "ingest_event_windows",
     "write_partitioned_parquet",
     "read_parquet_partition",
@@ -113,7 +116,7 @@ def get_supported_data_types():
 
 
 def get_supported_years():
-    return (2016, 2023)
+    return (2016, 2024)
 
 
 def get_info():
@@ -140,7 +143,7 @@ def get_info():
     >>> tse_tick.export_to_csv("data.zip", "output.csv")
 
     CLI Usage:
-    >>> tse-tick ingest --data-type individual_stock --years 2016-2023 \\
+    >>> tse-tick ingest --data-type individual_stock --period 2024 \\
                 --input-root /path/to/data --output-root /path/to/store
 
     For more information, visit:
