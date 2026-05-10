@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "setuptools_scm>=6.2"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,12 +10,12 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "Peter Romero", email = "peter@romero.at"},
-    {name = "Masataka Hayashi", email = "hmasa25@keio.jp"},
-    {name = "Kazumi Li", email = "kaiwenli@keio.jp"}
+    {name = "Kazumi Li", email = "kaiwenli@keio.jp"},
+    {name = "Peter Romero"},
+    {name = "Masataka Hayashi"},
 ]
 maintainers = [
-    {name = "Kazumi Li", email = "kaiwenli@keio.jp"}
+    {name = "Kazumi Li", email = "kaiwenli@keio.jp"},
 ]
 keywords = [
     "finance",

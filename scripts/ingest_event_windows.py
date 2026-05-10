@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+DEPRECATED: Use 'tse-tick ingest' CLI instead.
+
 CLI: extract ±N minute tick windows around corporate disclosure events.
 
 Usage::
@@ -24,6 +26,7 @@ A ``corrupt_zips.txt`` log is written to --output-root alongside the data.
 import argparse
 import logging
 import sys
+import warnings
 from pathlib import Path
 
 # Allow running as a standalone script from any working directory
@@ -91,6 +94,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    warnings.warn(
+        "scripts/ingest_event_windows.py is deprecated. "
+        "Use the CLI: `tse-tick ingest --filter-csv ... --window ...` instead. "
+        "This script will be removed in a future release.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     parser = _build_parser()
     args = parser.parse_args()
 

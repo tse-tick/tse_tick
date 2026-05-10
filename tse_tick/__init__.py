@@ -1,8 +1,12 @@
 """
-tse_tick - High-Performance Nikkei NEEDS Tick Data Processing
+tse_tick — Tokyo Stock Exchange tick data processing for NEEDS data.
 
-A Python package for processing Japanese Nikkei tick data with automatic
-data type detection, bilingual support, and a simplified API.
+Authors and contributions:
+    Kazumi Li         — Schema definitions, package architecture, maintainer
+    Peter Romero      — Original concept and initial project design
+    Masataka Hayashi  — Initial pandas-based prototype
+
+Developed at Keio University, Nakatsuma Seminar.
 """
 
 # tse_tick/__init__.py
@@ -12,7 +16,7 @@ __version__ = "0.2.1"
 __author__ = "Kazumi Li"
 __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
-__copyright__ = "Copyright 2024-2025"
+__copyright__ = "Copyright 2025-2026"
 
 from .enhanced import create_df, export_to_csv, discover_zips, parse_period
 
@@ -116,7 +120,8 @@ def get_supported_data_types():
 
 
 def get_supported_years():
-    return (2016, 2024)
+    from datetime import datetime as _dt
+    return (2016, _dt.now().year)
 
 
 def get_info():
