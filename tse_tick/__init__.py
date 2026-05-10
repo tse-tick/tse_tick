@@ -30,7 +30,7 @@ from .ingest import (
     ingest_year,
     ingest_year_from_root,
     ingest_period,
-    ingest_event_windows,
+    ingest_event_windows_period,
 )
 
 from .io.parquet import (
@@ -86,7 +86,7 @@ __all__ = [
     "ingest_year",
     "ingest_year_from_root",
     "ingest_period",
-    "ingest_event_windows",
+    "ingest_event_windows_period",
     "write_partitioned_parquet",
     "read_parquet_partition",
     "write_event_window_parquet",

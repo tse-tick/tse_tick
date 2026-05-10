@@ -5,20 +5,20 @@ CLI: extract ±N minute tick windows around corporate disclosure events.
 Usage::
 
     python scripts/ingest_event_windows.py \\
-        --year 2017 \\
-        --input-dir "/path/to/tse_tick_data" \\
-        --output-dir "/path/to/event_windows" \\
+        --period 2017 \\
+        --input-root "/path/to/tse_tick_data" \\
+        --output-root "/path/to/event_windows" \\
         --filter-csv "TSE_EventBase/data/exports/event_filter_list.csv"
 
-Input layout expected under --input-dir::
+Input layout expected under --input-root::
 
-    {input_dir}/{year}/{yearmonth}/HTICST120.{date}.N.zip
+    {input_root}/{year}/{yearmonth}/HTICST120.{date}.N.zip
 
-Output layout written to --output-dir::
+Output layout written to --output-root::
 
-    {output_dir}/year=YYYY/month=MM/YYYYMMDD.parquet
+    {output_root}/year=YYYY/month=MM/YYYYMMDD.parquet
 
-A ``corrupt_zips.txt`` log is written to --output-dir alongside the data.
+A ``corrupt_zips.txt`` log is written to --output-root alongside the data.
 """
 
 import argparse
@@ -29,7 +29,7 @@ from pathlib import Path
 # Allow running as a standalone script from any working directory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tse_tick.ingest import ingest_event_windows
+from tse_tick.ingest import ingest_event_windows_period
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,27 +41,27 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--year",
-        type=int,
+        "--period",
+        type=str,
         required=True,
-        help="Calendar year of the disclosure events to process (e.g. 2017).",
+        help="Date range to process: YYYY, YYYYMM-YYYYMM, or YYYYMMDD-YYYYMMDD.",
     )
     p.add_argument(
-        "--input-dir",
+        "--input-root",
         required=True,
         metavar="DIR",
         help=(
             "Root directory containing the raw TICST120 ZIPs, organised as "
-            "{input_dir}/{year}/{yearmonth}/HTICST120.{date}.N.zip."
+            "{input_root}/{year}/{yearmonth}/HTICST120.{date}.N.zip."
         ),
     )
     p.add_argument(
-        "--output-dir",
+        "--output-root",
         required=True,
         metavar="DIR",
         help=(
             "Root directory for event-window Parquet output. "
-            "Files are written to {output_dir}/year=YYYY/month=MM/YYYYMMDD.parquet."
+            "Files are written to {output_root}/year=YYYY/month=MM/YYYYMMDD.parquet."
         ),
     )
     p.add_argument(
@@ -102,17 +102,17 @@ def main() -> None:
 
     print(
         f"Starting event-window extraction:\n"
-        f"  year         : {args.year}\n"
-        f"  input-dir    : {args.input_dir}\n"
-        f"  output-dir   : {args.output_dir}\n"
+        f"  period       : {args.period}\n"
+        f"  input-root   : {args.input_root}\n"
+        f"  output-root  : {args.output_root}\n"
         f"  filter-csv   : {args.filter_csv}\n"
         f"  window       : ±{args.window_minutes} minutes\n"
     )
 
-    ingest_event_windows(
-        year=args.year,
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
+    ingest_event_windows_period(
+        input_root=args.input_root,
+        output_dir=args.output_root,
+        period=args.period,
         filter_csv=args.filter_csv,
         window_minutes=args.window_minutes,
     )

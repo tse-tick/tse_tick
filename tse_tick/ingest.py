@@ -24,6 +24,7 @@ def ingest_single_zip(
     data_type: Optional[str] = None,
     year: Optional[int] = None,
     language: str = "en",
+    ticker_filter: Optional[set] = None,
 ) -> dict:
     path = Path(zip_path)
     if not path.exists():
@@ -32,8 +33,16 @@ def ingest_single_zip(
     if data_type is None or year is None:
         data_type, year = detect_data_type_and_year(str(path))
 
-    df = create_df(str(path), language=language, auto_detect=False, data_type=data_type, year=year)
+    df = create_df(str(path), language=language, auto_detect=False, data_type=data_type, year=year, ticker_filter=ticker_filter)
     rows = len(df)
+    if rows == 0:
+        return {
+            "zip_path": str(path.resolve()),
+            "data_type": data_type,
+            "year": year,
+            "rows": 0,
+            "output_path": None,
+        }
     out_path = write_partitioned_parquet(df, output_dir, data_type)
 
     return {
@@ -52,6 +61,7 @@ def ingest_directory(
     language: str = "en",
     max_workers: int = 1,
     progress: bool = True,
+    ticker_filter: Optional[set] = None,
 ) -> list[dict]:
     if max_workers > _MAX_WORKERS:
         logger.warning("max_workers=%d exceeds cap of %d, limiting to %d", max_workers, _MAX_WORKERS, _MAX_WORKERS)
@@ -67,7 +77,7 @@ def ingest_directory(
 
     def _process(zf: Path) -> dict:
         try:
-            return ingest_single_zip(str(zf), output_dir, data_type=data_type, language=language)
+            return ingest_single_zip(str(zf), output_dir, data_type=data_type, language=language, ticker_filter=ticker_filter)
         except Exception as exc:
             return {"zip_path": str(zf), "error": str(exc)}
 
@@ -102,6 +112,7 @@ def ingest_year(
     data_type: str,
     language: str = "en",
     max_workers: int = 1,
+    ticker_filter: Optional[set] = None,
 ) -> list[dict]:
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
@@ -118,7 +129,7 @@ def ingest_year(
 
     for zf in year_zips:
         try:
-            meta = ingest_single_zip(str(zf), output_dir, data_type=data_type, year=year, language=language)
+            meta = ingest_single_zip(str(zf), output_dir, data_type=data_type, year=year, language=language, ticker_filter=ticker_filter)
         except Exception as exc:
             meta = {"zip_path": str(zf), "error": str(exc)}
         results.append(meta)
@@ -133,6 +144,7 @@ def ingest_year_from_root(
     data_type: str,
     language: str = "en",
     resume: bool = True,
+    ticker_filter: Optional[set] = None,
 ) -> list[dict]:
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
@@ -162,7 +174,7 @@ def ingest_year_from_root(
 
         try:
             meta = ingest_single_zip(
-                str(zip_path), str(output_dir), data_type=data_type, year=year, language=language
+                str(zip_path), str(output_dir), data_type=data_type, year=year, language=language, ticker_filter=ticker_filter
             )
         except Exception as exc:
             meta = {"zip_path": str(zip_path), "error": str(exc)}
@@ -180,6 +192,7 @@ def ingest_period(
     language: str = "en",
     resume: bool = True,
     max_workers: int = 1,
+    ticker_filter: Optional[set] = None,
 ) -> list[dict]:
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
@@ -196,7 +209,7 @@ def ingest_period(
         for year in years:
             results.extend(
                 ingest_year_from_root(
-                    input_root, output_dir, year, data_type, language, resume
+                    input_root, output_dir, year, data_type, language, resume, ticker_filter=ticker_filter
                 )
             )
         return results
@@ -207,7 +220,7 @@ def ingest_period(
         for year, months in months_by_year.items():
             zip_paths = discover_zips(input_root, data_type, [year], months=list(months))
             results.extend(
-                _process_zips(zip_paths, output_dir, data_type, year, language, resume)
+                _process_zips(zip_paths, output_dir, data_type, year, language, resume, ticker_filter=ticker_filter)
             )
         return results
 
@@ -220,7 +233,7 @@ def ingest_period(
             year_months = sorted(set(int(d[4:6]) for d in year_dates))
             zip_paths = discover_zips(input_root, data_type, [year], months=year_months, dates=year_dates)
             results.extend(
-                _process_zips(zip_paths, output_dir, data_type, year, language, resume)
+                _process_zips(zip_paths, output_dir, data_type, year, language, resume, ticker_filter=ticker_filter)
             )
         return results
 
@@ -234,6 +247,7 @@ def _process_zips(
     year: int,
     language: str = "en",
     resume: bool = True,
+    ticker_filter: Optional[set] = None,
 ) -> list[dict]:
     results: list[dict] = []
     output_root_path = Path(output_dir) / data_type
@@ -256,7 +270,7 @@ def _process_zips(
 
         try:
             meta = ingest_single_zip(
-                str(zip_path), str(output_dir), data_type=data_type, year=year, language=language
+                str(zip_path), str(output_dir), data_type=data_type, year=year, language=language, ticker_filter=ticker_filter
             )
         except Exception as exc:
             meta = {"zip_path": str(zip_path), "error": str(exc)}
@@ -266,26 +280,23 @@ def _process_zips(
     return results
 
 
-def ingest_event_windows(
-    year: int,
-    input_dir: str,
+def ingest_event_windows_period(
+    input_root: str,
     output_dir: str,
+    period: str,
     filter_csv: str,
     window_minutes: int = 120,
+    resume: bool = True,
+    max_workers: int = 1,
 ) -> None:
+    parsed = parse_period(period)
+    granularity = parsed["granularity"]
+    years = parsed["years"]
+
     fl = pl.read_csv(
         filter_csv,
         schema_overrides={"zip_date": pl.String, "event_date": pl.String, "ticker": pl.String},
     )
-
-    fl = fl.with_columns(
-        pl.col("event_date").str.to_date("%Y-%m-%d", strict=False).dt.year().alias("_event_year")
-    )
-    fl = fl.filter(pl.col("_event_year") == year).drop(["_event_year"])
-
-    if fl.is_empty():
-        logger.warning("No events for year %d in %s", year, filter_csv)
-        return
 
     fl = fl.with_columns(
         pl.col("reaction_anchor_dt")
@@ -294,24 +305,54 @@ def ingest_event_windows(
         .alias("reaction_anchor_dt")
     )
 
-    unique_zip_dates = sorted(fl["zip_date"].drop_nulls().unique().to_list())
+    period_dates_set: set[str] = set()
+    if granularity == "year":
+        for y in years:
+            fl_year = fl.filter(pl.col("zip_date").str.slice(0, 4) == str(y))
+            period_dates_set.update(fl_year["zip_date"].drop_nulls().unique().to_list())
+    elif granularity == "month":
+        months_by_year = parsed["months_by_year"]
+        for y, months in months_by_year.items():
+            month_prefixes = [f"{y}{m:02d}" for m in months]
+            fl_month = fl.filter(pl.col("zip_date").str.slice(0, 6).is_in(month_prefixes))
+            period_dates_set.update(fl_month["zip_date"].drop_nulls().unique().to_list())
+    elif granularity == "date":
+        dates = parsed["dates"]
+        fl_date = fl.filter(pl.col("zip_date").is_in(dates))
+        period_dates_set.update(fl_date["zip_date"].drop_nulls().unique().to_list())
+
+    if not period_dates_set:
+        logger.warning("No events in period %s found in %s", period, filter_csv)
+        return
+
+    unique_zip_dates = sorted(period_dates_set)
     total_dates = len(unique_zip_dates)
 
     out_root = Path(output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
-    corrupt_log_path = out_root / "corrupt_zips.txt"
-    corrupt_log = corrupt_log_path.open("a", encoding="utf-8")
+    _logs_dir = out_root / "_ingest_logs"
+    _logs_dir.mkdir(parents=True, exist_ok=True)
+    corrupt_log_path = _logs_dir / "corrupt_zips.txt"
 
     zip_counter = 0
+    skipped_by_resume = 0
 
-    try:
+    with corrupt_log_path.open("a", encoding="utf-8") as corrupt_log:
         for date_str in unique_zip_dates:
             zip_year = date_str[:4]
             zip_month = date_str[4:6]
             yearmonth = date_str[:6]
 
+            output_file = (
+                out_root / f"year={zip_year}" / f"month={zip_month}" / f"{date_str}.parquet"
+            )
+
+            if resume and output_file.exists():
+                skipped_by_resume += 1
+                continue
+
             zip_pattern = str(
-                Path(input_dir) / zip_year / yearmonth / f"HTICST120.{date_str}.*.zip"
+                Path(input_root) / zip_year / yearmonth / f"HTICST120.{date_str}.*.zip"
             )
             zip_files = sorted(_glob.glob(zip_pattern))
 
@@ -319,13 +360,21 @@ def ingest_event_windows(
                 logger.warning("No ZIPs found for %s: %s", date_str, zip_pattern)
                 continue
 
-            output_file = (
-                out_root / f"year={zip_year}" / f"month={zip_month}" / f"{date_str}.parquet"
-            )
-            if output_file.exists():
+            events_for_date = fl.filter(pl.col("zip_date") == date_str)
+
+            if events_for_date.is_empty():
                 continue
 
-            events_for_date = fl.filter(pl.col("zip_date") == date_str)
+            needed_tickers = set(
+                events_for_date["ticker"]
+                .str.strip_chars()
+                .str.split(".")
+                .list.first()
+                .str.zfill(4)
+                .to_list()
+            )
+
+            all_filtered_parts = []
 
             for zip_path in zip_files:
                 zip_counter += 1
@@ -334,29 +383,27 @@ def ingest_event_windows(
                 filtered = None
 
                 try:
-                    needed_tickers = set(
-                        events_for_date["ticker"]
-                        .str.strip_chars()
-                        .str.split(".")
-                        .list.first()
-                        .str.zfill(4)
-                        .to_list()
+                    raw_df = create_df(
+                        zip_path, language="en",
+                        auto_detect=False, data_type="individual_stock",
+                        year=int(zip_year),
+                        ticker_filter=needed_tickers,
                     )
-                    raw_df = create_df(zip_path, language="en", ticker_filter=needed_tickers)
+
+                    if raw_df.is_empty():
+                        continue
 
                     filtered = _filter_ticks_for_events(
                         raw_df, events_for_date, window_minutes=window_minutes
                     )
 
-                    matched = len(filtered)
-
-                    if matched > 0:
-                        write_event_window_parquet(filtered, output_dir)
+                    if not filtered.is_empty():
+                        all_filtered_parts.append(filtered)
 
                     if zip_counter % 50 == 0:
                         print(
-                            f"[{zip_counter}/{total_dates}] "
-                            f"Processing {zip_fname} - {matched:,} ticks matched"
+                            f"[{zip_counter}/{total_dates}+] "
+                            f"Processing {zip_fname} - {len(filtered):,} ticks matched"
                         )
 
                 except (zipfile.BadZipFile, EOFError) as exc:
@@ -373,5 +420,18 @@ def ingest_event_windows(
                     del raw_df, filtered
                     gc.collect()
 
-    finally:
-        corrupt_log.close()
+            if all_filtered_parts:
+                combined = pl.concat(all_filtered_parts, how="vertical")
+                internal_cols = [c for c in ["_tick_dt", "_stock_4"] if c in combined.columns]
+                if internal_cols:
+                    combined = combined.drop(internal_cols)
+                combined_rows = len(combined)
+                write_event_window_parquet(combined, output_dir)
+                del combined
+                gc.collect()
+                print(f"  {date_str}: {combined_rows:,} event-window ticks written")
+            else:
+                logger.info("  %s: no matching ticks after filtering", date_str)
+
+    if skipped_by_resume:
+        print(f"Resume: skipped {skipped_by_resume} already-processed dates")

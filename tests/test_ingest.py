@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tse_tick.ingest import ingest_single_zip, ingest_directory, ingest_year, ingest_event_windows
+from tse_tick.ingest import ingest_single_zip, ingest_directory, ingest_year, ingest_event_windows_period
 
 REAL_TICST120_ZIP = os.path.join(os.path.dirname(__file__), "..", "2022", "202202", "HTICST120.20220201.1.zip")
 
@@ -42,7 +42,7 @@ def _make_filter_csv(tmp_path: Path, date_str: str = "20170315") -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Working tests for ingest_event_windows
+# Working tests for ingest_event_windows_period
 # ---------------------------------------------------------------------------
 
 def test_ingest_event_windows_no_events_for_year(tmp_path):
@@ -54,10 +54,10 @@ def test_ingest_event_windows_no_events_for_year(tmp_path):
     in_dir.mkdir()
 
     # Request year 2020 but events are in 2017 → should exit cleanly
-    ingest_event_windows(
-        year=2020,
-        input_dir=str(in_dir),
+    ingest_event_windows_period(
+        input_root=str(in_dir),
         output_dir=str(out_dir),
+        period="2020",
         filter_csv=str(csv_path),
     )
 
@@ -78,15 +78,15 @@ def test_ingest_event_windows_corrupt_zip_logged(tmp_path):
     corrupt_zip = zip_dir / "HTICST120.20170315.1.zip"
     _make_corrupt_zip(corrupt_zip)
 
-    ingest_event_windows(
-        year=2017,
-        input_dir=str(tmp_path / "in"),
+    ingest_event_windows_period(
+        input_root=str(tmp_path / "in"),
         output_dir=str(out_dir),
+        period="2017",
         filter_csv=str(csv_path),
     )
 
-    log_path = out_dir / "corrupt_zips.txt"
-    assert log_path.exists(), "corrupt_zips.txt should be created"
+    log_path = out_dir / "_ingest_logs" / "corrupt_zips.txt"
+    assert log_path.exists(), "corrupt_zips.txt should be created in _ingest_logs/"
     logged = log_path.read_text(encoding="utf-8")
     assert "HTICST120.20170315.1.zip" in logged
 
@@ -100,10 +100,10 @@ def test_ingest_event_windows_missing_zip_skipped(tmp_path):
     in_dir.mkdir()
 
     # No actual ZIP files in input_dir
-    ingest_event_windows(
-        year=2017,
-        input_dir=str(in_dir),
+    ingest_event_windows_period(
+        input_root=str(in_dir),
         output_dir=str(out_dir),
+        period="2017",
         filter_csv=str(csv_path),
     )
 

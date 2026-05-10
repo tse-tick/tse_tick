@@ -5,7 +5,7 @@ import logging
 import sys
 from pathlib import Path
 
-from tse_tick.ingest import ingest_directory, ingest_year_from_root, ingest_period
+from tse_tick.ingest import ingest_directory, ingest_year_from_root, ingest_period, ingest_event_windows_period
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,15 @@ def _parse_months(months_str: str) -> list[int]:
     return sorted(set(result))
 
 
+def _parse_tickers(tickers_str: str) -> set[str]:
+    ticker_str = tickers_str.strip()
+    if ticker_str.startswith("@"):
+        filepath = ticker_str[1:]
+        with open(filepath, "r") as f:
+            return {line.strip() for line in f if line.strip()}
+    return {t.strip() for t in ticker_str.split(",") if t.strip()}
+
+
 def cmd_ingest(args: argparse.Namespace) -> None:
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if args.data_type not in valid_types:
@@ -55,27 +64,52 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     input_root = args.input_root
     output_root = args.output_root
 
+    if args.filter_csv and args.data_type != "individual_stock":
+        print("Error: --filter-csv is only supported with --data-type individual_stock", file=sys.stderr)
+        sys.exit(1)
+
     if args.period is not None:
-        print(f"Ingesting by period: {args.period}")
+        mode_str = "full"
+        if args.filter_csv:
+            mode_str = "event-window"
+        elif args.tickers:
+            mode_str = f"ticker-filter ({len(_parse_tickers(args.tickers))} tickers)"
+        print(f"Ingesting by period: {args.period}  [{mode_str}]")
         print(f"  Data type: {args.data_type}")
         print(f"  Output: {output_root}")
-        results = ingest_period(
-            input_root, output_root,
-            period=args.period,
-            data_type=args.data_type,
-            language=args.language,
-            resume=not args.no_resume,
-            max_workers=args.parallel,
-        )
-        success = sum(1 for r in results if "error" not in r)
-        failed = sum(1 for r in results if "error" in r)
-        print(f"Done: {success} succeeded, {failed} failed")
+
+        if args.filter_csv:
+            ingest_event_windows_period(
+                input_root, output_root,
+                period=args.period,
+                filter_csv=args.filter_csv,
+                window_minutes=args.window,
+                resume=not args.no_resume,
+                max_workers=args.parallel,
+            )
+            print("Done")
+        else:
+            ticker_filter = _parse_tickers(args.tickers) if args.tickers else None
+            results = ingest_period(
+                input_root, output_root,
+                period=args.period,
+                data_type=args.data_type,
+                language=args.language,
+                resume=not args.no_resume,
+                max_workers=args.parallel,
+                ticker_filter=ticker_filter,
+            )
+            success = sum(1 for r in results if "error" not in r)
+            failed = sum(1 for r in results if "error" in r)
+            print(f"Done: {success} succeeded, {failed} failed")
         return
 
     years = _parse_years(args.years) if args.years else [args.year] if args.year else None
     if years is None:
         print("Error: --years, --year, or --period is required", file=sys.stderr)
         sys.exit(1)
+
+    ticker_filter = _parse_tickers(args.tickers) if args.tickers else None
 
     if args.flat:
         print(f"Ingesting all ZIPs from flat directory: {input_root}")
@@ -86,6 +120,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             data_type=args.data_type,
             language=args.language,
             max_workers=args.parallel,
+            ticker_filter=ticker_filter,
         )
         success = sum(1 for r in results if "error" not in r)
         failed = sum(1 for r in results if "error" in r)
@@ -103,6 +138,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 data_type=args.data_type,
                 language=args.language,
                 resume=not args.no_resume,
+                ticker_filter=ticker_filter,
             )
             success = sum(1 for r in results if "error" not in r)
             failed = sum(1 for r in results if "error" in r)
@@ -182,6 +218,27 @@ def _build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity level",
+    )
+    ingest_parser.add_argument(
+        "--tickers",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated ticker codes to keep, or @file.txt with one per line. "
+            "When provided, only these tickers are included in output."
+        ),
+    )
+    ingest_parser.add_argument(
+        "--filter-csv",
+        type=str,
+        default=None,
+        help="Path to event filter CSV (enables event-window mode). Overrides --tickers.",
+    )
+    ingest_parser.add_argument(
+        "--window",
+        type=int,
+        default=120,
+        help="Window in minutes around each event (default: 120). Only used with --filter-csv.",
     )
 
     return parser
