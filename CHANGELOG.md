@@ -1,4 +1,4 @@
-# Changelog — NEEDS_tick
+# Changelog — tse_tick
 
 ## [0.2.1] - 2026-05-05
 ### Security

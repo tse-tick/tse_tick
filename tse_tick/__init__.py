@@ -1,5 +1,5 @@
 """
-NEEDS_tick - High-Performance Nikkei NEEDS Tick Data Processing
+tse_tick - High-Performance Nikkei NEEDS Tick Data Processing
 
 A Python package for processing Japanese Nikkei tick data with automatic
 data type detection, bilingual support, and a simplified API.
@@ -121,7 +121,7 @@ def get_supported_years():
 
 def get_info():
     info = f"""
-    NEEDS_tick v{__version__}
+    tse_tick v{__version__}
     ========================
 
     Author: {__author__}

@@ -1,4 +1,4 @@
-# NEEDS_tick
+# tse_tick
 
 A Python package for processing Nikkei NEEDS high-frequency tick data from the Tokyo Stock Exchange, powered by **Polars** and **DuckDB**.
 
@@ -7,8 +7,8 @@ Handles automatic data type detection, bilingual column support (English/Japanes
 ## Installation
 
 ```bash
-git clone https://github.com/jevwithwind/NEEDS_tick.git
-cd NEEDS_tick
+git clone https://github.com/jevwithwind/tse_tick.git
+cd tse_tick
 pip install -e .
 ```
 
