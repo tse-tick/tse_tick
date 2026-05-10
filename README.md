@@ -196,7 +196,7 @@ Each trading day has 1–N ZIP files (N varies). The CLI auto-discovers all matc
 | TICIT110 | `indices` | 23 | Index tick updates |
 | TICIS110 | `indices_summary` | 17 | Daily index summary |
 
-Year range: 2016–2023.
+Year range: 2016–2025.
 
 ## Parquet Output Layout
 
@@ -270,7 +270,7 @@ Built-in protections for local data processing:
 ## Test Status
 
 ```
-33 passed, 66 skipped — verified against real TICST120 data (4.5M rows, 95 cols, 7.7s)
+28 passed, 71 skipped — verified against real TICST120 data (4.5M rows, 95 cols, 7.7s)
 ```
 
 ## Dependencies
@@ -279,13 +279,13 @@ Built-in protections for local data processing:
 - **pyarrow** (≥12.0.0) — Parquet read/write and dataset API
 - **duckdb** (≥0.9.0) — SQL query interface over Parquet store
 
-## Authors
+## Authors and Contributions
 
-Originally developed as a collaborative project at Keio University, Nakatsuma Seminar:
+Developed at Keio University, Nakatsuma Seminar:
 
-- **Peter Romero** — initial architecture and package design
-- **Masataka Hayashi** — schema definitions and data validation
-- **Kazumi Li** ([@jevwithwind](https://github.com/jevwithwind)) — current maintainer
+- **Kazumi Li** — Schema definitions, package architecture, maintainer
+- **Peter Romero** — Original concept and initial project design
+- **Masataka Hayashi** — Initial pandas-based prototype
 
 ## License
 
