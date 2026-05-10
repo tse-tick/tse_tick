@@ -24,7 +24,7 @@ tse_tick/                          # Project root
 ├── CHANGELOG.md                     # v0.1.0 → v0.2.0 → v0.2.1 history
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
-├── structure_guide.md              # THIS FILE — LLM-oriented architecture reference
+├── ARCHITECTURE.md              # THIS FILE — package architecture reference
 ├── LICENSE                          # MIT
 ├── .gitignore                       # Ignores: *.zip, *.parquet, *.csv, data/, output/, descriptions/
 ├── Dockerfile                       # Container image (python:3.11-slim, pip installs polars/pyarrow/duckdb)
