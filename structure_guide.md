@@ -1,15 +1,15 @@
-# NEEDS_tick — LLM Reference Guide
+# tse_tick — LLM Reference Guide
 
 ## 1. Project Identity
 
 | Property | Value |
 |----------|-------|
-| Package | `tse_tick` (pip name: `NEEDS_tick`) |
+| Package | `tse_tick` |
 | Version | 0.2.1 (Alpha) |
 | Language | Python 3.8+ |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | `polars>=0.20.0`, `pyarrow>=12.0.0`, `duckdb>=0.9.0` |
-| Repository | `https://github.com/jevwithwind/NEEDS_tick.git` |
+| Repository | `https://github.com/jevwithwind/tse_tick.git` |
 | Data | Nikkei NEEDS high-frequency tick data (Tokyo Stock Exchange, proprietary) |
 | Year range | 2016–2023 |
 | Architecture | Two-stage: **INGEST** (ZIP→Parquet) → **QUERY** (DuckDB + features) |
@@ -19,7 +19,7 @@
 ## 2. Directory Structure
 
 ```
-NEEDS_tick/                          # Project root
+tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
 ├── CHANGELOG.md                     # v0.1.0 → v0.2.0 → v0.2.1 history
 ├── README.md                        # User-facing docs (installation, quick start, usage)
