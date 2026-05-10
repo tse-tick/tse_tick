@@ -280,7 +280,7 @@ extract_event_window(data_dir, ticker, event_date, event_time, before, after)
 
 **B. Event list from raw ZIPs (filter-based):**
 ```
-ingest_event_windows(year, input_dir, output_dir, filter_csv, window_minutes)
+ingest_event_windows_period(input_root, output_dir, period, filter_csv, window_minutes)
     ├─ Reads event filter CSV (ticker, event_date, reaction_anchor_dt, zip_date)
     ├─ For each date with events:
     │   ├─ Discovers ZIPs by glob pattern

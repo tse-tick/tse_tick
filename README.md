@@ -98,6 +98,31 @@ tse-tick ingest \
 
 # Skip resume (reprocess all files)
 tse-tick ingest --no-resume ...
+
+# Tick-specific ingest: keep only specified stocks
+tse-tick ingest \
+    --data-type individual_stock \
+    --period 2024 \
+    --input-root /Volumes/TSE_DATA \
+    --output-root /Volumes/PARQUET_STORE \
+    --tickers 7203,6758,9984
+
+# Ticker filter from file (one ticker per line)
+tse-tick ingest \
+    --data-type individual_stock \
+    --period 2024 \
+    --input-root /Volumes/TSE_DATA \
+    --output-root /Volumes/PARQUET_STORE \
+    --tickers @ticker_list.txt
+
+# Event-window filtered ingest (±120 min around each event)
+tse-tick ingest \
+    --data-type individual_stock \
+    --period 20250106-20250131 \
+    --input-root /Volumes/TSE_DATA \
+    --output-root /Volumes/PARQUET_STORE \
+    --filter-csv event_filter_list.csv \
+    --window 120
 ```
 
 | Flag | Description |
@@ -108,6 +133,9 @@ tse-tick ingest --no-resume ...
 | `--flat` | Treat input-root as a flat folder of ZIPs (no year/month subdirectories) |
 | `--no-resume` | Reprocess all files even if output exists |
 | `--parallel` | Number of parallel worker processes (max 8) |
+| `--tickers` | Comma-separated ticker codes, or `@file.txt` with one per line. Keeps only those tickers in output. |
+| `--filter-csv` | Path to event filter CSV (columns: ticker, event_date, event_time, event_type, session_type, reaction_anchor_dt, zip_date). Enables event-window mode. Overrides `--tickers`. |
+| `--window` | Minutes for ±window around each event's `reaction_anchor_dt` (default: 120). Only used with `--filter-csv`. |
 
 ### Query Parquet Store
 
