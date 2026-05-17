@@ -1,5 +1,33 @@
 # Changelog — tse_tick
 
+## [0.2.2] - 2026-05-18
+
+### Added
+- `--tickers` flag: filter at read time by stock code (comma list or `@file.txt`)
+- `--filter-csv` flag: extract ±N minute windows around corporate events from an external CSV
+- `--window` flag: configurable window size in minutes (default 120, used with `--filter-csv`)
+- Event-window mode handles after-hours reaction-anchor shifting via `zip_date` column
+- Event-window output tags ticks with `event_ticker`, `event_type`, `session_type`, `reaction_anchor`
+- `CITATION.cff` for academic citation (BibTeX-compatible)
+- `ARCHITECTURE.md` — package architecture reference (renamed from `structure_guide.md`)
+
+### Fixed
+- **Multi-era format audit**: verified all 4 data types across 2016/2017-2019/2020-2025 eras against 9 PDF manuals
+- **`parse_line()` byte offset bug**: fixed off-by-1 for `price` and `volume` fields in 2016 TICIT010 fixed-width parser (`core.py:42,45`). Was reading 1 byte too late, silently truncating the most significant digit for large values.
+- **Internal column leak**: `_tick_dt` and `_stock_4` internal filter columns are now dropped before writing Parquet output (`ingest.py:425-428`)
+- **`corrupt_zips.txt` relocated** to `_ingest_logs/` subdirectory to prevent PyArrow from trying to read it as a Parquet file
+- `get_supported_years()` now returns `(2016, datetime.now().year)` dynamically instead of hardcoded `(2016, 2024)`
+
+### Changed
+- **README rewritten** — publication-quality with full CLI reference, Python API docs, data type table, multi-era format support, security table, and contributing guide
+- Project renamed from `NEEDS_tick` to `tse_tick` (author list reordered, email removed from `pyproject.toml`)
+- `scripts/ingest_event_windows.py` deprecated with runtime `DeprecationWarning` — use `tse-tick ingest --filter-csv` instead
+- Author section unified across `__init__.py`, `pyproject.toml`, `README.md`
+
+### Removed
+- Docker files (`Dockerfile`, `docker-compose.yml`) — not needed for a pip-installable Python package
+- `setuptools_scm` from build dependencies (version is hardcoded)
+
 ## [0.2.1] - 2026-05-05
 ### Security
 - ZIP bomb protection: max 5 GB decompressed, max 5 entries, 100:1 compression ratio cap (`enhanced.py`)

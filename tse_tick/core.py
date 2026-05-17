@@ -39,10 +39,10 @@ def parse_line(line: bytes, kind="indices_summary"):
         time = text[30:34]
         record_type2 = text[34:36]
         management_number = text[36:40]
-        price = text[41:49]
+        price = text[40:49]
         execution_type = text[49:52]
         ayumi_flag = text[52:55]
-        volume = text[56:66]
+        volume = text[55:66]
         volume_flag = text[66:69]
 
         rec = {

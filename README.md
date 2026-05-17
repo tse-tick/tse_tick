@@ -1,8 +1,27 @@
 # tse_tick
 
-A Python package for processing Nikkei NEEDS high-frequency tick data from the Tokyo Stock Exchange, powered by **Polars** and **DuckDB**.
+A Python library for parsing, filtering, and querying Nikkei NEEDS tick data from the Tokyo Stock Exchange.
 
-Handles automatic data type detection, bilingual column support (English/Japanese), and cleaning for four NEEDS data formats: TICST120 (individual stock ticks), TICSS110 (stock summary), TICIT110 (index ticks), and TICIS110 (index summary).
+**Who it's for:** Researchers working with NEEDS tick data who need to convert thousands of zipped CSVs into queryable Parquet stores, filter by ticker or event windows, and handle format changes across historical eras.
+
+**What it solves:** NEEDS data is delivered as daily ZIP files (1–27 parts per day) with era-dependent schemas — 2016 used fixed-width records for indices, 2017+ switched to CSV, and individual stocks have 95 columns with complex quote-book nesting. This library detects the format automatically, validates for security, parses everything into clean DataFrames, and writes Hive-partitioned Parquet.
+
+**Data access required:** This tool does NOT provide NEEDS data itself. You must have an institutional subscription (Nikkei NEEDS) and access to the raw TICST120/TICSS110/TICIT110/TICIS110 ZIP files.
+
+---
+
+## Features
+
+- **4 data types** — TICST120 (individual stock ticks, 95 cols), TICSS110 (daily stock summary, 83 cols), TICIT110 (index ticks), TICIS110 (daily index summary)
+- **Multi-era format support** — 2016 fixed-width (TICIT010), 2017-2019, and 2020-2025 CSV formats, auto-detected from the ZIP filename
+- **Polars backend** — fast CSV parsing, vectorized cleaning, memory-efficient
+- **CLI batch ingestion** — `tse-tick ingest` converts entire years/months/date ranges to partitioned Parquet
+- **Ticker filtering** (`--tickers`) — keep only specific stock codes at read time
+- **Event-window extraction** (`--filter-csv`) — extract ±N minute windows around corporate events with automatic after-hours reaction-anchor shifting
+- **Bilingual columns** — English and Japanese column names via `--language en|jp`
+- **Security guards** — ZIP bomb detection (5 GB max decompressed, 100:1 compression ratio cap, max 5 entries), path traversal prevention, query row limits (10M)
+
+---
 
 ## Installation
 
@@ -12,23 +31,24 @@ cd tse_tick
 pip install -e .
 ```
 
+Requires Python ≥3.8 and the dependencies listed in `pyproject.toml` (polars, pyarrow, duckdb).
+
+---
+
 ## Quick Start
 
-### Python API
+### Python API — load a single ZIP
 
 ```python
 import tse_tick
 
-# Load individual stock tick data
-df = tse_tick.create_df("path/to/HTICST120.20230104.1.zip", language='en')
+# Load individual stock tick data (auto-detects data type and year)
+df = tse_tick.create_df("path/to/HTICST120.20230104.1.zip", language="en")
 
 # Load with Japanese column names
-df_jp = tse_tick.create_df("path/to/HTICST120.20230104.1.zip", language='jp')
+df_jp = tse_tick.create_df("path/to/HTICST120.20230104.1.zip", language="jp")
 
-# Export to CSV
-tse_tick.export_to_csv("path/to/HTICST120.20230104.1.zip", output_path="output.csv")
-
-# Sample first 1000 rows
+# Sample first 1000 rows only
 df_sample = tse_tick.create_df("path/to/HTICST120.20230104.1.zip", rows=1000)
 
 # Explicit data type and year (skip auto-detection)
@@ -40,196 +60,70 @@ df = tse_tick.create_df(
 )
 ```
 
-### CLI Ingest (Batch ZIP → Parquet)
-
-Convert entire years, months, or specific date ranges of data into a partitioned Parquet store with one command:
+### CLI — batch ingest to Parquet
 
 ```bash
-# Ingest a specific date range (YYYYMMDD-YYYYMMDD)
+# Ingest a date range
 tse-tick ingest \
     --data-type individual_stock \
     --period 20240201-20240205 \
-    --input-root /Volumes/TSE_DATA \
-    --output-root /Volumes/PARQUET_STORE
+    --input-root /path/to/TSE_DATA \
+    --output-root /path/to/PARQUET_STORE
 
-# Ingest a month range (YYYYMM-YYYYMM)
-tse-tick ingest \
-    --data-type individual_stock \
-    --period 202401-202403 \
-    --input-root /Volumes/TSE_DATA \
-    --output-root /Volumes/PARQUET_STORE
-
-# Ingest a full year (YYYY)
+# Ingest a full year
 tse-tick ingest \
     --data-type individual_stock \
     --period 2024 \
-    --input-root /Volumes/TSE_DATA \
-    --output-root /Volumes/PARQUET_STORE
+    --input-root /path/to/TSE_DATA \
+    --output-root /path/to/PARQUET_STORE
 
-# Legacy: Ingest all TICST120 data for 2016-2023 using --years
-tse-tick ingest \
-    --data-type individual_stock \
-    --years 2016-2023 \
-    --input-root /Volumes/TSE_DATA \
-    --output-root /Volumes/PARQUET_STORE
-
-# Legacy: Ingest a single year using --year
-tse-tick ingest \
-    --data-type indices \
-    --year 2022 \
-    --input-root /Volumes/TSE_DATA \
-    --output-root /Volumes/PARQUET_STORE
-
-# Ingest a flat directory of ZIPs
-tse-tick ingest \
-    --data-type stock_summary \
-    --year 2023 \
-    --input-root /data/zips/ \
-    --output-root /store/ \
-    --flat
-
-# Parallel ingest with 4 workers
-tse-tick ingest \
-    --data-type individual_stock \
-    --years 2020-2023 \
-    --input-root /data/ \
-    --output-root /store/ \
-    --parallel 4
-
-# Skip resume (reprocess all files)
-tse-tick ingest --no-resume ...
-
-# Tick-specific ingest: keep only specified stocks
+# Ticker-filtered ingest (keep only specified stocks)
 tse-tick ingest \
     --data-type individual_stock \
     --period 2024 \
-    --input-root /Volumes/TSE_DATA \
-    --output-root /Volumes/PARQUET_STORE \
+    --input-root /path/to/TSE_DATA \
+    --output-root /path/to/PARQUET_STORE \
     --tickers 7203,6758,9984
 
 # Ticker filter from file (one ticker per line)
 tse-tick ingest \
     --data-type individual_stock \
     --period 2024 \
-    --input-root /Volumes/TSE_DATA \
-    --output-root /Volumes/PARQUET_STORE \
+    --input-root /path/to/TSE_DATA \
+    --output-root /path/to/PARQUET_STORE \
     --tickers @ticker_list.txt
 
 # Event-window filtered ingest (±120 min around each event)
 tse-tick ingest \
     --data-type individual_stock \
     --period 20250106-20250131 \
-    --input-root /Volumes/TSE_DATA \
-    --output-root /Volumes/PARQUET_STORE \
+    --input-root /path/to/TSE_DATA \
+    --output-root /path/to/PARQUET_STORE \
     --filter-csv event_filter_list.csv \
     --window 120
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--period` | Date range: `YYYY` (year), `YYYYMM-YYYYMM` (month range), or `YYYYMMDD-YYYYMMDD` (day range). Takes precedence over `--years`/`--year`. |
-| `--years` | Legacy: year range like `"2016-2023"` or `"2018,2019,2020"` |
-| `--year` | Legacy: single year |
-| `--flat` | Treat input-root as a flat folder of ZIPs (no year/month subdirectories) |
-| `--no-resume` | Reprocess all files even if output exists |
-| `--parallel` | Number of parallel worker processes (max 8) |
-| `--tickers` | Comma-separated ticker codes, or `@file.txt` with one per line. Keeps only those tickers in output. |
-| `--filter-csv` | Path to event filter CSV (columns: ticker, event_date, event_time, event_type, session_type, reaction_anchor_dt, zip_date). Enables event-window mode. Overrides `--tickers`. |
-| `--window` | Minutes for ±window around each event's `reaction_anchor_dt` (default: 120). Only used with `--filter-csv`. |
-
-### Query Parquet Store
+### Query the Parquet store
 
 ```python
 import tse_tick
 
-# Query Nikkei 225 ticks for Jan 4, 2022
+# Query specific ticker and date
 df = tse_tick.query_ticks(
-    "/Volumes/PARQUET_STORE",
-    data_type="indices",
-    ticker=101,
-    date="20220104",
+    "/path/to/PARQUET_STORE",
+    data_type="individual_stock",
+    ticker=7203,
+    date="20240201",
     start_time="09:00:00",
     end_time="11:30:00",
 )
 
-# Get available dates
-dates = tse_tick.get_available_dates("/Volumes/PARQUET_STORE")
-
-# Extract event window around a disclosure
-df_window = tse_tick.extract_event_window(
-    "/Volumes/PARQUET_STORE",
-    ticker=7203,
-    event_date="20220728",
-    event_time="15:00:00",
-    before="120min",
-    after="120min",
-)
+# Get available dates and tickers
+dates = tse_tick.get_available_dates("/path/to/PARQUET_STORE")
+tickers = tse_tick.get_available_tickers("/path/to/PARQUET_STORE", date="20240201")
 ```
 
-## Expected Folder Structure
-
-The CLI expects NEEDS data organized as delivered by Nikkei:
-
-```
-{input_root}/
-  2016/
-    201601/                       # yearmonth
-      HTICST120.20160104.1.zip
-      HTICST120.20160104.2.zip
-      HTICST120.20160105.1.zip
-      ...
-    201602/
-    ...
-  2017/
-    201701/
-    ...
-```
-
-Each trading day has 1–N ZIP files (N varies). The CLI auto-discovers all matching files.
-
-## Supported Data Types
-
-| Code | Type | Fields | Description |
-|------|------|--------|-------------|
-| TICST120 | `individual_stock` | 95 | Tick-level execution, bid/ask ×10, volume |
-| TICSS110 | `stock_summary` | 82 | Daily OHLC, VWAP, session splits |
-| TICIT110 | `indices` | 23 | Index tick updates |
-| TICIS110 | `indices_summary` | 17 | Daily index summary |
-
-Year range: 2016–2025.
-
-## Parquet Output Layout
-
-After ingest, data is stored as Hive-partitioned Parquet:
-
-```
-{output_root}/
-  individual_stock/
-    date=20230104/
-      ticker=7203.parquet
-      ticker=6758.parquet
-      ...
-    date=20230105/
-    ...
-  indices/
-    date=20220104/
-      ticker=101.parquet
-      ticker=113.parquet
-    ...
-```
-
-Event-window data uses a separate layout:
-
-```
-{output_root}/
-  year=2017/
-    month=03/
-      20170315.parquet
-      20170316.parquet
-    ...
-```
-
-## Features
+### Feature extraction
 
 ```python
 import tse_tick
@@ -240,17 +134,144 @@ df = tse_tick.query_ticks("/store", ticker=7203, date="20220201")
 spread = tse_tick.compute_spread(df)
 
 # Order-book depth (10 levels per side)
-depth = tse_tick.compute_depth(df, levels=5, side='both')
+depth = tse_tick.compute_depth(df, levels=5, side="both")
 
 # Order flow imbalance over rolling window
-ofi = tse_tick.compute_flow_imbalance(df, window='5min')
-
-# Realized or Garman-Klass volatility
-vol = tse_tick.compute_volatility(df, window='5min', method='realized')
+ofi = tse_tick.compute_flow_imbalance(df, window="5min")
 
 # All features in one pass
 features = tse_tick.compute_all_features(df)
 ```
+
+---
+
+## Data Types
+
+| Code | Internal Name | Fields | Description |
+|------|--------------|--------|-------------|
+| TICST120 | `individual_stock` | 95 | Tick-level executions, 10-level bid/ask quotes, volume |
+| TICSS110 | `stock_summary` | 83 | Daily OHLC, VWAP, session splits, quote statistics |
+| TICIT110 | `indices` | 23 (15 in 2016) | Index tick updates (Nikkei 225, TOPIX, etc.) |
+| TICIS110 | `indices_summary` | 17 | Daily index summary prices |
+
+---
+
+## Multi-Era Format Support
+
+The data format changed across three eras. The library detects the era automatically from the ZIP filename (the year) and applies the correct parser.
+
+| Era | Individual Stocks | Stock Summary | Index Ticks | Index Summary |
+|-----|:---:|:---:|:---:|:---:|
+| **2016** | CSV, 95 cols | CSV, 83 cols | **Fixed-width (69 bytes)** | CSV, 17 cols |
+| **2017-2019** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 17 cols |
+| **2020-2025** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 17 cols |
+
+No user action needed — if your ZIP filename contains `2016`, the fixed-width parser is used automatically for index data.
+
+---
+
+## Expected Input Layout
+
+The CLI expects NEEDS data organized as delivered by Nikkei:
+
+```
+{input_root}/
+  2016/
+    201601/
+      HTICST120.20160104.1.zip
+      HTICST120.20160104.2.zip
+      ...
+    201602/
+    ...
+  2017/
+    201701/
+    ...
+```
+
+---
+
+## Parquet Output Layout
+
+Standard ingest produces Hive-partitioned Parquet per ticker per date:
+
+```
+{output_root}/
+  individual_stock/
+    date=20230104/
+      ticker=7203.parquet
+      ticker=6758.parquet
+      ...
+```
+
+Event-window filtered ingest writes per-date files:
+
+```
+{output_root}/
+  year=2025/
+    month=01/
+      20250106.parquet
+      20250107.parquet
+      ...
+```
+
+---
+
+## CLI Reference
+
+| Flag | Description |
+|------|-------------|
+| `--data-type` (required) | `individual_stock`, `stock_summary`, `indices`, or `indices_summary` |
+| `--input-root` (required) | Root directory with NEEDS ZIPs in `{year}/{yearmonth}/` layout |
+| `--output-root` (required) | Root directory for Parquet output |
+| `--period` | Date range: `YYYY`, `YYYYMM-YYYYMM`, or `YYYYMMDD-YYYYMMDD` |
+| `--language` | Column name language: `en` (default) or `jp` |
+| `--parallel` | Number of parallel workers (default 1, max 8) |
+| `--no-resume` | Disable resume (reprocess dates even if output exists) |
+| `--tickers` | Comma-separated codes or `@file.txt` with one per line. Keeps only these stocks. |
+| `--filter-csv` | Path to event filter CSV. Enables event-window mode. Overrides `--tickers`. |
+| `--window` | Window minutes around each event's reaction anchor (default 120). Only with `--filter-csv`. |
+| `--flat` | Treat input-root as a flat directory (no year/month subdirectories) |
+| `--years` / `--year` | Legacy flags for specifying year(s) directly |
+
+### Event Filter CSV Format
+
+When using `--filter-csv`, the file must have these columns:
+
+| Column | Description |
+|--------|-------------|
+| `ticker` | 4-digit stock code (string) |
+| `event_date` | Original event date `YYYY-MM-DD` |
+| `event_time` | Original event time `HH:MM` (JST) |
+| `event_type` | Category (`earnings`, `buyback`, `dividend`, etc.) |
+| `session_type` | `intraday` or `after_hours` |
+| `reaction_anchor_dt` | Datetime to center the window on `YYYY-MM-DD HH:MM` (JST) |
+| `zip_date` | TICST120 date `YYYYMMDD` whose ZIP contains the relevant ticks |
+
+For after-hours events, `reaction_anchor_dt` shifts to the next trading day's 09:00 open, and `zip_date` points to that next day's ZIP file. This is critical: centering on the event time (e.g., 15:30) would produce empty windows because the market is closed.
+
+---
+
+## Python API Reference
+
+### `create_df(folder_path, language="en", rows=None, auto_detect=True, data_type=None, year=None, ticker_filter=None)`
+
+Load and clean tick data from a ZIP file or directory of ZIP files.
+
+- `folder_path` — path to a `.zip` file or directory of `.zip` files
+- `language` — `"en"` or `"jp"` for column names
+- `rows` — max rows to return
+- `auto_detect` — if `True`, detect data type and year from path. If `False`, must provide `data_type` and `year`
+- `data_type` — `"individual_stock"`, `"stock_summary"`, `"indices"`, or `"indices_summary"`
+- `year` — data year (e.g., 2023)
+- `ticker_filter` — optional `set` of 4-digit stock codes to pre-filter at line level
+
+Returns a Polars DataFrame with English or Japanese column names.
+
+### `export_to_csv(folder_path, output_path=None, language="en", rows=None)`
+
+Load and export to CSV. If `output_path` is `None`, generates a filename.
+
+---
 
 ## Security
 
@@ -265,31 +286,8 @@ Built-in protections for local data processing:
 | Query row limit | 10,000,000 |
 | Path traversal prevention | Resolved path validation |
 | SQL injection prevention | Identifier/date/time format validation |
-| Traceback leakage | Errors logged, not printed to stdout |
 
-## Test Status
-
-```
-28 passed, 71 skipped — verified against real TICST120 data (4.5M rows, 95 cols, 7.7s)
-```
-
-## Dependencies
-
-- **polars** (≥0.20.0) — DataFrame engine
-- **pyarrow** (≥12.0.0) — Parquet read/write and dataset API
-- **duckdb** (≥0.9.0) — SQL query interface over Parquet store
-
-## Authors and Contributions
-
-Developed at Keio University, Nakatsuma Seminar:
-
-- **Kazumi Li** — Schema definitions, package architecture, maintainer
-- **Peter Romero** — Original concept and initial project design
-- **Masataka Hayashi** — Initial pandas-based prototype
-
-## License
-
-[MIT](LICENSE)
+---
 
 ## Contributing
 
@@ -300,3 +298,31 @@ Contributions are welcome. Please open an issue or submit a pull request.
 3. Commit your changes (`git commit -m 'Add your feature'`)
 4. Push to the branch (`git push origin feature/your-feature`)
 5. Open a Pull Request
+
+Development setup:
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+---
+
+## Citation
+
+If you use this software in your research, please cite it. A `CITATION.cff` file is included in the repository.
+
+---
+
+## License
+
+[MIT](LICENSE)
+
+---
+
+## Authors
+
+- **Kazumi Li** — Schema definitions, package architecture, current maintainer
+- **Peter Romero** — Original concept and initial project design
+- **Masataka Hayashi** — Initial pandas-based prototype
+
+Developed at Keio University, Nakatsuma Seminar.
