@@ -3,7 +3,6 @@
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 from tse_tick.ingest import ingest_directory, ingest_year_from_root, ingest_period, ingest_event_windows_period
 
@@ -11,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_years(years_str: str) -> list[int]:
-    result = []
+    result: list[int] = []
     for part in years_str.split(","):
         part = part.strip()
         if "-" in part:
@@ -29,7 +28,7 @@ def _parse_years(years_str: str) -> list[int]:
 
 
 def _parse_months(months_str: str) -> list[int]:
-    result = []
+    result: list[int] = []
     for part in months_str.split(","):
         part = part.strip()
         if "-" in part:

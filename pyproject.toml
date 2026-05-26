@@ -7,8 +7,8 @@ name = "tse_tick"
 version = "0.2.2"
 description = "High-performance Nikkei NEEDS tick data processing with Polars"
 readme = "README.md"
-requires-python = ">=3.8"
-license = {text = "MIT"}
+requires-python = ">=3.9"
+license = "MIT"
 authors = [
     {name = "Kazumi Li", email = "kaiwenli@keio.jp"},
     {name = "Peter Romero"},
@@ -36,23 +36,24 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Office/Business :: Financial",
     "Topic :: Scientific/Engineering",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 dependencies = [
     "polars>=0.20.0",
     "pyarrow>=12.0.0",
-    "duckdb>=0.9.0",
 ]
 
 [project.optional-dependencies]
+query = [
+    "duckdb>=0.9.0",
+]
 dev = [
     "pandas>=1.5.0",
     "pytest>=7.0",
@@ -82,15 +83,16 @@ Repository = "https://github.com/jevwithwind/tse_tick"
 Changelog = "https://github.com/jevwithwind/tse_tick/blob/main/CHANGELOG.md"
 
 # Tool configurations
-[tool.setuptools]
-packages = ["tse_tick"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tse_tick*"]
 
 [tool.setuptools.package-data]
 tse_tick = ["py.typed"]
 
 [tool.black]
 line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311']
+target-version = ['py39', 'py310', 'py311', 'py312']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -135,8 +137,8 @@ exclude_lines = [
 ]
 
 [tool.mypy]
-python_version = "3.8"
-warn_return_any = true
+python_version = "3.10"
+warn_return_any = false
 warn_unused_configs = true
 disallow_untyped_defs = false
 disallow_incomplete_defs = false

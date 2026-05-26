@@ -26,12 +26,24 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 ## Installation
 
 ```bash
-git clone https://github.com/jevwithwind/tse_tick.git
-cd tse_tick
-pip install -e .
+pip install tse-tick
 ```
 
-Requires Python ≥3.8 and the dependencies listed in `pyproject.toml` (polars, pyarrow, duckdb).
+For DuckDB-powered Parquet query support:
+
+```bash
+pip install tse-tick[query]
+```
+
+Development install from source:
+
+```bash
+git clone https://github.com/jevwithwind/tse_tick.git
+cd tse_tick
+pip install -e ".[dev]"
+```
+
+Requires Python ≥3.9 and the dependencies listed in `pyproject.toml` (polars, pyarrow). Optional: `pip install tse-tick[query]` for DuckDB-powered Parquet queries.
 
 ---
 

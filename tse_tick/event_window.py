@@ -110,9 +110,13 @@ def _filter_ticks_for_events(
         result_parts.append(matching)
 
     if not result_parts:
-        return raw_df.clear()
-
-    return pl.concat(result_parts, how="vertical")
+        result = raw_df.clear()
+    else:
+        result = pl.concat(result_parts, how="vertical")
+    internal_cols = [c for c in ["_tick_dt", "_stock_4"] if c in result.columns]
+    if internal_cols:
+        result = result.drop(internal_cols)
+    return result
 
 
 def extract_event_window(

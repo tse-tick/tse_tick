@@ -1,14 +1,9 @@
 # tse_tick/enhanced.py
-_MAX_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
-_MAX_ZIP_ENTRIES = 5
-
 import datetime
 import re
 import zipfile
 import io
 import glob
-import warnings
-import gc
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -22,7 +17,6 @@ from .schemas import (
     get_schema_summary_83,
     get_schema_indices_15,
     get_schema_indices_23,
-    get_schema_indices_summary,
     get_japanese_column_mapping,
 )
 

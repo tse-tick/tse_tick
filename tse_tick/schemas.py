@@ -1,5 +1,6 @@
 # tse_tick/schemas.py
 
+
 def get_schema_individual_stock_95() -> list:
     """Schema for TICST120 (95 fields) - extended quote version"""
     base = [
@@ -10,48 +11,47 @@ def get_schema_individual_stock_95() -> list:
         "Sell Quote 1 Best", "Sell Quote Vol 1", "Sell Quote Flag 1",
         "Buy Quote 1 Best", "Buy Quote Vol 1", "Buy Quote Flag 1"
     ]
-    
+
     extended = [
         "Sell Limit Quote", "Sell Limit Vol", "Sell Limit Flag",
         "Sell Market Quote", "Sell Market Vol", "Sell Market Flag"
     ]
-    
-    # Sell quotes 2-10
+
     for i in range(2, 11):
         extended.extend([
             f"Sell Quote {i}",
             f"Sell Quote Vol {i}",
             f"Sell Quote Flag {i}"
         ])
-    
+
     extended.extend([
         "Sell Quote OVER", "Sell Quote Vol OVER", "Sell Quote Flag OVER"
     ])
-    
-    # Buy side
+
     extended.extend([
         "Buy Limit Quote", "Buy Limit Vol", "Buy Limit Flag",
         "Buy Market Quote", "Buy Market Vol", "Buy Market Flag"
     ])
-    
+
     for i in range(2, 11):
         extended.extend([
             f"Buy Quote {i}",
             f"Buy Quote Vol {i}",
             f"Buy Quote Flag {i}"
         ])
-    
+
     extended.extend([
         "Buy Quote UNDER", "Buy Quote Vol UNDER", "Buy Quote Flag UNDER"
     ])
-    
+
     return base + extended
+
 
 def get_schema_summary_83() -> list:
     """Schema for TICSS110 (83 fields)"""
     return [
-        "Record Type", "Data Date", "Identification Flag", "Exchange Code", "Security Type", 
-        "Stock Code","Trading Unit", "Issued Shares",
+        "Record Type", "Data Date", "Identification Flag", "Exchange Code", "Security Type",
+        "Stock Code", "Trading Unit", "Issued Shares",
         "Executions ≤3 units", "Executions 3<x≤6 units", "Executions 6<x≤9 units",
         "Executions 9<x≤29 units", "Executions 29<x≤49 units", "Executions 49<x≤99 units",
         "Executions 99<x≤199 units", "Executions 199<x≤299 units",
@@ -79,24 +79,26 @@ def get_schema_summary_83() -> list:
         "PM Buy Quote Execution Vol", "PM Buy Quote Execution Amt", "PM Buy Quote Execution Cnt"
     ]
 
+
 def get_schema_indices_15() -> list:
     """Schema for TICIT010 (15 fields)"""
     return [
-    "Record Type", "Data Date", "Identification Flag", "Exchange Code",
-    "Security Type", "Session", "Index Code", "Execution Time",
-    "Record Type (Executions/Quotes)", "Management Number", "Index Value",
-    "Execution Type", "Ayumi Flag", "Volume", "Volume Flag",
-]
+        "Record Type", "Data Date", "Identification Flag", "Exchange Code",
+        "Security Type", "Session", "Index Code", "Execution Time",
+        "Record Type (Executions/Quotes)", "Management Number", "Index Value",
+        "Execution Type", "Ayumi Flag", "Volume", "Volume Flag",
+    ]
+
 
 def get_schema_indices_23() -> list:
     """Schema for TICIT110 (23 fields)"""
     return [
-    "Record Type", "Data Date", "Exchange Code", "Security Type", "Session",
-    "Index Code", "Execution Time", "Reserved 1", "Reserved 2", "Update Time",
-    "Management Number", "Index Value", "Execution Type", "Ayumi Flag",
-    "Reserved 3", "Reserved 4", "Reserved 5", "Reserved 6", "Reserved 7",
-    "Reserved 8", "Reserved 9", "Reserved 10", "Reserved 11",
-]
+        "Record Type", "Data Date", "Exchange Code", "Security Type", "Session",
+        "Index Code", "Execution Time", "Reserved 1", "Reserved 2", "Update Time",
+        "Management Number", "Index Value", "Execution Type", "Ayumi Flag",
+        "Reserved 3", "Reserved 4", "Reserved 5", "Reserved 6", "Reserved 7",
+        "Reserved 8", "Reserved 9", "Reserved 10", "Reserved 11",
+    ]
 
 
 def get_schema_indices_summary() -> list:
@@ -108,6 +110,7 @@ def get_schema_indices_summary() -> list:
         "PM Opening Price", "PM Opening Time", "PM High Price", "PM Low Price",
         "PM Close Price", "PM Close Time"
     ]
+
 
 def get_japanese_column_mapping() -> dict:
     """
@@ -184,7 +187,6 @@ def get_japanese_column_mapping() -> dict:
         "Buy Quote Flag 1": "買い気配フラグ１",
 
         # ========== Extended Quotes (95-field schema) ==========
-        # Sell Limit/Market
         "Sell Limit Quote": "売り成行気配",
         "Sell Limit Vol": "売り成行数量",
         "Sell Limit Flag": "売り成行フラグ",
@@ -192,7 +194,6 @@ def get_japanese_column_mapping() -> dict:
         "Sell Market Vol": "売り特別数量",
         "Sell Market Flag": "売り特別フラグ",
 
-        # Sell Quotes 2-10
         "Sell Quote 2": "売り気配２",
         "Sell Quote Vol 2": "売り気配数量２",
         "Sell Quote Flag 2": "売り気配フラグ２",
@@ -221,12 +222,10 @@ def get_japanese_column_mapping() -> dict:
         "Sell Quote Vol 10": "売り気配数量１０",
         "Sell Quote Flag 10": "売り気配フラグ１０",
 
-        # Sell OVER
         "Sell Quote OVER": "売り気配OVER",
         "Sell Quote Vol OVER": "売り気配数量OVER",
         "Sell Quote Flag OVER": "売り気配フラグOVER",
 
-        # Buy Limit/Market
         "Buy Limit Quote": "買い成行気配",
         "Buy Limit Vol": "買い成行数量",
         "Buy Limit Flag": "買い成行フラグ",
@@ -234,7 +233,6 @@ def get_japanese_column_mapping() -> dict:
         "Buy Market Vol": "買い特別数量",
         "Buy Market Flag": "買い特別フラグ",
 
-        # Buy Quotes 2-10
         "Buy Quote 2": "買い気配２",
         "Buy Quote Vol 2": "買い気配数量２",
         "Buy Quote Flag 2": "買い気配フラグ２",
@@ -263,13 +261,11 @@ def get_japanese_column_mapping() -> dict:
         "Buy Quote Vol 10": "買い気配数量１０",
         "Buy Quote Flag 10": "買い気配フラグ１０",
 
-        # Buy UNDER
         "Buy Quote UNDER": "買い気配UNDER",
         "Buy Quote Vol UNDER": "買い気配数量UNDER",
         "Buy Quote Flag UNDER": "買い気配フラグUNDER",
 
         # ========== Stock Summary Statistics ==========
-        # Execution size buckets
         "Executions ≤3 units": "約定≤3単位",
         "Executions 3<x≤6 units": "約定3<x≤6単位",
         "Executions 6<x≤9 units": "約定6<x≤9単位",
@@ -340,5 +336,4 @@ def get_japanese_column_mapping() -> dict:
         "Reserved 9": "予備 9",
         "Reserved 10": "予備 10",
         "Reserved 11": "予備 11"
-
     }

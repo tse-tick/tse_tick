@@ -161,7 +161,7 @@ def compute_volatility(
     import math
 
     ln2 = math.log(2)
-    gk_vals = []
+    gk_vals: list[float | None] = []
     for h, l, o, c in zip(hi_vals, lo_vals, op_vals, cl_vals):
         if None in (h, l, o, c) or l == 0 or o == 0:
             gk_vals.append(None)
