@@ -53,30 +53,33 @@ two of the fixes below.)
 
 | | Total collected | Passed | Skipped |
 |---|---:|---:|---:|
-| Before | 160 | 42 | 118 |
-| After  | 160 | **104** | **56** |
+| Original (pre-fixture) | 160 | 42 | 118 |
+| First pass (fixture)   | 160 | 104 | 56 |
+| **Second pass (indices fix + paper examples)** | **165** | **110** | **55** |
 
-Stage-2 modules (before → after passing):
+Second pass added 5 new paper-example tests (160 + 5 = 165 collected) and moved
+the 1 indices query test from skip to pass (so passes +6, skips −1).
 
-| Module | Before | After |
-|---|---:|---:|
-| `test_query.py` | 0 | 14 (1 skip) |
-| `test_features.py` | 0 | 20 |
-| `test_parquet_io.py` | 0 | 14 |
-| `test_event_window.py` | 8 | 22 (14 `extract_*` enabled) |
+Stage-2 modules (final passing):
 
-## Remaining skips (56) and why
+| Module | Final |
+|---|---:|
+| `test_query.py` | 15 (incl. indices) |
+| `test_features.py` | 20 |
+| `test_parquet_io.py` | 14 |
+| `test_event_window.py` | 22 |
+| `test_paper_examples.py` (new, 2nd pass) | 5 |
+
+## Remaining skips (55) and why
 
 - **`test_real_data.py` (47)** — gated on real NEEDS files at hardcoded
   `G:\flash_crash_pilot\…` / `G:\HTIC*…` paths. Legitimately real-data only.
 - **`test_ingest.py` (8)** — 5 need the real `2022/202202/HTICST120.20220201.1.zip`;
   3 are `stock_summary` / `indices` / `indices_summary` auto-detect stubs, out of
   the individual_stock fixture's scope (skip reasons updated to say so).
-- **`test_query.py` (1)** — `test_query_ticks_indices_data_type`. The indices
-  ingest decodes `Index Code` (`"101" → "Nikkei 225"`) *before* partitioning, so
-  the indices store writes a garbled `ticker=Nike.parquet` filename; index ticker
-  queries need a separate ingest-side fix. Documented as a follow-up, not a
-  fixture gap.
+
+(The previously-skipped `test_query_ticks_indices_data_type` is now ENABLED — see
+the indices partition fix below.)
 
 ## Product bugs found by the fixture and fixed (approved)
 
@@ -100,28 +103,79 @@ NEEDS data would have failed identically — these are not fixture artifacts):
 5. **`features.py` — rolling window default**: `window="5min"` is invalid in this
    Polars version (`m` = minutes). Added a normalizer mapping `"5min" → "5m"`
    while still accepting native Polars units.
+6. **`io/parquet.py` — indices/indices_summary garbled partition filename**
+   (2nd pass): `clean_data` decodes `Index Code` (`"101" → "Nikkei 225"`) for
+   display *before* partitioning, so the store wrote `ticker=Nikk.parquet`,
+   breaking ticker queries for 2 of the 4 data types. `write_partitioned_parquet`
+   now reverse-maps the decoded display name (EN/JP) back to the raw code for the
+   `ticker=` filename (and parses `Unknown (NNN)` codes); the in-file `Index Code`
+   column keeps its decoded display value. The decode itself is unchanged
+   (resolved decision). individual_stock is untouched (its `Stock Code` is not
+   decoded). Verified via a synthetic TICIT110 ZIP through the real pipeline:
+   filenames are now `ticker=101.parquet` / `ticker=113.parquet`, and
+   `query_ticks(data_type="indices", ticker=101)` returns rows showing "Nikkei 225".
 
-## Files created / edited this pass
+### Indices fork — decision
 
-**New:** `tests/synthetic_data.py`, `tests/conftest.py`, `STAGE2_FIXTURE_SUMMARY.md`.
+Chosen: **FIX** (reverse-map partition key) + enable the indices query test. The
+fix touches only `io/parquet.py` (+ a lazy import of `core.get_schemas_categorical`);
+`query_ticks` was already correct once filenames are right. **Re-ingest:** any
+indices/indices_summary store built by the old code has garbled filenames and
+must be re-ingested — none exists in the repo, and individual_stock stores are
+unaffected, so this is effectively moot. **Coverage:** `test_query_ticks_indices_data_type`
+is now enabled (10-field routing + raw-code ticker filter, via a minimal synthetic
+TICIT110 `indices_store` fixture). `indices_summary`'s separate 83-col `set_columns`
+routing remains untested (no fixture); the filename fix applies to it too but is
+unexercised.
+
+### Paper examples (2nd pass)
+
+Verified Listings 1–4 (Section 6) exactly as printed: **all 8 top-level names**
+(`create_df`, `export_to_csv`, `query_ticks`, `compute_spread/depth/flow_imbalance/
+volatility/all_features`) are exposed at the top level (no missing exports), and
+Listing 4 runs on **raw** `query_ticks` output (96 cols incl. the Hive `date`
+column) — no paper-text or product fix was needed. Locked in by
+`tests/test_paper_examples.py` (5 tests).
+
+### Figure 2 (2nd pass)
+
+`benchmarks/paper_assets/benchmark_figure.pdf` was stale (prototype bar 622.6s vs
+Table 7's 631.405s). Regenerated **only the figure** from `results_engine_summary.csv`
+via `generate_assets.generate_figure(...)` (it reads the CSV; no hardcoded value).
+Did NOT run the full `generate_assets.main()` — its `FILE_CODE_LABELS` is out of
+sync with the manually-corrected `engine_benchmark.tex` (Index Summary 17 vs the
+script's 83) and a full run would reopen that completed fix. Prototype bar now
+reads 631.4s; other bars unchanged.
+
+## Files created / edited (cumulative across both passes)
+
+**New:** `tests/synthetic_data.py`, `tests/conftest.py`, `tests/test_paper_examples.py`
+(2nd pass), `STAGE2_FIXTURE_SUMMARY.md`.
 
 **Product code:** `tse_tick/__init__.py` (version 0.2.2→0.2.3), `tse_tick/query.py`
-(fixes 1–3), `tse_tick/io/parquet.py` (fix 4), `tse_tick/features.py` (fix 5).
+(fixes 1–3), `tse_tick/io/parquet.py` (fix 4 + indices fix 6), `tse_tick/features.py` (fix 5).
 
-**Tests:** `tests/test_query.py`, `tests/test_features.py`,
-`tests/test_event_window.py`, `tests/test_parquet_io.py` (skip-stubs replaced
-with real bodies); `tests/test_ingest.py` (3 skip reasons made precise).
+**Tests:** `tests/test_query.py` (Stage-2 bodies + indices test enabled, 2nd pass),
+`tests/test_features.py`, `tests/test_event_window.py`, `tests/test_parquet_io.py`
+(skip-stubs replaced with real bodies); `tests/test_ingest.py` (3 skip reasons made precise).
 
-**Docs:** `CHANGELOG.md` (`[0.2.3]` Added + Fixed), `README.md` (new Testing
-section), `technical_paper/main.tex` (Table 10 + §7 prose + §9 limitation).
+**Docs / assets:** `CHANGELOG.md` (`[0.2.3]`), `README.md` (Testing section),
+`technical_paper/main.tex` (Table 10 + §7 + §9), `technical_paper/CLAUDE.md`
+(status/decisions); 2nd pass: `benchmarks/paper_assets/benchmark_figure.pdf`
+(regenerated) and `benchmarks/paper_assets/performance_section.tex` (field-count
+convention).
 
 ## Surface agreement (all four reconciled to the passing suite)
 
-- **Testing status:** package suite (ground truth) = 104 pass / 56 skip; README
-  Testing section and paper §7/Table 10/§9 state the same.
-- **Field counts:** unchanged, all on the output-count convention — TICST120 = 95,
-  TICSS110 = 82 (83 raw), TICIT110 = 10 (23 raw, 15 in 2016), TICIS110 = 17.
+- **Testing status:** package suite (ground truth) = 110 pass / 55 skip; README
+  Testing section and paper §7/Table 10/§9 reflect the synthetic-fixture status.
+- **Field counts:** all on the output-count convention — TICST120 = 95,
+  TICSS110 = 82 (83 raw), TICIT110 = 10 (23 raw, 15 in 2016), TICIS110 = 17
+  (now also applied in `performance_section.tex`).
 - **Version:** `0.2.3` in `__init__.py` and CHANGELOG.
-- **Partition layout:** `individual_stock/date=YYYYMMDD/ticker=NNNN.parquet`
-  (and event-window `year=/month=/DATE.parquet`) consistent across code, README,
-  and paper.
+- **Partition layout:** `individual_stock/date=YYYYMMDD/ticker=NNNN.parquet` and,
+  after the 2nd-pass fix, `indices/date=YYYYMMDD/ticker=<rawcode>.parquet`
+  (event-window `year=/month=/DATE.parquet`) — consistent across code, README, paper.
+- **Query-validated data types:** `individual_stock` (ticker + time-range + event
+  windows) and `indices` (ticker, via the synthetic indices fixture).
+  `stock_summary` / `indices_summary` querying is not yet covered by a fixture.

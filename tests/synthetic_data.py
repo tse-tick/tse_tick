@@ -14,9 +14,10 @@ code path as production. No proprietary NEEDS data is read or written.
 import zipfile
 from pathlib import Path
 
-from tse_tick.schemas import get_schema_individual_stock_95
+from tse_tick.schemas import get_schema_individual_stock_95, get_schema_indices_23
 
 _SCHEMA_95 = get_schema_individual_stock_95()
+_SCHEMA_INDICES_23 = get_schema_indices_23()
 
 # TSE session boundaries, in minutes since midnight.
 _AM_OPEN, _AM_CLOSE = 540, 690   # 09:00 - 11:30
@@ -95,6 +96,44 @@ def individual_stock_csv(
             ]
             lines.append(",".join('"' + v + '"' for v in row))
 
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def _index_field(name: str, *, date: str, code: str, hhmmss: str) -> str:
+    """One synthetic TICIT110 (index tick, 23-field) field value, by column name."""
+    fixed = {
+        "Record Type": "2100",     # -> "Indices - Execution"
+        "Data Date": date,
+        "Exchange Code": "11",      # -> Tokyo Stock Exchange (TSE)
+        "Security Type": "10",      # -> Cash Index
+        "Session": "1",
+        "Index Code": code,
+        "Execution Time": hhmmss,
+        "Update Time": hhmmss + "000000",
+        "Management Number": "0001",
+        "Index Value": "2850000",
+        "Execution Type": "0",      # -> "Other"
+        "Ayumi Flag": "0",          # -> "Regular"
+    }
+    return fixed.get(name, "0")     # Reserved 1..11 default to "0"
+
+
+def indices_csv(date: str, codes: list[str], rows_per_code: int = 16) -> bytes:
+    """Build a headerless TICIT110 (23-field index tick) CSV as raw bytes.
+
+    ``codes`` are raw numeric index codes (e.g. "101" Nikkei 225, "113" TOPIX);
+    they are categorically decoded to display names on ingest, so this exercises
+    the raw-code partitioning fix.
+    """
+    lines: list[str] = []
+    for code in codes:
+        minutes = [_AM_OPEN + round(i * (359 / max(rows_per_code - 1, 1))) for i in range(rows_per_code)]
+        for minute in minutes:
+            row = [
+                _index_field(name, date=date, code=code, hhmmss=_hhmmss(minute))
+                for name in _SCHEMA_INDICES_23
+            ]
+            lines.append(",".join('"' + v + '"' for v in row))
     return ("\n".join(lines) + "\n").encode("ascii")
 
 

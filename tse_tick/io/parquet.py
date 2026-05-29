@@ -1,5 +1,6 @@
 # tse_tick/io/parquet.py
 import datetime
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -15,6 +16,53 @@ _DEFAULT_PARTITION_COLS: dict[str, list[str]] = {
 }
 
 _VALID_DATA_TYPES = set(_DEFAULT_PARTITION_COLS.keys())
+
+_INDEX_DATA_TYPES = {"indices", "indices_summary"}
+_UNKNOWN_CODE_RE = re.compile(r"^Unknown \((.+)\)$")
+
+
+def _index_code_lookup() -> dict[str, str]:
+    """Map a decoded Index Code display value back to its raw code.
+
+    ``clean_data`` categorically decodes Index Code (e.g. "101" -> "Nikkei 225")
+    for display *before* partitioning, which would otherwise be baked into the
+    ``ticker=`` filename. Reverse-map the decoded name (English or Japanese) back
+    to the raw code so the store partitions on the raw code while the in-file
+    Index Code column keeps its decoded display value.
+    """
+    from tse_tick.core import get_schemas_categorical
+
+    catalogue = get_schemas_categorical().get("Index Code", {})
+    lookup: dict[str, str] = {}
+    for code, info in catalogue.items():
+        for key in ("name", "jp"):
+            display = info.get(key)
+            if display is not None:
+                lookup[display] = code
+    return lookup
+
+
+def _partition_value(raw_value: object, code_lookup: Optional[dict[str, str]]):
+    """Resolve the partition filename value for one ticker/index group.
+
+    For index data types the group value is the decoded display name; map it back
+    to the raw code (handling ``Unknown (NNN)`` too). For stock data types the
+    code is not decoded, so the existing first-4-characters behaviour applies.
+    """
+    text = str(raw_value).strip()
+    if code_lookup is not None:
+        mapped = code_lookup.get(text)
+        if mapped is None:
+            unknown = _UNKNOWN_CODE_RE.match(text)
+            if unknown is not None:
+                mapped = unknown.group(1).strip()
+        if mapped is not None:
+            text = mapped
+    value = text[:4]
+    try:
+        return int(value)
+    except ValueError:
+        return value
 
 
 def _coerce_time_cols(df: pl.DataFrame) -> pl.DataFrame:
@@ -57,6 +105,7 @@ def write_partitioned_parquet(
 
     date_col = pcols[0]
     ticker_col = pcols[1] if len(pcols) > 1 else None
+    code_lookup = _index_code_lookup() if data_type in _INDEX_DATA_TYPES else None
 
     if df.schema[date_col].is_temporal():
         df = df.with_columns(
@@ -77,11 +126,7 @@ def write_partitioned_parquet(
             ticker_groups = date_group.group_by(ticker_col, maintain_order=True)
             for (ticker_val,), ticker_group in ticker_groups:
                 out_df = ticker_group.drop(["_date_str"])
-                ticker_int = str(ticker_val).strip()[:4]
-                try:
-                    ticker_int = int(ticker_int)
-                except ValueError:
-                    pass
+                ticker_int = _partition_value(ticker_val, code_lookup)
                 fpath = date_dir / f"ticker={ticker_int}.parquet"
                 out_df.write_parquet(fpath, compression="snappy")
         else:

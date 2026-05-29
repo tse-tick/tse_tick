@@ -77,17 +77,29 @@ def test_query_ticks_column_pruning(stock_store):
     assert df.columns == ["Execution Time", "Execution Price"]
 
 
-def test_query_ticks_indices_data_type():
+def test_query_ticks_indices_data_type(indices_store):
     """
-    query_ticks with data_type='indices' should return TICIT110 columns
-    (10 fields) and ticker is interpreted as Index Code.
+    query_ticks with data_type='indices' should return the TICIT110 output
+    columns (10 fields) and interpret ticker as the (raw) Index Code, which the
+    store partitions on even though the in-file Index Code is display-decoded.
     """
-    pytest.skip(
-        "Indices store partitions by the categorically-decoded Index Code "
-        "(e.g. '101' -> 'Nikkei 225'), so the ticker= filename is garbled; "
-        "ticker-based index queries need a separate ingest-side fix. The "
-        "synthetic fixture covers individual_stock, the documented primary type."
-    )
+    expected = [
+        "Record Type", "Data Date", "Exchange Code", "Security Type", "Session",
+        "Index Code", "Execution Time", "Index Value", "Execution Type", "Ayumi Flag",
+    ]
+    df = query_ticks(indices_store, data_type="indices")
+    for col in expected:
+        assert col in df.columns
+    # 10 output fields + the Hive 'date' partition column.
+    assert df.width == 11
+
+    # ticker is the raw Index Code (101 = Nikkei 225); the display decode is kept.
+    nikkei = query_ticks(indices_store, data_type="indices", ticker=101)
+    assert nikkei.height > 0
+    assert nikkei["Index Code"].unique().to_list() == ["Nikkei 225"]
+    topix = query_ticks(indices_store, data_type="indices", ticker=113)
+    assert topix.height > 0
+    assert topix["Index Code"].unique().to_list() == ["TOPIX"]
 
 
 def test_query_ticks_empty_result(stock_store):
