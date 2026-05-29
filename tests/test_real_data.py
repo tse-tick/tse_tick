@@ -214,7 +214,7 @@ class TestTICIS110:
 
     def test_has_expected_columns(self):
         df = create_df(TICIS_2023, language="en", rows=5)
-        for col in ["Record Type", "Data Date", "Stock Code", "AM Opening Price", "PM Close Price"]:
+        for col in ["Record Type", "Data Date", "Index Code", "AM Opening Price", "PM Close Price"]:
             assert col in df.columns
 
     def test_schema_length(self):

@@ -1,0 +1,105 @@
+# tests/synthetic_data.py
+"""Synthetic NEEDS-format raw data generators for the Stage-2 test fixture.
+
+These helpers produce *obviously fake* data shaped exactly like the headerless
+NEEDS CSV that the real ingester consumes: the correct positional field layout
+and field count (95 fields for ``individual_stock`` / TICST120), quoted
+comma-separated values, timestamps spanning the TSE trading day with a genuine
+lunch break, and plainly synthetic prices/volumes.
+
+The output is written to ZIPs and run through the *real* ingest pipeline
+(``ingest_single_zip``) so the resulting Parquet store is produced by the same
+code path as production. No proprietary NEEDS data is read or written.
+"""
+import zipfile
+from pathlib import Path
+
+from tse_tick.schemas import get_schema_individual_stock_95
+
+_SCHEMA_95 = get_schema_individual_stock_95()
+
+# TSE session boundaries, in minutes since midnight.
+_AM_OPEN, _AM_CLOSE = 540, 690   # 09:00 - 11:30
+_PM_OPEN, _PM_CLOSE = 750, 900   # 12:30 - 15:00
+
+
+def _hhmmss(minute_of_day: int) -> str:
+    hh, mm = divmod(minute_of_day, 60)
+    return f"{hh:02d}{mm:02d}00"
+
+
+def _field(name: str, *, date: str, ticker: str, hhmmss: str, session: str, price: int) -> str:
+    """Return one synthetic field value, selected by its schema column name."""
+    fixed = {
+        "Record Type": "1200",        # -> "Stocks - Multiple Quote"
+        "Data Date": date,
+        "Exchange Code": "11",         # -> Tokyo Stock Exchange (TSE)
+        "Security Type": "1",          # -> First Section
+        "Session": session,            # "1" = morning, "2" = afternoon
+        "Stock Code": ticker,
+        "Execution Time": hhmmss,
+        "Sell Quote Time": hhmmss,
+        "Buy Quote Time": hhmmss,
+        "Update Time": hhmmss + "000000",
+        "Management Number": "0001",
+        "Execution Type": "32",        # -> "Between Quotes"
+        "Ayumi Flag": "0",             # -> "Regular"
+        "Volume": "100",
+        "Volume Flag": "0",            # -> "Final"
+        "Close Quote Flag": "0",
+        "Execution Price": str(price),
+        "Sell Quote 1 Best": str(price + 1),
+        "Buy Quote 1 Best": str(price - 1),
+    }
+    if name in fixed:
+        return fixed[name]
+    if "Vol" in name:          # quote-volume columns (e.g. "Sell Quote Vol 3")
+        return "500"
+    if "Flag" in name:         # quote-flag columns -> "Regular Quote"
+        return "128"
+    if name.startswith("Sell"):  # deeper sell quote price levels / market/limit
+        return str(price + 2)
+    if name.startswith("Buy"):   # deeper buy quote price levels / market/limit
+        return str(price - 2)
+    return "0"
+
+
+def individual_stock_csv(
+    date: str,
+    tickers: list[str],
+    rows_per_ticker: int = 40,
+    base_prices: dict[str, int] | None = None,
+) -> bytes:
+    """Build a headerless TICST120 (95-field) CSV as raw bytes.
+
+    Rows are split between the morning and afternoon sessions with a real
+    11:30-12:30 lunch gap, and prices vary row-to-row so order-book features
+    (spread, imbalance, volatility) have something to compute.
+    """
+    base_prices = base_prices or {}
+    half = max(rows_per_ticker // 2, 1)
+    lines: list[str] = []
+
+    for ticker in tickers:
+        base = base_prices.get(ticker, 1500)
+        am_minutes = [_AM_OPEN + round(i * (149 / max(half - 1, 1))) for i in range(half)]
+        pm_minutes = [_PM_OPEN + round(i * (149 / max(half - 1, 1))) for i in range(half)]
+        schedule = [(m, "1") for m in am_minutes] + [(m, "2") for m in pm_minutes]
+
+        for i, (minute, session) in enumerate(schedule):
+            price = base + (i % 11)
+            row = [
+                _field(name, date=date, ticker=ticker, hhmmss=_hhmmss(minute),
+                       session=session, price=price)
+                for name in _SCHEMA_95
+            ]
+            lines.append(",".join('"' + v + '"' for v in row))
+
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def write_zip(zip_path: Path, member_name: str, payload: bytes) -> Path:
+    """Write ``payload`` as a single CSV member inside a ZIP, NEEDS-style."""
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(member_name, payload)
+    return zip_path

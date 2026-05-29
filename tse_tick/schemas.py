@@ -104,7 +104,7 @@ def get_schema_indices_23() -> list:
 def get_schema_indices_summary() -> list:
     """Schema for TICIS110 (17 fields)"""
     return [
-        "Record Type", "Data Date", "Exchange Code", "Security Type", "Stock Code",
+        "Record Type", "Data Date", "Exchange Code", "Security Type", "Index Code",
         "AM Opening Price", "AM Opening Time", "AM High Price", "AM Low Price",
         "AM Close Price", "AM Close Time",
         "PM Opening Price", "PM Opening Time", "PM High Price", "PM Low Price",

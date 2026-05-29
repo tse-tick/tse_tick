@@ -4,6 +4,18 @@ import datetime
 import polars as pl
 
 
+def _polars_period(window: str) -> str:
+    """Normalize a window string to a Polars duration.
+
+    Polars ``rolling`` uses ``m`` for minutes; this package documents windows
+    such as ``"5min"``. Accept both spellings by mapping a trailing ``min`` to
+    ``m`` (``"5min"`` -> ``"5m"``); already-valid units pass through unchanged.
+    """
+    if window.endswith("min"):
+        return window[:-3] + "m"
+    return window
+
+
 def _exec_time_index(df: pl.DataFrame) -> pl.Series:
     et_col = df["Execution Time"]
     if len(et_col) == 0:
@@ -103,7 +115,7 @@ def compute_flow_imbalance(
     trade_df = trade_df.sort("time")
 
     # Time-based rolling in polars
-    rolling = trade_df.rolling(index_column="time", period=f"{window}")
+    rolling = trade_df.rolling(index_column="time", period=_polars_period(window))
     buy_rolling = rolling.agg(pl.col("buy_vol").sum().alias("buy_roll"))
     sell_rolling = rolling.agg(pl.col("sell_vol").sum().alias("sell_roll"))
 
@@ -141,13 +153,13 @@ def compute_volatility(
         trade_df = trade_df.with_columns(
             (pl.col("price") / pl.col("price").shift(1)).log().alias("log_ret")
         )
-        rolling = trade_df.rolling(index_column="time", period=f"{window}")
+        rolling = trade_df.rolling(index_column="time", period=_polars_period(window))
         vol = rolling.agg(
             (pl.col("log_ret").pow(2).sum().sqrt()).alias("volatility")
         )
         return vol["volatility"]
 
-    rolling = trade_df.rolling(index_column="time", period=f"{window}")
+    rolling = trade_df.rolling(index_column="time", period=_polars_period(window))
     hi = rolling.agg(pl.col("price").max().alias("high"))
     lo = rolling.agg(pl.col("price").min().alias("low"))
     op = rolling.agg(pl.col("price").first().alias("open"))

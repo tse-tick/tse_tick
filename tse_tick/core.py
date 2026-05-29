@@ -73,7 +73,9 @@ def clean_data(df, kind="individual_stock", language="en"):
     df_cleaned = df.clone()
 
     if kind == "individual_stock":
-        int_list = [14, 15, 18, 19, 21, 22, 24, 25, 27, 28, 30, 31, 33, 34, 36, 37, 39, 40, 42, 43, 45, 46, 48, 49, 51, 52, 54, 55, 57, 58, 60, 61, 63, 64, 66, 67, 69, 70, 72, 73, 75, 76, 78, 79, 81, 82, 84, 85, 87, 88, 90, 91, 93, 94]
+        # 15 (Volume Flag) intentionally omitted: kept as String so the
+        # categorical decode below maps "0"/"128" → "Final"/"Estimated".
+        int_list = [14, 18, 19, 21, 22, 24, 25, 27, 28, 30, 31, 33, 34, 36, 37, 39, 40, 42, 43, 45, 46, 48, 49, 51, 52, 54, 55, 57, 58, 60, 61, 63, 64, 66, 67, 69, 70, 72, 73, 75, 76, 78, 79, 81, 82, 84, 85, 87, 88, 90, 91, 93, 94]
         float_list = [11, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59, 62, 65, 68, 71, 74, 77, 80, 83, 86, 89, 92]
         time_list = [6, 7, 8]
         df_cleaned = df_cleaned.with_columns(
@@ -178,7 +180,7 @@ def clean_data(df, kind="individual_stock", language="en"):
             continue
         if "Time" in col:
             continue
-        if "Vol" in col:
+        if "Vol" in col and col != "Volume Flag":
             continue
         if "Reserved" in col:
             continue

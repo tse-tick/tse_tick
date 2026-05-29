@@ -12,7 +12,7 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 
 ## Features
 
-- **4 data types** — TICST120 (individual stock ticks, 95 cols), TICSS110 (daily stock summary, 83 cols), TICIT110 (index ticks), TICIS110 (daily index summary)
+- **4 data types** — TICST120 (individual stock ticks, 95 cols), TICSS110 (daily stock summary, 82 cols), TICIT110 (index ticks, 10 cols), TICIS110 (daily index summary, 17 cols)
 - **Multi-era format support** — 2016 fixed-width (TICIT010), 2017-2019, and 2020-2025 CSV formats, auto-detected from the ZIP filename
 - **Polars backend** — fast CSV parsing, vectorized cleaning, memory-efficient
 - **CLI batch ingestion** — `tse-tick ingest` converts entire years/months/date ranges to partitioned Parquet
@@ -159,11 +159,11 @@ features = tse_tick.compute_all_features(df)
 
 ## Data Types
 
-| Code | Internal Name | Fields | Description |
-|------|--------------|--------|-------------|
+| Code | Internal Name | Output Fields | Description |
+|------|--------------|---------------|-------------|
 | TICST120 | `individual_stock` | 95 | Tick-level executions, 10-level bid/ask quotes, volume |
-| TICSS110 | `stock_summary` | 83 | Daily OHLC, VWAP, session splits, quote statistics |
-| TICIT110 | `indices` | 23 (15 in 2016) | Index tick updates (Nikkei 225, TOPIX, etc.) |
+| TICSS110 | `stock_summary` | 82 (83 raw) | Daily OHLC, VWAP, session splits, quote statistics |
+| TICIT110 | `indices` | 10 (23 raw, 15 in 2016) | Index tick updates (Nikkei 225, TOPIX, etc.) |
 | TICIS110 | `indices_summary` | 17 | Daily index summary prices |
 
 ---
@@ -179,6 +179,26 @@ The data format changed across three eras. The library detects the era automatic
 | **2020-2025** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 17 cols |
 
 No user action needed — if your ZIP filename contains `2016`, the fixed-width parser is used automatically for index data.
+
+---
+
+## Performance
+
+`tse_tick` is built on Polars (CSV parsing, vectorized cleaning) and DuckDB over Hive-partitioned Parquet (queries). Measured on one day of HTICST120 (4.78 M rows, 95 columns, 2.16 GB raw CSV) on a 10-core / 16-thread Intel CPU with 32 GB RAM, Python 3.11.
+
+| Comparison | Speedup | Source |
+|------------|--------:|--------|
+| Polars (16T) vs pandas (Python engine) | **85.2×** | `benchmarks/results_engine.csv` |
+| Polars (16T) vs pandas (C engine, fair baseline) | **28.1×** | `benchmarks/results_engine.csv` |
+| Polars (1 thread) vs pandas (C engine) | **7.2×** | `benchmarks/results_engine.csv` |
+| DuckDB + Hive Parquet vs pandas CSV scan (single-ticker hour slice) | **506.5×** | `benchmarks/results_query.csv` |
+| Parquet (Snappy) storage size vs raw CSV | **22× smaller** (99 MB vs 2.2 GB) | `benchmarks/results_format.csv` |
+
+The three Polars speedup numbers are deliberately reported together: against the original pandas Python-engine prototype, against a fair C-engine baseline (all-string dtypes, forced column count), and at single-thread parity to isolate the contribution of threading from the engine itself. Polars wins on all three.
+
+`tse_tick` defaults to Polars because the ingest workload (multi-GB daily CSVs, mostly columnar transformations) hits exactly the case where lazy expression planning and parallel CSV parsing dominate; pandas-on-DataFrame's row-oriented model leaves throughput on the table even with the C engine. For querying, the Parquet store + DuckDB combination converts repeated single-ticker / single-date filters from full file scans into partition pruning, which is the source of the ~500× query speedup.
+
+To reproduce: `python benchmarks/run_all.py` (see `benchmarks/ENVIRONMENT.md`).
 
 ---
 
@@ -316,6 +336,26 @@ Development setup:
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
+
+---
+
+## Testing
+
+```bash
+pytest tests/ -v
+```
+
+The suite collects **160 tests**: **104 pass** and **56 are skipped**. Stage-1
+(ingestion) and Stage-2 (query, order-book features, and
+event-window-from-Parquet) both run with no proprietary data — a session-scoped
+pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
+feeding synthetic, obviously-fake `individual_stock` (TICST120) ZIPs through the
+real ingest pipeline (`tests/synthetic_data.py`, `tests/conftest.py`).
+
+The 56 skips are tests that load **real NEEDS files** from local paths
+(`test_real_data.py` and the real-ZIP cases in `test_ingest.py`) plus one
+index-query test outside the synthetic fixture's `individual_stock` scope. They
+run automatically once a local NEEDS store is present.
 
 ---
 

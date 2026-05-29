@@ -12,7 +12,7 @@ Developed at Keio University, Nakatsuma Seminar.
 # tse_tick/__init__.py
 import polars as pl
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 __author__ = "Kazumi Li"
 __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
@@ -132,10 +132,10 @@ def get_info():
     Author: {__author__}
     License: {__license__}
 
-    Supported Data Types:
+    Supported Data Types (output fields):
     - individual_stock (TICST120) - 95 fields
-    - stock_summary (TICSS110) - 82 fields
-    - indices (TICIT110) - 23 fields
+    - stock_summary (TICSS110) - 82 fields (83 raw)
+    - indices (TICIT110) - 10 fields (23 raw, 15 in 2016)
     - indices_summary (TICIS110) - 17 fields
 
     Year Range: 2016-2023

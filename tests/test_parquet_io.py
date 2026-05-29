@@ -1,118 +1,169 @@
 # tests/test_parquet_io.py
-"""Tests for tse_tick.io.parquet — Parquet read/write utilities."""
+"""Tests for tse_tick.io.parquet — Parquet read/write utilities.
 
+Write-layout tests build tiny DataFrames inline (they exercise the writer
+itself, which is the function under test). Read tests use the synthetic
+``stock_store`` fixture, which is produced by running synthetic NEEDS-format
+ZIPs through the real ingest pipeline (see conftest.py).
+"""
+
+import polars as pl
 import pytest
+
 from tse_tick.io.parquet import write_partitioned_parquet, read_parquet_partition
 
 
-def test_write_partitioned_parquet_creates_directory():
+def _mk(date: str = "20230704", code: str = "7203", code_col: str = "Stock Code",
+        n: int = 4) -> pl.DataFrame:
+    """Minimal partitionable frame with the required partition columns."""
+    return pl.DataFrame({
+        "Data Date": [date] * n,
+        code_col: [code] * n,
+        "Execution Price": [float(1000 + i) for i in range(n)],
+        "Volume": [100] * n,
+    })
+
+
+def test_write_partitioned_parquet_creates_directory(tmp_path):
     """
     write_partitioned_parquet should create output_dir/data_type/ if it does
     not already exist, and return the path as a string.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    result = write_partitioned_parquet(_mk(), str(tmp_path), "individual_stock")
+    assert isinstance(result, str)
+    assert (tmp_path / "individual_stock").exists()
 
 
-def test_write_partitioned_parquet_individual_stock_layout():
+def test_write_partitioned_parquet_individual_stock_layout(tmp_path):
     """
     For data_type='individual_stock', partition directories should follow
     the pattern: output_dir/individual_stock/date=YYYYMMDD/ticker=NNNN.parquet
     """
-    pytest.skip("Waiting for NEEDS data access")
+    write_partitioned_parquet(_mk(date="20230704", code="7203"), str(tmp_path), "individual_stock")
+    assert (tmp_path / "individual_stock" / "date=20230704" / "ticker=7203.parquet").exists()
 
 
-def test_write_partitioned_parquet_stock_summary_layout():
+def test_write_partitioned_parquet_stock_summary_layout(tmp_path):
     """
     For data_type='stock_summary', partition directories should follow
     the pattern: output_dir/stock_summary/date=YYYYMMDD/ticker=NNNN.parquet
     """
-    pytest.skip("Waiting for NEEDS data access")
+    write_partitioned_parquet(_mk(date="20230704", code="6758"), str(tmp_path), "stock_summary")
+    assert (tmp_path / "stock_summary" / "date=20230704" / "ticker=6758.parquet").exists()
 
 
-def test_write_partitioned_parquet_indices_layout():
+def test_write_partitioned_parquet_indices_layout(tmp_path):
     """
-    For data_type='indices', second-level partition key should be
-    index_code= (e.g. index_code=101 for Nikkei 225).
+    For data_type='indices', the second-level partition value is the Index
+    Code. The store encodes the second level in the filename, so the shipped
+    layout is date=YYYYMMDD/ticker=NNNN.parquet (the partition *value* is the
+    index code; the filename key is "ticker=", not "index_code=").
     """
-    pytest.skip("Waiting for NEEDS data access")
+    write_partitioned_parquet(
+        _mk(date="20230704", code="101", code_col="Index Code"), str(tmp_path), "indices"
+    )
+    assert (tmp_path / "indices" / "date=20230704" / "ticker=101.parquet").exists()
 
 
-def test_write_partitioned_parquet_indices_summary_layout():
+def test_write_partitioned_parquet_indices_summary_layout(tmp_path):
     """
-    For data_type='indices_summary', partition layout should use
-    date= then index_code= (same as indices data type).
+    For data_type='indices_summary', partition layout uses date= then the
+    index-code-valued ticker= filename (same scheme as the indices data type).
     """
-    pytest.skip("Waiting for NEEDS data access")
+    write_partitioned_parquet(
+        _mk(date="20230704", code="113", code_col="Index Code"), str(tmp_path), "indices_summary"
+    )
+    assert (tmp_path / "indices_summary" / "date=20230704" / "ticker=113.parquet").exists()
 
 
-def test_write_partitioned_parquet_custom_partition_cols():
+def test_write_partitioned_parquet_custom_partition_cols(tmp_path):
     """
-    Passing partition_cols=['Data Date'] should override the default two-
-    level partitioning and produce a flat date= layout.
+    Passing partition_cols=['Data Date'] should override the default two-level
+    partitioning and produce a flat date= layout with a per-date file.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    write_partitioned_parquet(
+        _mk(date="20230704"), str(tmp_path), "individual_stock", partition_cols=["Data Date"]
+    )
+    assert (tmp_path / "individual_stock" / "date=20230704" / "20230704.parquet").exists()
 
 
-def test_write_partitioned_parquet_unknown_data_type_raises():
+def test_write_partitioned_parquet_unknown_data_type_raises(tmp_path):
     """
     write_partitioned_parquet should raise ValueError when data_type is not
     one of the four recognised values.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    with pytest.raises(ValueError, match="Unknown data_type"):
+        write_partitioned_parquet(_mk(), str(tmp_path), "bad_type")
 
 
-def test_write_partitioned_parquet_missing_partition_col_raises():
+def test_write_partitioned_parquet_missing_partition_col_raises(tmp_path):
     """
-    If a custom partition_col is specified but absent from df, a ValueError
-    should be raised before any files are written.
+    If a partition column is absent from df, a ValueError should be raised
+    before any files are written.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    df = pl.DataFrame({"foo": [1, 2]})
+    with pytest.raises(ValueError, match="Partition column"):
+        write_partitioned_parquet(df, str(tmp_path), "individual_stock")
 
 
-def test_read_parquet_partition_roundtrip():
+def test_read_parquet_partition_roundtrip(tmp_path):
     """
-    A DataFrame written by write_partitioned_parquet should be exactly
-    recoverable by read_parquet_partition with no filters applied
-    (same shape and column values, allowing for row order differences).
+    A DataFrame written by write_partitioned_parquet should be recoverable by
+    read_parquet_partition with no filters (same row count, original columns
+    present), allowing for an added Hive partition column and row order.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    df = _mk(date="20230704", code="7203", n=6)
+    write_partitioned_parquet(df, str(tmp_path), "individual_stock")
+    result = read_parquet_partition(str(tmp_path), "individual_stock")
+    assert result.height == df.height
+    for col in df.columns:
+        assert col in result.columns
 
 
-def test_read_parquet_partition_date_filter():
+def test_read_parquet_partition_date_filter(stock_store):
     """
-    Passing date='20230104' should return only rows from that partition
+    Passing date='20230704' should return only rows from that partition
     directory, not rows from other dates in the same store.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    result = read_parquet_partition(stock_store, "individual_stock", date="20230704")
+    assert result.height == 3 * 40
+    assert result["date"].unique().to_list() == [20230704]
 
 
-def test_read_parquet_partition_ticker_filter():
+def test_read_parquet_partition_ticker_filter(stock_store):
     """
-    Passing ticker=7203 should return only rows from the ticker=7203
-    partition, not rows for other tickers.
+    Passing ticker=7203 should return only rows for that ticker, not rows for
+    other tickers.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    result = read_parquet_partition(stock_store, "individual_stock", ticker=7203)
+    assert result["Stock Code"].unique().to_list() == ["7203"]
+    assert result.height == 40 * 2
 
 
-def test_read_parquet_partition_column_pruning():
+def test_read_parquet_partition_column_pruning(stock_store):
     """
     Passing columns=['Execution Price', 'Volume'] should return a DataFrame
-    with exactly those two columns — no extra columns loaded from disk.
+    with exactly those two columns.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    result = read_parquet_partition(
+        stock_store, "individual_stock", columns=["Execution Price", "Volume"]
+    )
+    assert set(result.columns) == {"Execution Price", "Volume"}
 
 
-def test_read_parquet_partition_missing_store_raises():
+def test_read_parquet_partition_missing_store_raises(tmp_path):
     """
     read_parquet_partition should raise FileNotFoundError when no Parquet
     files exist for the given data_type under data_dir.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    with pytest.raises(FileNotFoundError):
+        read_parquet_partition(str(tmp_path), "individual_stock")
 
 
-def test_read_parquet_partition_data_date_is_datetime():
+def test_read_parquet_partition_data_date_is_datetime(stock_store):
     """
-    The 'Data Date' column in the returned DataFrame should have dtype
-    datetime64[ns], matching the output of create_df().
+    The 'Data Date' column in the returned DataFrame should be a temporal
+    dtype, matching the output of create_df().
     """
-    pytest.skip("Waiting for NEEDS data access")
+    result = read_parquet_partition(stock_store, "individual_stock", ticker=7203)
+    assert result["Data Date"].dtype.is_temporal()

@@ -166,7 +166,10 @@ def test_ingest_single_zip_detects_stock_summary():
     A filename like HTICSS110.20230104.1.zip should auto-detect as
     data_type='stock_summary'.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    pytest.skip(
+        "The synthetic Stage-2 fixture covers individual_stock (TICST120) only; "
+        "a stock_summary ingest fixture is out of scope for this pass."
+    )
 
 
 def test_ingest_single_zip_detects_indices():
@@ -174,7 +177,10 @@ def test_ingest_single_zip_detects_indices():
     A filename like HTICIT110.20230104.1.zip should auto-detect as
     data_type='indices'.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    pytest.skip(
+        "The synthetic Stage-2 fixture covers individual_stock (TICST120) only; "
+        "an indices ingest fixture is out of scope for this pass."
+    )
 
 
 def test_ingest_single_zip_detects_indices_summary():
@@ -182,7 +188,10 @@ def test_ingest_single_zip_detects_indices_summary():
     A filename like HTICIS110.20230104.1.zip should auto-detect as
     data_type='indices_summary'.
     """
-    pytest.skip("Waiting for NEEDS data access")
+    pytest.skip(
+        "The synthetic Stage-2 fixture covers individual_stock (TICST120) only; "
+        "an indices_summary ingest fixture is out of scope for this pass."
+    )
 
 
 def test_ingest_single_zip_creates_parquet_file(tmp_path):

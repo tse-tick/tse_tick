@@ -11,7 +11,7 @@ _DEFAULT_PARTITION_COLS: dict[str, list[str]] = {
     "individual_stock": ["Data Date", "Stock Code"],
     "stock_summary": ["Data Date", "Stock Code"],
     "indices": ["Data Date", "Index Code"],
-    "indices_summary": ["Data Date", "Stock Code"],
+    "indices_summary": ["Data Date", "Index Code"],
 }
 
 _VALID_DATA_TYPES = set(_DEFAULT_PARTITION_COLS.keys())
@@ -105,11 +105,17 @@ def read_parquet_partition(
 
     dataset = ds.dataset(str(type_dir), format="parquet", partitioning="hive")
 
+    # The Hive "date" partition is inferred as an integer; cast it to string so
+    # the comparison against the "YYYYMMDD" argument has a matching kernel. The
+    # ticker is encoded in the filename (ticker=NNNN.parquet), not a directory,
+    # so it is not a partition column — filter the in-file code column instead.
+    code_col = "Index Code" if data_type in ("indices", "indices_summary") else "Stock Code"
+
     expr = None
     if date is not None:
-        expr = ds.field("date") == date
+        expr = ds.field("date").cast("string") == date
     if ticker is not None:
-        ticker_expr = ds.field("ticker") == ticker
+        ticker_expr = ds.field(code_col).cast("string") == str(ticker)
         expr = ticker_expr if expr is None else (expr & ticker_expr)
 
     table = dataset.to_table(filter=expr, columns=columns)

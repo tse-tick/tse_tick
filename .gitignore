@@ -112,3 +112,6 @@ dmypy.json
 *.c
 *.cpp
 cython_debug/
+
+# Technical paper
+technical_paper/

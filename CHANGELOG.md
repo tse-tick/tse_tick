@@ -1,5 +1,24 @@
 # Changelog — tse_tick
 
+## [0.2.3] - 2026-05-29
+
+### Added
+- **Synthetic Stage-2 test fixture** (`tests/synthetic_data.py`, `tests/conftest.py`): a session-scoped pytest fixture builds a tiny Hive-partitioned Parquet store at test time by running synthetic, obviously-fake NEEDS-format ZIPs (correct 95-field TICST120 positional layout, three tickers across two trading dates with a real lunch gap) through the **real** ingest pipeline (`ingest_single_zip`). No proprietary NEEDS data is used. This unblocks the previously-skipped Stage-2 tests (query, features, event-window-from-Parquet, Parquet I/O) so they execute in CI: passing tests went from **42 to 104**, skips from **118 to 56** (remaining skips need real NEEDS files or are out of fixture scope).
+
+### Fixed
+- **`query_ticks` ticker filter broken against the real store layout** (`query.py`): the ticker is encoded in the Parquet *filename* (`ticker=NNNN.parquet`), which DuckDB Hive partitioning does not expose as a column, so `ticker=`/`extract_event_window` queries raised `BinderException`. Now prunes by selecting the matching per-ticker files directly (robust to the in-file code column being categorically decoded).
+- **`query_ticks` time-range filter returned wrong rows** (`query.py`): `Execution Time` is stored as 6-digit `"HHMMSS"`, but the filter compared against `"HH:MM:SS"`, so lexicographic comparison silently mismatched (e.g. `14:00–15:00` returned nothing). Colons are now stripped from the validated `start_time`/`end_time` before comparison.
+- **`query_ticks` column pruning rejected all real columns** (`query.py`): the SQL-injection identifier guard's word-only regex rejected the spaces present in every TICST120 column name (`"Execution Time"`, …). Replaced with a blocklist that still rejects the double-quote breakout character, backslash, semicolons, backticks and control characters, while allowing spaces inside the double-quoted identifiers.
+- **`read_parquet_partition` date/ticker filters raised** (`io/parquet.py`): the Hive `date` column is inferred as an integer, so comparing it to a `"YYYYMMDD"` string raised an Arrow kernel error; and the filename-encoded ticker was queried as a (non-existent) partition field. The date field is now cast to string for comparison and the ticker is matched on the in-file code column.
+- **Rolling features broke with the documented default window** (`features.py`): `compute_flow_imbalance` / `compute_volatility` / `compute_all_features` passed `window="5min"` straight to Polars `rolling`, whose duration grammar only accepts `m` for minutes, raising `InvalidOperationError`. A small normalizer now maps `"5min"` → `"5m"` while still accepting native Polars units.
+- **Volume Flag decode unreachable** (`core.py`): the categorical-decode loop's `if "Vol" in col: continue` skipped the `Volume Flag` column before it could reach its `elif col == "Volume Flag":` branch, leaving raw `"0"` / `"128"` codes in the output. Added an exception for `Volume Flag`, and removed index 15 from the `individual_stock` `int_list` so the column stays as `String` for the decode. Output now reads `"Final"` / `"Estimated"`.
+- **TICIS110 column 5 mislabel** (`schemas.py`, `enhanced.py`, `io/parquet.py`): column 5 of the indices-summary schema stores an index identifier but was labeled `Stock Code`. Renamed to `Index Code` everywhere (schema, output mapping, default Parquet partition key, paper schema table). Aligns with `TICIT110.Index Code` and removes the cross-schema inconsistency.
+- **Field-count documentation drift** (`README.md`, `tse_tick/__init__.py:get_info`): README "Features" line said TICSS110 had `83 cols`; `get_info()` said TICIT110 had `23 fields`. Both were raw-CSV counts. Standardized all surfaces on **output** counts with raw counts in parentheses where they differ: TICSS110 = 82 (83 raw), TICIT110 = 10 (23 raw, 15 in 2016).
+
+### Changed
+- **Technical paper** (`technical_paper/main.tex`): Section 5.3 "Categorical decoding" list now includes Volume Flag with its decoded labels; Appendix Table 12 row 16 type updated `int → string`; TICIS110 schema table + surrounding prose use `Index Code` / `指数コード`; `%TODO: KEVIN` removed (stock-summary numeric casting scoped honestly as a documented limitation).
+- **Benchmark asset** (`benchmarks/paper_assets/engine_benchmark.tex`): Index Summary row corrected from `(83 cols)` → `(17 cols)` (copy-paste bug); 7-column table tightened (`\footnotesize`, `\tabcolsep=4pt`, shortened backend labels) to eliminate a 139 pt overfull `\hbox` that pushed text past the right margin.
+
 ## [0.2.2] - 2026-05-18
 
 ### Added

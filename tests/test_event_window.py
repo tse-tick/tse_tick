@@ -127,57 +127,114 @@ def test_filter_ticks_wrong_ticker_excluded():
     assert "6758" not in tickers_in_result
 
 
-def test_extract_event_window_returns_dataframe():
-    pytest.skip("Waiting for NEEDS data access")
+# ---------------------------------------------------------------------------
+# extract_event_window / extract_batch_event_windows against the synthetic store
+# (see conftest.py — built from synthetic ZIPs via the real ingest pipeline).
+# ---------------------------------------------------------------------------
+
+def test_extract_event_window_returns_dataframe(stock_store):
+    df = extract_event_window(stock_store, 7203, "20230704", "13:00:00")
+    assert isinstance(df, pl.DataFrame)
+    assert df.height > 0
+    assert "Execution Price" in df.columns
 
 
-def test_extract_event_window_seconds_from_event_column():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_event_window_seconds_from_event_column(stock_store):
+    df = extract_event_window(stock_store, 7203, "20230704", "13:00:00")
+    assert "seconds_from_event" in df.columns
+    # Anchor is 13:00:00; within a +/-60min window all offsets are bounded.
+    secs = df["seconds_from_event"].to_list()
+    assert all(-3600 <= s <= 3600 for s in secs)
 
 
-def test_extract_event_window_respects_before_after():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_event_window_respects_before_after(stock_store):
+    df = extract_event_window(
+        stock_store, 7203, "20230704", "13:00:00", before="30min", after="30min"
+    )
+    assert df.height > 0
+    minutes = [int(t) for t in df["Execution Time"].to_list()]
+    assert all(123000 <= m <= 133000 for m in minutes)
 
 
-def test_extract_event_window_no_event_time_full_day():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_event_window_no_event_time_full_day(stock_store):
+    df = extract_event_window(stock_store, 7203, "20230704", None)
+    assert df.height == 40  # the whole trading day for that ticker
+    assert "seconds_from_event" not in df.columns
 
 
-def test_extract_event_window_empty_result_for_nonexistent_ticker():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_event_window_empty_result_for_nonexistent_ticker(stock_store):
+    df = extract_event_window(stock_store, 9999, "20230704", "13:00:00")
+    assert df.is_empty()
 
 
-def test_extract_event_window_column_pruning():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_event_window_column_pruning(stock_store):
+    df = extract_event_window(
+        stock_store, 7203, "20230704", "13:00:00",
+        columns=["Execution Time", "Execution Price"],
+    )
+    # The event-time path appends seconds_from_event to the pruned columns.
+    assert df.columns == ["Execution Time", "Execution Price", "seconds_from_event"]
 
 
-def test_extract_event_window_invalid_date_raises():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_event_window_invalid_date_raises(stock_store):
+    with pytest.raises(ValueError, match="event_date must be"):
+        extract_event_window(stock_store, 7203, "2023-07-04", "13:00:00")
 
 
-def test_extract_event_window_invalid_before_raises():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_event_window_invalid_before_raises(stock_store):
+    with pytest.raises(ValueError, match="Invalid offset"):
+        extract_event_window(stock_store, 7203, "20230704", "13:00:00", before="bogus")
 
 
-def test_extract_batch_event_windows_returns_dict():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_batch_event_windows_returns_dict(stock_store, events_df):
+    results = extract_batch_event_windows(stock_store, events_df, progress=False)
+    assert isinstance(results, dict)
+    assert len(results) == events_df.height
 
 
-def test_extract_batch_event_windows_key_format():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_batch_event_windows_key_format(stock_store, events_df):
+    results = extract_batch_event_windows(stock_store, events_df, progress=False)
+    assert "7203_20230704_13:00:00" in results
+    assert "9984_20230703_10:30:00" in results
 
 
-def test_extract_batch_event_windows_fullday_key():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_batch_event_windows_fullday_key(stock_store, events_df):
+    results = extract_batch_event_windows(stock_store, events_df, progress=False)
+    fullday_keys = [k for k in results if k.endswith("_fullday")]
+    assert fullday_keys == ["6758_20230704_fullday"]
 
 
-def test_extract_batch_event_windows_missing_ticker_col_raises():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_batch_event_windows_missing_ticker_col_raises(stock_store, events_df):
+    with pytest.raises(ValueError, match="ticker_col"):
+        extract_batch_event_windows(
+            stock_store, events_df.drop("ticker"), progress=False
+        )
 
 
-def test_extract_batch_event_windows_parallel_same_result():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_batch_event_windows_parallel_same_result(stock_store, events_df):
+    serial = extract_batch_event_windows(
+        stock_store, events_df, max_workers=1, progress=False
+    )
+    parallel = extract_batch_event_windows(
+        stock_store, events_df, max_workers=2, progress=False
+    )
+    assert set(serial) == set(parallel)
+    for key in serial:
+        s, p = serial[key], parallel[key]
+        s_h = 0 if s is None else s.height
+        p_h = 0 if p is None else p.height
+        assert s_h == p_h
 
 
-def test_extract_batch_event_windows_failed_event_has_none_value():
-    pytest.skip("Waiting for NEEDS data access")
+def test_extract_batch_event_windows_failed_event_has_none_value(stock_store):
+    # A malformed event_date makes extract_event_window raise inside the worker,
+    # which is caught and recorded as a None value (with a warning).
+    bad = pl.DataFrame({
+        "ticker": [7203],
+        "event_date": ["baddate"],
+        "event_time": ["13:00:00"],
+    })
+    with pytest.warns(UserWarning):
+        results = extract_batch_event_windows(stock_store, bad, progress=False)
+    assert len(results) == 1
+    assert all(v is None for v in results.values())

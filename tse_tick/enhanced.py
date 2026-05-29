@@ -385,7 +385,7 @@ def set_columns(df: pl.DataFrame, kind: str, language: Literal["en", "jp"] = "en
 def get_final_columns(data_type):
     if data_type == "indices_summary":
         return [
-            "Record Type", "Data Date", "Exchange Code", "Security Type", "Stock Code",
+            "Record Type", "Data Date", "Exchange Code", "Security Type", "Index Code",
             "AM Opening Price", "AM Opening Time", "AM High Price", "AM Low Price",
             "AM Close Price", "AM Close Time", "PM Opening Price", "PM Opening Time",
             "PM High Price", "PM Low Price", "PM Close Price", "PM Close Time",
