@@ -115,3 +115,16 @@ cython_debug/
 
 # Technical paper
 technical_paper/
+STAGE2_FIXTURE_SUMMARY.md
+
+# Local agent settings
+.claude/
+
+# Benchmarks: scripts, ENVIRONMENT.md, and aggregate results CSVs are tracked
+# (re-included below; they contain timings only, never raw NEEDS data).
+# Run scratch, internal working notes, and paper-only assets stay local.
+!benchmarks/results_*.csv
+benchmarks/_engine_done.flag
+benchmarks/SUMMARY.md
+benchmarks/TEX_AUDIT.md
+benchmarks/paper_assets/

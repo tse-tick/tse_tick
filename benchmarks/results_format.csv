@@ -1,0 +1,7 @@
+format,size_mb,write_median_s,read_median_s,selective_3col_median_s
+Parquet (Snappy),99.33,0.8371,0.2873,0.0166
+Parquet (Zstd),70.52,0.9633,0.2953,0.0176
+Feather (IPC),795.6,0.7444,1.9966,0.0671
+CSV,2212.84,62.4755,24.1905,8.3091
+CSV.gz,48.1,111.5901,29.0391,10.0654
+Pickle,2878.1,14.9606,8.3778,
