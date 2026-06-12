@@ -92,8 +92,8 @@ passing synthetic NEEDS-format archives through the production ingest
 pipeline. The remaining tests run when an environment variable points to a
 local NEEDS store.
 
-`tse_tick` is distributed under the MIT license and developed openly on
-GitHub; it will be available on PyPI as `tse-tick`.
+`tse_tick` is distributed under the MIT license and hosted on GitHub; it will
+be available on PyPI as `tse-tick`.
 
 # Acknowledgements
 
