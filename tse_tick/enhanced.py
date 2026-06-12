@@ -349,6 +349,14 @@ def set_columns(df: pl.DataFrame, kind: str, language: Literal["en", "jp"] = "en
     elif (kind == "stock_summary") or (kind == "indices_summary"):
         if len(df.columns) == 83:
             col_names_en = get_schema_summary_83()
+            if kind == "indices_summary":
+                # The shared 83-column summary layout names column 5
+                # "Stock Code", but for index summary data that field holds
+                # the index identifier; get_final_columns() and the Parquet
+                # partition key select it as "Index Code".
+                col_names_en = [
+                    "Index Code" if c == "Stock Code" else c for c in col_names_en
+                ]
         else:
             raise ValueError(
                 f"Unexpected number of columns for {kind}: {len(df.columns)}, expected 83"

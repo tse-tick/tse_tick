@@ -164,7 +164,7 @@ features = tse_tick.compute_all_features(df)
 | TICST120 | `individual_stock` | 95 | Tick-level executions, 10-level bid/ask quotes, volume |
 | TICSS110 | `stock_summary` | 82 (83 raw) | Daily OHLC, VWAP, session splits, quote statistics |
 | TICIT110 | `indices` | 10 (23 raw, 15 in 2016) | Index tick updates (Nikkei 225, TOPIX, etc.) |
-| TICIS110 | `indices_summary` | 17 | Daily index summary prices |
+| TICIS110 | `indices_summary` | 17 (83 raw) | Daily index summary prices |
 
 ---
 
@@ -174,9 +174,9 @@ The data format changed across three eras. The library detects the era automatic
 
 | Era | Individual Stocks | Stock Summary | Index Ticks | Index Summary |
 |-----|:---:|:---:|:---:|:---:|
-| **2016** | CSV, 95 cols | CSV, 83 cols | **Fixed-width (69 bytes)** | CSV, 17 cols |
-| **2017-2019** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 17 cols |
-| **2020-2025** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 17 cols |
+| **2016** | CSV, 95 cols | CSV, 83 cols | **Fixed-width (69 bytes)** | **Fixed-width (hybrid)** |
+| **2017-2019** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 83 cols |
+| **2020-2025** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 83 cols |
 
 No user action needed — if your ZIP filename contains `2016`, the fixed-width parser is used automatically for index data.
 
@@ -373,8 +373,8 @@ If you use this software in your research, please cite it. A `CITATION.cff` file
 
 ## Authors
 
-- **Kazumi Li** — Schema definitions, package architecture, current maintainer
 - **Peter Romero** — Original concept and initial project design
+- **Kazumi Li** — Schema definitions, package architecture, current maintainer
 - **Masataka Hayashi** — Initial pandas-based prototype
 
 Developed at Keio University, Nakatsuma Seminar.

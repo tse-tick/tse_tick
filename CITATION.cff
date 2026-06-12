@@ -2,19 +2,20 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "tse_tick"
-abstract: "A Python library for parsing, filtering, and querying Nikkei NEEDS tick data from the Tokyo Stock Exchange. Handles multi-era format variations (2016 fixed-width, 2017-2025 CSV) across four data types with automatic detection, batch CLI ingestion to Hive-partitioned Parquet, event-window extraction with after-hours reaction-anchor shifting, and bilingual column support."
+abstract: "A Python library for parsing, filtering, and querying Nikkei NEEDS tick data from the Tokyo Stock Exchange. Handles multi-era format variations (2016 fixed-width, 2017-2025 CSV) across four data types with automatic detection, batch CLI ingestion to Hive-partitioned Parquet, event-window extraction around per-event reaction anchors, and bilingual column support."
 authors:
-  - family-names: "Li"
-    given-names: "Kazumi"
-    affiliation: "Keio University"
   - family-names: "Romero"
     given-names: "Peter"
-    affiliation: "Keio University"
+    affiliation: "Psychometrics Centre, University of Cambridge"
+  - family-names: "Li"
+    given-names: "Kazumi"
+    affiliation: "Graduate School of Economics, Keio University"
   - family-names: "Hayashi"
     given-names: "Masataka"
-    affiliation: "Keio University"
+    affiliation: "Faculty of Economics, Keio University"
 repository-code: "https://github.com/jevwithwind/tse_tick"
 license: MIT
+version: 0.2.3
 keywords:
   - "tick data"
   - "Tokyo Stock Exchange"

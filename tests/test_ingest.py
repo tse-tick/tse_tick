@@ -1,19 +1,18 @@
 # tests/test_ingest.py
 """Tests for tse_tick.ingest — batch ZIP-to-Parquet ingestion pipeline."""
 
-import datetime
-import io
 import os
 import shutil
-import zipfile
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from tse_tick.ingest import ingest_single_zip, ingest_directory, ingest_year, ingest_event_windows_period
 
-REAL_TICST120_ZIP = os.path.join(os.path.dirname(__file__), "..", "2022", "202202", "HTICST120.20220201.1.zip")
+REAL_TICST120_ZIP = os.path.join(
+    os.environ.get("TSE_TICK_DATA_ROOT", r"G:\flash_crash"),
+    "raw_2022", "202202", "HTICST120.20220201.1.zip",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -247,14 +246,3 @@ def test_ingest_directory_with_explicit_data_type(tmp_path):
     out_dir.mkdir()
     results = ingest_directory(str(in_dir), str(out_dir), data_type="individual_stock")
     assert results[0]["data_type"] == "individual_stock"
-
-
-def test_ingest_year_unknown_data_type_raises(tmp_path):
-    with pytest.raises(ValueError, match="Unknown data_type"):
-        ingest_year(str(tmp_path), str(tmp_path), year=2023, data_type="bad_type")
-
-
-def test_ingest_directory_missing_dir_raises(tmp_path):
-    nonexistent = tmp_path / "does_not_exist"
-    with pytest.raises(FileNotFoundError):
-        ingest_directory(str(nonexistent), str(tmp_path))

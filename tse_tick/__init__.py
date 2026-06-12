@@ -2,8 +2,8 @@
 tse_tick — Tokyo Stock Exchange tick data processing for NEEDS data.
 
 Authors and contributions:
-    Kazumi Li         — Schema definitions, package architecture, maintainer
     Peter Romero      — Original concept and initial project design
+    Kazumi Li         — Schema definitions, package architecture, maintainer
     Masataka Hayashi  — Initial pandas-based prototype
 
 Developed at Keio University, Nakatsuma Seminar.
@@ -138,7 +138,7 @@ def get_info():
     - indices (TICIT110) - 10 fields (23 raw, 15 in 2016)
     - indices_summary (TICIS110) - 17 fields
 
-    Year Range: 2016-2023
+    Year Range: 2016-2025
 
     Languages: English (en), Japanese (jp)
 

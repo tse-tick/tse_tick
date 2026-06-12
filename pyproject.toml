@@ -10,8 +10,8 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 authors = [
-    {name = "Kazumi Li", email = "kaiwenli@keio.jp"},
     {name = "Peter Romero"},
+    {name = "Kazumi Li", email = "kaiwenli@keio.jp"},
     {name = "Masataka Hayashi"},
 ]
 maintainers = [

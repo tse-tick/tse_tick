@@ -1,5 +1,25 @@
 # Changelog — tse_tick
 
+## [Unreleased]
+
+### Fixed
+- **indices_summary output was missing the Index Code column** (16 columns instead of the documented 17): the 83-column raw layout names column 5 "Stock Code" while the final column selection expects "Index Code", so the identifier was silently dropped — leaving index-summary rows unidentifiable. `set_columns()` now renames the field for `indices_summary`, which also routes it through the Index Code decoder (e.g. `101` → "Nikkei 225") instead of the stock-suffix decoder. Found by the new 2017 real-data smoke test.
+- `pyproject.toml` version aligned to 0.2.3 (was 0.2.2), so build artifacts match `__version__` and this changelog.
+- Example notebook (`examples/notebooks/01_basic_usage.ipynb`) stripped of all saved outputs, which contained non-redistributable NEEDS records, and of personal local paths; stale branding and dead documentation links corrected.
+- Real-data test paths repointed from stale machine-specific locations to a `TSE_TICK_DATA_ROOT` environment variable (default `G:\flash_crash`) with per-class skip gates, so partially available data still gets tested; `detect_data_type_and_year` tests no longer require data files at all.
+- README era table corrected: the 2016 index summary format is fixed-width (hybrid `+`-delimited), not CSV.
+- `get_info()` year range updated to 2016-2025.
+
+### Added
+- `tests/test_cli.py`: CLI coverage (argument parsing, validation errors, and end-to-end synthetic-data ingestion), previously 0% — now 82%. Package coverage 61% → 76%.
+- Real-data smoke tests for the 2017 stock-summary and index files (`raw_other/`). Suite grows 165 → 181 tests: without proprietary data 133 pass / 48 skip; with `TSE_TICK_DATA_ROOT` pointing at a local NEEDS store, 155 pass / 26 skip.
+- GitHub Actions test workflow (`.github/workflows/tests.yml`).
+- Benchmarks suite tracked in-repo (scripts, environment documentation, aggregate results CSVs).
+- JOSS paper draft (`paper/paper.md`, `paper/paper.bib`).
+
+### Changed
+- Author order standardized to Peter Romero, Kazumi Li, Masataka Hayashi across CITATION.cff, LICENSE, pyproject.toml, `__init__.py`, and README.
+
 ## [0.2.3] - 2026-05-29
 
 ### Added

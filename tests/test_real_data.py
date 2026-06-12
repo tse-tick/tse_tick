@@ -21,40 +21,45 @@ from tse_tick.schemas import (
 )
 
 # ---------------------------------------------------------------------------
-# Test data paths (read-only)
+# Test data paths (read-only). Override the root with TSE_TICK_DATA_ROOT.
+# Expected layout: TICST120 parts under raw_{year}/{yearmonth}/; stock-summary
+# and index files under raw_other/. Each test class skips on its own file set,
+# so whatever data is present locally still gets tested.
 # ---------------------------------------------------------------------------
 
-TICST120_2016 = r"G:\flash_crash_pilot\raw_2016\201601\HTICST120.20160104.1.zip"
-TICST120_2021 = r"G:\flash_crash_pilot\raw_2021\202104\HTICST120.20210401.1.zip"
-TICST120_DIR_2016 = r"G:\flash_crash_pilot\raw_2016\201601"
+DATA_ROOT = os.environ.get("TSE_TICK_DATA_ROOT", r"G:\flash_crash")
 
-TICSS110_2016 = r"G:\HTICSS110.201601.zip"
-TICSS110_2023 = r"G:\HTICSS110.202302.zip"
+TICST120_2016 = os.path.join(DATA_ROOT, "raw_2016", "201601", "HTICST120.20160104.1.zip")
+TICST120_2021 = os.path.join(DATA_ROOT, "raw_2021", "202104", "HTICST120.20210401.1.zip")
+TICST120_DIR_2016 = os.path.join(DATA_ROOT, "raw_2016", "201601")
 
-TICIT_2016 = r"G:\HTICIT010.201601.zip"
-TICIT_2023 = r"G:\HTICIT110.202301.zip"
+TICSS110_2016 = os.path.join(DATA_ROOT, "raw_other", "HTICSS110.201601.zip")
+TICSS110_2017 = os.path.join(DATA_ROOT, "raw_other", "HTICSS110.201701.zip")
+TICSS110_2023 = os.path.join(DATA_ROOT, "raw_other", "HTICSS110.202302.zip")
 
-TICIS_2016 = r"G:\HTICIS010.201601.zip"
-TICIS_2023 = r"G:\HTICIS110.202301.zip"
+TICIT_2016 = os.path.join(DATA_ROOT, "raw_other", "HTICIT010.201601.zip")
+TICIT_2017 = os.path.join(DATA_ROOT, "raw_other", "HTICIT110.201701.zip")
+TICIT_2023 = os.path.join(DATA_ROOT, "raw_other", "HTICIT110.202301.zip")
 
-ALL_FILES = [
-    TICST120_2016, TICST120_2021,
-    TICSS110_2016, TICSS110_2023,
-    TICIT_2016, TICIT_2023,
-    TICIS_2016, TICIS_2023,
-]
+TICIS_2016 = os.path.join(DATA_ROOT, "raw_other", "HTICIS010.201601.zip")
+TICIS_2017 = os.path.join(DATA_ROOT, "raw_other", "HTICIS110.201701.zip")
+TICIS_2023 = os.path.join(DATA_ROOT, "raw_other", "HTICIS110.202301.zip")
 
-skip_if_no_data = pytest.mark.skipif(
-    not all(os.path.exists(f) for f in ALL_FILES),
-    reason="Real NEEDS data files not available",
-)
+
+def requires_files(*paths):
+    """Skip a test class unless every listed real-data file exists."""
+    missing = [p for p in paths if not os.path.exists(p)]
+    return pytest.mark.skipif(
+        bool(missing),
+        reason=f"Real NEEDS data files not available: {missing}",
+    )
 
 
 # ===================================================================
 # TICST120 — Individual Stock Ticks (95 columns)
 # ===================================================================
 
-@skip_if_no_data
+@requires_files(TICST120_2016, TICST120_2021, TICST120_DIR_2016)
 class TestTICST120:
     def test_2016_column_count(self):
         df = create_df(TICST120_2016, language="en", rows=10)
@@ -108,7 +113,7 @@ class TestTICST120:
 # TICSS110 — Daily Stock Summary (82 output columns, 83 raw)
 # ===================================================================
 
-@skip_if_no_data
+@requires_files(TICSS110_2016, TICSS110_2023)
 class TestTICSS110:
     def test_2016_column_count(self):
         df = create_df(TICSS110_2016, language="en", rows=10)
@@ -144,7 +149,7 @@ class TestTICSS110:
 # TICIT110 — Index Ticks (10 output columns)
 # ===================================================================
 
-@skip_if_no_data
+@requires_files(TICIT_2016, TICIT_2023)
 class TestTICIT110:
     def test_2016_column_count(self):
         df = create_df(TICIT_2016, language="en", rows=10)
@@ -185,7 +190,7 @@ class TestTICIT110:
 # TICIS110 — Daily Index Summary (17 columns)
 # ===================================================================
 
-@skip_if_no_data
+@requires_files(TICIS_2016, TICIS_2023)
 class TestTICIS110:
     def test_2016_column_count(self):
         df = create_df(TICIS_2016, language="en", rows=10)
@@ -222,10 +227,29 @@ class TestTICIS110:
 
 
 # ===================================================================
-# detect_data_type_and_year
+# 2017 summary / index files (modern-era smoke tests)
 # ===================================================================
 
-@skip_if_no_data
+@requires_files(TICSS110_2017, TICIT_2017, TICIS_2017)
+class TestModernEra2017Files:
+    def test_stock_summary_2017_column_count(self):
+        df = create_df(TICSS110_2017, language="en", rows=10)
+        assert len(df.columns) == 82
+
+    def test_index_ticks_2017_column_count(self):
+        df = create_df(TICIT_2017, language="en", rows=10)
+        assert len(df.columns) == 10
+
+    def test_index_summary_2017_column_count(self):
+        df = create_df(TICIS_2017, language="en", rows=10)
+        assert len(df.columns) == 17
+        assert "Index Code" in df.columns
+
+
+# ===================================================================
+# detect_data_type_and_year (pure filename parsing — no data needed)
+# ===================================================================
+
 class TestDetectDataTypeAndYear:
     def test_ticst120_2016(self):
         dt, yr = detect_data_type_and_year(TICST120_2016)
@@ -280,12 +304,12 @@ class TestDetectDataTypeAndYear:
 # export_to_csv
 # ===================================================================
 
-@skip_if_no_data
+@requires_files(TICIS_2017)
 class TestExportToCsv:
     def test_export_with_explicit_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             out = export_to_csv(
-                TICIS_2023,
+                TICIS_2017,
                 output_path=os.path.join(tmpdir, "test.csv"),
                 rows=5,
             )
@@ -297,7 +321,7 @@ class TestExportToCsv:
             orig_dir = os.getcwd()
             try:
                 os.chdir(tmpdir)
-                out = export_to_csv(TICIS_2023, rows=5)
+                out = export_to_csv(TICIS_2017, rows=5)
                 assert os.path.exists(out)
                 assert "indices_summary" in out
             finally:
@@ -334,7 +358,7 @@ class TestErrorPaths:
 # _tick_dt / _stock_4 column leak bug
 # ===================================================================
 
-@skip_if_no_data
+@requires_files(TICST120_2021)
 class TestInternalColumnLeak:
     def test_filter_ticks_drops_internal_columns_with_matches(self):
         """When events match, _tick_dt and _stock_4 should be dropped."""
