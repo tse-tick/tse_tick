@@ -5,13 +5,13 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.2.1 (Alpha) |
-| Language | Python 3.8+ |
+| Version | 0.2.3 (Alpha) |
+| Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
-| Dependencies | `polars>=0.20.0`, `pyarrow>=12.0.0`, `duckdb>=0.9.0` |
+| Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
 | Repository | `https://github.com/jevwithwind/tse_tick.git` |
 | Data | Nikkei NEEDS high-frequency tick data (Tokyo Stock Exchange, proprietary) |
-| Year range | 2016–2023 |
+| Year range | 2016–2025 |
 | Architecture | Two-stage: **INGEST** (ZIP→Parquet) → **QUERY** (DuckDB + features) |
 
 ---
@@ -21,14 +21,13 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # v0.1.0 → v0.2.0 → v0.2.1 history
+├── CHANGELOG.md                     # version history (current: 0.2.3)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
 ├── LICENSE                          # MIT
-├── .gitignore                       # Ignores: *.zip, *.parquet, *.csv, data/, output/, descriptions/
-├── Dockerfile                       # Container image (python:3.11-slim, pip installs polars/pyarrow/duckdb)
-├── docker-compose.yml               # Production ingest service (individual_stock, 2016-2023, 4 workers)
+├── .gitignore                       # Ignores: *.zip, *.parquet, *.csv, data/, output/, descriptions/, technical_paper/
+├── .github/workflows/tests.yml      # CI: pytest on Python 3.9 / 3.11 / 3.13
 │
 ├── tse_tick/                        # *** Main package (pip-installable) ***
 │   ├── __init__.py                  # Public API: re-exports all functions, get_info(), get_version()
@@ -45,19 +44,30 @@ tse_tick/                          # Project root
 │   │   └── parquet.py              # Hive-partitioned Parquet read/write + event-window I/O
 │   └── py.typed                     # PEP 561 marker
 │
-├── tests/                           # Test suite (pytest, 33 pass / 66 skip)
+├── tests/                           # Test suite (pytest, 181 tests; 133 pass / 48 skip w/o data, 181/0 with a NEEDS store)
 │   ├── __init__.py
-│   ├── test_parquet.py              # 12 tests — Parquet I/O with synthetic data (ALL PASS)
-│   ├── test_ingest.py               # 12 tests — Batch ingestion pipeline (MOST PASS, some need real data)
-│   ├── test_event_window.py         # 8 tests — Event window filters with synthetic data (ALL PASS)
-│   ├── test_features.py             # 19 tests — ALL SKIPPED (need populated Parquet store)
-│   ├── test_query.py                # 13 tests — ALL SKIPPED (need populated Parquet store)
-│   ├── test_parquet_io.py           # 14 tests — ALL SKIPPED (largely duplicates test_parquet.py)
-│   ├── test_schemas.py              # STUB (1 line)
-│   └── test_core.py                 # STUB (1 line)
+│   ├── conftest.py                  # Session-scoped synthetic Parquet fixtures (stock_store, indices_store, events_df)
+│   ├── synthetic_data.py            # Generates obviously-fake NEEDS-format ZIPs feeding those fixtures
+│   ├── test_parquet.py              # 12 — Parquet I/O (synthetic)
+│   ├── test_parquet_io.py           # 14 — Parquet partition read/write (synthetic)
+│   ├── test_ingest.py               # 16 — batch ingestion (synthetic + real-ZIP cases, data-gated)
+│   ├── test_query.py                # 15 — DuckDB query layer (synthetic store)
+│   ├── test_features.py             # 20 — order-book features (synthetic store)
+│   ├── test_event_window.py         # 22 — event-window extraction (synthetic + real-data-gated)
+│   ├── test_cli.py                  # 13 — CLI end-to-end (synthetic)
+│   ├── test_paper_examples.py       # 5  — locks the paper's API listings
+│   ├── test_real_data.py            # 64 — real NEEDS files, all 4 types/eras (data-gated)
+│   ├── test_schemas.py              # STUB (1 line; schema coverage in test_real_data.py)
+│   └── test_core.py                 # STUB (1 line; cleaning coverage via synthetic-fixture tests)
 │
 ├── scripts/
 │   └── ingest_event_windows.py      # Standalone CLI: extract ±N-minute event windows from raw ZIPs
+│
+├── benchmarks/                      # Reproducible Polars-vs-pandas + storage/query benchmarks (see §9)
+│   ├── run_all.py                   # Orchestrator → run_engine / run_format / run_query_fix / run_correctness
+│   ├── worker_engine.py             # Subprocess engine worker (isolated timing)
+│   ├── generate_assets.py           # Result CSVs → paper tables + benchmark_figure.pdf
+│   └── results_*.csv                # Aggregate timings (tracked; *_prev.csv = prior run)
 │
 ├── examples/
 │   ├── notebooks/
@@ -81,12 +91,12 @@ tse_tick/                          # Project root
 
 ## 3. Four Data Types
 
-| API Name | Code | Columns | Description |
-|----------|------|---------|-------------|
+| API Name | Code | Output Columns (raw) | Description |
+|----------|------|---------------------|-------------|
 | `individual_stock` | TICST120 | 95 | Tick-level executions, bid/ask quotes (10 levels), volume |
-| `stock_summary` | TICSS110 | 83 | Daily OHLC, VWAP, session splits, execution-size buckets per stock |
-| `indices` | TICIT110 | 23 | Index tick updates (Nikkei 225, TOPIX, etc.) |
-| `indices_summary` | TICIS110 | 17 | Daily index summary (AM/PM OHLC per index) |
+| `stock_summary` | TICSS110 | 82 (83 raw) | Daily OHLC, VWAP, session splits, execution-size buckets per stock |
+| `indices` | TICIT110 | 10 (23 raw, 15 in 2016) | Index tick updates (Nikkei 225, TOPIX, etc.) |
+| `indices_summary` | TICIS110 | 17 (83 raw from 2017) | Daily index summary (AM/PM OHLC per index) |
 
 ---
 
@@ -124,6 +134,17 @@ tse_tick/                          # Project root
 | Removed files | `debug_regex.py`, `validate.py`, `validate_final.py`, `enhanced_backup.py` |
 | PDFs moved | Manual PDFs + `manual_text.txt` moved to `descriptions/` (gitignored) |
 
+### v0.2.2 → 0.2.3 and [Unreleased] (see `CHANGELOG.md` for full detail)
+
+| Change | Detail |
+|--------|--------|
+| Event-window mode | `--filter-csv` / `--window` / `--tickers` flags; `extract_event_window`, `extract_batch_event_windows` |
+| Stage-2 test fixture | Synthetic Hive-Parquet store built via the real ingest pipeline — unblocks query/feature/event-window tests with no proprietary data |
+| Index Code fix | `indices_summary` (TICIS110) col 5 named `Index Code` (was silently dropped); raw 2017+ summary layout is 83 cols, output 17 |
+| Field-count convention | All surfaces report **output** field counts (95 / 82 / 10 / 17) with raw counts in parentheses |
+| CI + real-data tests | GitHub Actions (3.9/3.11/3.13); real-data tests for all 4 types across eras; suite is 181 tests |
+| Benchmarks | Tracked, reproducible engine/format/query suite + a Polars==pandas correctness gate (see §9) |
+
 ---
 
 ## 5. Polars Data Pipeline — How It Works
@@ -156,8 +177,9 @@ create_df(folder_path, language, rows, auto_detect, data_type, year, ticker_filt
     ├─ [4] clean_data(df, kind, language)
     │      ├─ Japanese mode: temporarily rename JP→EN for cleaning, then back to JP
     │      ├─ Type casting (by positional index):
-    │      │   ├─ Int64: volume/count columns (fill_null→0)
-    │      │   ├─ Float64: price/quote columns (fill_null→0.0)
+    │      │   ├─ Int64: volume / quote-volume / quote-flag columns (fill_null→0)
+    │      │   ├─ price/quote-price columns: fill_null→0.0 but mostly kept as
+    │      │   │   String (documented limitation; only one quote-price cast Float64)
     │      │   └─ Time columns: fill_null→None, keep as String
     │      ├─ Data Date → str.to_datetime("%Y%m%d")
     │      ├─ Time string slicing: Execution Time→6 chars, Update Time→12 chars
@@ -337,38 +359,53 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Tool | Config |
 |------|--------|
-| **Build** | setuptools + setuptools_scm, packages=["tse_tick"] |
+| **Build** | setuptools + wheel; static `version = "0.2.3"`; `packages.find` include=`tse_tick*` |
 | **CLI** | `tse-tick = "tse_tick.cli:main"` |
-| **Black** | line-length=100, target Python 3.8–3.11 |
+| **Extras** | `query` (duckdb), `test` (pandas/pytest/pytest-cov), `dev` (test + black/flake8/mypy/jupyter), `docs` |
+| **Black** | line-length=100, target Python 3.9–3.12 |
 | **Pytest** | `--cov=tse_tick`, testpaths=["tests"] |
 | **Coverage** | source=["tse_tick"], omit tests + pycache |
-| **Mypy** | Python 3.8, warn_return_any, strict_equality |
+| **Mypy** | Python 3.10, warn_return_any, strict_equality, `tests.*` ignored |
 | **Flake8** | max-line-length=100, ignore E203/E266/E501/W503 |
 
 ---
 
-## 9. Containerization
+## 9. Benchmarks (`benchmarks/`)
 
-**Dockerfile**: `python:3.11-slim` → pip install polars/pyarrow/duckdb → copy package → `pip install -e .` → entrypoint `tse-tick`
+Reproducible benchmarks back the performance numbers in the README and the
+technical paper. Run everything with `python benchmarks/run_all.py` (a thin
+orchestrator); the canonical scripts are:
 
-**docker-compose.yml**: Single `ingest` service mounting `/mnt/tse_data` (ro) and `/mnt/parquet_store` (rw), processes `individual_stock` for 2016-2023 with 4 parallel workers.
+| Script | Produces | Measures |
+|--------|----------|----------|
+| `run_engine.py` | `results_engine.csv`, `results_engine_summary.csv` | parse+clean: Polars vs pandas (Python-engine prototype + fair C-engine baseline), all 4 types, 16T / 1T |
+| `run_format.py` | `results_format.csv` | storage formats — CSV / CSV.gz / Parquet (Snappy, Zstd) / Feather / Pickle: size, read, write, selective read |
+| `run_query_fix.py` | `results_query.csv` | single-ticker hour slice: DuckDB + Hive-Parquet vs pandas CSV scan |
+| `run_correctness.py` | (gate) | asserts Polars output is byte-identical to the pandas-fair pipeline for all 4 types |
+
+`worker_engine.py` runs each engine condition in an isolated subprocess (7 reps,
+1 warm-up, median); `generate_assets.py` turns the result CSVs into the paper's
+tables and `benchmark_figure.pdf`. See `benchmarks/ENVIRONMENT.md` for the
+reference machine and package versions.
 
 ---
 
 ## 10. Test Status
 
-| Test File | Tests | Status |
-|-----------|-------|--------|
-| `test_parquet.py` | 12 | ALL PASS (synthetic data) |
-| `test_ingest.py` | 12+8 | Most pass; ~6 skip (need real data for type detection beyond individual_stock) |
-| `test_event_window.py` | 8 | ALL PASS (synthetic data); ~14 skip (full-window extraction needs Parquet store) |
-| `test_features.py` | 19 | ALL SKIPPED — require populated Parquet store |
-| `test_query.py` | 13 | ALL SKIPPED — require populated Parquet store |
-| `test_parquet_io.py` | 14 | ALL SKIPPED — legacy duplicate of test_parquet.py |
-| `test_schemas.py` | 0 | STUB |
-| `test_core.py` | 0 | STUB |
+**181 tests.** Without proprietary data (the CI profile): **133 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 181 pass**.
 
-**Key gap**: Stage 2 (query + features + event-window extraction from Parquet stores) has ZERO test coverage because all tests need a real populated Parquet store. Stage 1 (ingest pipeline) is well-tested with synthetic data.
+| Area | Coverage |
+|------|----------|
+| Stage-1 (ingest) | `test_ingest` (16), `test_parquet` (12), `test_parquet_io` (14) — synthetic + real-ZIP cases |
+| Stage-2 (query / features / event-window from Parquet) | `test_query` (15), `test_features` (20), `test_event_window` (22) — run against a **synthetic Hive-Parquet store** built by the real ingest pipeline (`conftest.py` + `synthetic_data.py`), so they need no proprietary data |
+| CLI | `test_cli` (13) — end-to-end on synthetic data |
+| Paper examples | `test_paper_examples` (5) — locks the technical paper's API listings |
+| Real data | `test_real_data` (64) + real-ZIP cases in `test_ingest` — all 4 types across the 2016 fixed-width and 2017+ CSV eras; **gated on local NEEDS files** (these are the 48 no-data skips) |
+
+`test_core.py` and `test_schemas.py` are 1-line stubs — cleaning and schema
+correctness are exercised by `test_real_data.py` and the synthetic-fixture
+tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 
 ---
 
@@ -376,13 +413,13 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Protection | Location | Mechanism |
 |------------|----------|-----------|
-| ZIP bomb | `enhanced.py:2-4,29-31` | Max 5 GB decompressed, 5 entries, 100:1 ratio |
-| Path traversal | `query.py:13-20` | Resolved path prefix validation in `_resolve_type_dir()` |
-| Parallel cap | `ingest.py:18,56-58` | `_MAX_WORKERS = 8`, enforced in `ingest_directory()` |
-| Query overflow | `query.py:10,46` | Default `LIMIT 10_000_000` on `query_ticks()` |
-| SQL injection | `query.py:23-35` | Regex validation: `^[A-Za-z_]\w*$` identifiers, `^\d{8}$` dates, `^\d{2}:\d{2}:\d{2}$` times |
-| Traceback leak | `ingest.py:282` | `traceback.print_exc()` → `logger.error(exc_info=True)` |
-| Privileged SQL | `query.py:99-128` | `query_sql()` documented with WARNING docstring; read-only by DuckDB in-memory design |
+| ZIP bomb | `enhanced.py` | Max 5 GB decompressed, 5 entries, 100:1 ratio |
+| Path traversal | `query.py` | Resolved path prefix validation in `_resolve_type_dir()` |
+| Parallel cap | `ingest.py` | `_MAX_WORKERS = 8`, enforced in `ingest_directory()` |
+| Query overflow | `query.py` | Default `LIMIT 10_000_000` on `query_ticks()` |
+| SQL injection | `query.py` | Regex validation: `^[A-Za-z_]\w*$` identifiers, `^\d{8}$` dates, `^\d{2}:\d{2}:\d{2}$` times |
+| Traceback leak | `ingest.py` | `traceback.print_exc()` → `logger.error(exc_info=True)` |
+| Privileged SQL | `query.py` | `query_sql()` documented with WARNING docstring; read-only by DuckDB in-memory design |
 
 ---
 
@@ -394,7 +431,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 | C2 | One raw DataFrame in memory at a time | `ingest.py` loops + `del` + `gc.collect()` |
 | C4 | Partitioned Parquet output, never single monolithic file | `io/parquet.py` |
 | C5 | Corrupt ZIPs logged and skipped (not fatal) | `ingest.py`, `scripts/ingest_event_windows.py` |
-| C6 | JST timezone on all timestamp comparisons | `event_window.py:62-67,87-89` |
+| C6 | JST timezone on all timestamp comparisons | `event_window.py` |
 | C8 | ZIP bomb guard | `enhanced.py` (checked before decompression) |
 | C9 | Max parallel workers: 8 | `ingest.py` |
 | C10 | Query row limit: 10M | `query.py` |
