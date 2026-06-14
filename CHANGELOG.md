@@ -9,6 +9,7 @@
 - Real-data test paths repointed from stale machine-specific locations to a `TSE_TICK_DATA_ROOT` environment variable (default `G:\flash_crash`) with per-class skip gates, so partially available data still gets tested; `detect_data_type_and_year` tests no longer require data files at all.
 - README era table corrected: the 2016 index summary format is fixed-width (hybrid `+`-delimited), not CSV.
 - `get_info()` year range updated to 2016-2025.
+- CI test workflow installs pandas via a new `test` extra (`pip install -e .[query,test]`); the previous `.[query]`-only install lacked pandas (imported by `tests/test_event_window.py`), which aborted pytest collection on all Python versions. Added `from __future__ import annotations` to `tests/test_event_window.py` and `tests/synthetic_data.py` so their PEP 604 `X | None` annotations remain importable under Python 3.9.
 
 ### Added
 - `tests/test_cli.py`: CLI coverage (argument parsing, validation errors, and end-to-end synthetic-data ingestion), previously 0% — now 82%. Package coverage 61% → 76%.

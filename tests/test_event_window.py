@@ -1,4 +1,6 @@
 # tests/test_event_window.py
+from __future__ import annotations
+
 import datetime
 
 import pandas as pd

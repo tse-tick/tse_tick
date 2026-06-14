@@ -11,6 +11,8 @@ The output is written to ZIPs and run through the *real* ingest pipeline
 (``ingest_single_zip``) so the resulting Parquet store is produced by the same
 code path as production. No proprietary NEEDS data is read or written.
 """
+from __future__ import annotations
+
 import zipfile
 from pathlib import Path
 
