@@ -13,7 +13,7 @@
 
 ### Added
 - `tests/test_cli.py`: CLI coverage (argument parsing, validation errors, and end-to-end synthetic-data ingestion), previously 0% — now 82%. Package coverage 61% → 76%.
-- Real-data smoke tests for the 2017 stock-summary and index files (`raw_other/`). Suite grows 165 → 181 tests: without proprietary data 133 pass / 48 skip; with `TSE_TICK_DATA_ROOT` pointing at a local NEEDS store, 155 pass / 26 skip.
+- Real-data tests covering all four NEEDS types across the 2016 fixed-width and 2017+ CSV eras (`test_real_data.py`; `test_ingest.py` ingest auto-detection for stock_summary / indices / indices_summary). Suite is **181 tests**: without proprietary data 133 pass / 48 skip; with a complete local NEEDS store, all 181 pass / 0 skip.
 - GitHub Actions test workflow (`.github/workflows/tests.yml`).
 - Benchmarks suite tracked in-repo (scripts, environment documentation, aggregate results CSVs).
 

@@ -344,7 +344,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **181 tests**: **133 pass** and **48 are skipped**. Stage-1
+The suite collects **181 tests**. Without a local NEEDS store, **133 pass** and **48 skip**; with a complete NEEDS store, **all 181 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
