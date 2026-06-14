@@ -15,7 +15,6 @@
 - Real-data smoke tests for the 2017 stock-summary and index files (`raw_other/`). Suite grows 165 → 181 tests: without proprietary data 133 pass / 48 skip; with `TSE_TICK_DATA_ROOT` pointing at a local NEEDS store, 155 pass / 26 skip.
 - GitHub Actions test workflow (`.github/workflows/tests.yml`).
 - Benchmarks suite tracked in-repo (scripts, environment documentation, aggregate results CSVs).
-- JOSS paper draft (`paper/paper.md`, `paper/paper.bib`).
 
 ### Changed
 - Author order standardized to Peter Romero, Kazumi Li, Masataka Hayashi across CITATION.cff, LICENSE, pyproject.toml, `__init__.py`, and README.
