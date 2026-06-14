@@ -170,13 +170,12 @@ features = tse_tick.compute_all_features(df)
 
 ## Multi-Era Format Support
 
-The data format changed across three eras. The library detects the era automatically from the ZIP filename (the year) and applies the correct parser.
+The format changed only once, after 2016, and only for the index types (fixed-width to CSV); individual stock and stock summary files were CSV throughout. The library detects the era automatically from the ZIP filename (the year) and applies the correct parser.
 
 | Era | Individual Stocks | Stock Summary | Index Ticks | Index Summary |
 |-----|-------------------|---------------|-------------|---------------|
 | **2016** | CSV, 95 cols | CSV, 83 cols | **Fixed-width (69 bytes)** | **Fixed-width (hybrid)** |
-| **2017-2019** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 83 cols |
-| **2020-2025** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 83 cols |
+| **2017-2025** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 83 cols |
 
 No user action needed — if your ZIP filename contains `2016`, the fixed-width parser is used automatically for index data.
 
@@ -187,7 +186,7 @@ No user action needed — if your ZIP filename contains `2016`, the fixed-width 
 `tse_tick` is built on Polars (CSV parsing, vectorized cleaning) and DuckDB over Hive-partitioned Parquet (queries). Measured on one day of HTICST120 (4.78 M rows, 95 columns, 2.16 GB raw CSV) on a 10-core / 16-thread Intel CPU with 32 GB RAM, Python 3.11.
 
 | Comparison | Speedup | Source |
-|------------|--------:|--------|
+|------------|---------|--------|
 | Polars (16T) vs pandas (Python engine) | **85.2×** | `benchmarks/results_engine.csv` |
 | Polars (16T) vs pandas (C engine, fair baseline) | **28.1×** | `benchmarks/results_engine.csv` |
 | Polars (1 thread) vs pandas (C engine) | **7.2×** | `benchmarks/results_engine.csv` |
