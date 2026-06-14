@@ -173,7 +173,7 @@ features = tse_tick.compute_all_features(df)
 The data format changed across three eras. The library detects the era automatically from the ZIP filename (the year) and applies the correct parser.
 
 | Era | Individual Stocks | Stock Summary | Index Ticks | Index Summary |
-|-----|:---:|:---:|:---:|:---:|
+|-----|-------------------|---------------|-------------|---------------|
 | **2016** | CSV, 95 cols | CSV, 83 cols | **Fixed-width (69 bytes)** | **Fixed-width (hybrid)** |
 | **2017-2019** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 83 cols |
 | **2020-2025** | CSV, 95 cols | CSV, 83 cols | CSV, 23 cols | CSV, 83 cols |
@@ -345,17 +345,17 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **160 tests**: **104 pass** and **56 are skipped**. Stage-1
+The suite collects **181 tests**: **133 pass** and **48 are skipped**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
 feeding synthetic, obviously-fake `individual_stock` (TICST120) ZIPs through the
 real ingest pipeline (`tests/synthetic_data.py`, `tests/conftest.py`).
 
-The 56 skips are tests that load **real NEEDS files** from local paths
-(`test_real_data.py` and the real-ZIP cases in `test_ingest.py`) plus one
-index-query test outside the synthetic fixture's `individual_stock` scope. They
-run automatically once a local NEEDS store is present.
+The 48 skips load **real NEEDS files** from local paths
+(`test_real_data.py` and the real-ZIP cases in `test_ingest.py`), plus a handful
+of fixtures outside the synthetic store's scope. They run automatically once a
+local NEEDS store is present.
 
 ---
 
@@ -373,8 +373,8 @@ If you use this software in your research, please cite it. A `CITATION.cff` file
 
 ## Authors
 
-- **Peter Romero** — Original concept and initial project design
 - **Kazumi Li** — Schema definitions, package architecture, current maintainer
 - **Masataka Hayashi** — Initial pandas-based prototype
+- **Peter Romero** — Original concept and initial project design
 
 Developed at Keio University, Nakatsuma Seminar.

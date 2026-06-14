@@ -2,9 +2,9 @@
 tse_tick — Tokyo Stock Exchange tick data processing for NEEDS data.
 
 Authors and contributions:
-    Peter Romero      — Original concept and initial project design
     Kazumi Li         — Schema definitions, package architecture, maintainer
     Masataka Hayashi  — Initial pandas-based prototype
+    Peter Romero      — Original concept and initial project design
 
 Developed at Keio University, Nakatsuma Seminar.
 """

@@ -18,7 +18,7 @@
 - Benchmarks suite tracked in-repo (scripts, environment documentation, aggregate results CSVs).
 
 ### Changed
-- Author order standardized to Peter Romero, Kazumi Li, Masataka Hayashi across CITATION.cff, LICENSE, pyproject.toml, `__init__.py`, and README.
+- Author order set to Kazumi Li, Masataka Hayashi, Peter Romero across CITATION.cff, LICENSE, pyproject.toml, `__init__.py`, and README.
 
 ## [0.2.3] - 2026-05-29
 
