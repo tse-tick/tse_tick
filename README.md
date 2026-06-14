@@ -13,7 +13,7 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 ## Features
 
 - **4 data types** — TICST120 (individual stock ticks, 95 cols), TICSS110 (daily stock summary, 82 cols), TICIT110 (index ticks, 10 cols), TICIS110 (daily index summary, 17 cols)
-- **Multi-era format support** — 2016 fixed-width (TICIT010), 2017-2019, and 2020-2025 CSV formats, auto-detected from the ZIP filename
+- **Multi-era format support** — 2016 fixed-width (TICIT010/TICIS010) and 2017-2025 CSV, auto-detected from the ZIP filename
 - **Polars backend** — fast CSV parsing, vectorized cleaning, memory-efficient
 - **CLI batch ingestion** — `tse-tick ingest` converts entire years/months/date ranges to partitioned Parquet
 - **Ticker filtering** (`--tickers`) — keep only specific stock codes at read time
@@ -25,25 +25,18 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 
 ## Installation
 
-```bash
-pip install tse-tick
-```
-
-For DuckDB-powered Parquet query support:
-
-```bash
-pip install tse-tick[query]
-```
-
-Development install from source:
+> Not yet on PyPI — install from source for now. A PyPI release (`pip install tse-tick`) will follow.
 
 ```bash
 git clone https://github.com/jevwithwind/tse_tick.git
 cd tse_tick
-pip install -e ".[dev]"
+
+pip install -e .             # core: polars, pyarrow
+pip install -e ".[query]"    # + DuckDB-powered Parquet queries
+pip install -e ".[dev]"      # + everything for development (tests, linters, jupyter)
 ```
 
-Requires Python ≥3.9 and the dependencies listed in `pyproject.toml` (polars, pyarrow). Optional: `pip install tse-tick[query]` for DuckDB-powered Parquet queries.
+Requires Python ≥3.9. Core dependencies are polars and pyarrow; the `query` extra adds DuckDB (see `pyproject.toml`).
 
 ---
 
@@ -360,7 +353,7 @@ local NEEDS store is present.
 
 ## Citation
 
-If you use this software in your research, please cite it. A `CITATION.cff` file is included in the repository.
+If you use this software in your research, please cite it using the `CITATION.cff` file in the repository. A technical paper describing the library is in preparation.
 
 ---
 
