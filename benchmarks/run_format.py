@@ -22,7 +22,7 @@ import pyarrow.feather as pf
 import pyarrow.parquet as pq
 
 BENCHMARKS_DIR = Path(__file__).parent
-RAW_ROOT = Path(r"G:\flash_crash_pilot")
+RAW_ROOT = Path(r"G:\flash_crash")
 REPS = 5
 WARMUP = 1
 

@@ -9,10 +9,14 @@ import pytest
 
 from tse_tick.ingest import ingest_single_zip, ingest_directory, ingest_year, ingest_event_windows_period
 
+_DATA_ROOT = os.environ.get("TSE_TICK_DATA_ROOT", r"G:\flash_crash")
 REAL_TICST120_ZIP = os.path.join(
-    os.environ.get("TSE_TICK_DATA_ROOT", r"G:\flash_crash"),
-    "raw_2022", "202202", "HTICST120.20220201.1.zip",
+    _DATA_ROOT, "raw_2022", "202202", "HTICST120.20220201.1.zip",
 )
+# Real summary/index files staged flat under raw_other/ (see test_real_data.py).
+REAL_TICSS110_ZIP = os.path.join(_DATA_ROOT, "raw_other", "HTICSS110.201701.zip")
+REAL_TICIT110_ZIP = os.path.join(_DATA_ROOT, "raw_other", "HTICIT110.201701.zip")
+REAL_TICIS110_ZIP = os.path.join(_DATA_ROOT, "raw_other", "HTICIS110.201701.zip")
 
 
 # ---------------------------------------------------------------------------
@@ -160,37 +164,40 @@ def test_ingest_single_zip_detects_individual_stock(tmp_path):
     assert meta["year"] == 2022
 
 
-def test_ingest_single_zip_detects_stock_summary():
-    """
-    A filename like HTICSS110.20230104.1.zip should auto-detect as
-    data_type='stock_summary'.
-    """
-    pytest.skip(
-        "The synthetic Stage-2 fixture covers individual_stock (TICST120) only; "
-        "a stock_summary ingest fixture is out of scope for this pass."
-    )
+def test_ingest_single_zip_detects_stock_summary(tmp_path):
+    """HTICSS110.*.zip auto-detects as stock_summary and ingests to Parquet."""
+    if not os.path.exists(REAL_TICSS110_ZIP):
+        pytest.skip(f"Real ZIP not found: {REAL_TICSS110_ZIP}")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    meta = ingest_single_zip(REAL_TICSS110_ZIP, str(out_dir))
+    assert meta["data_type"] == "stock_summary"
+    assert meta["rows"] > 0
+    assert list(out_dir.rglob("*.parquet"))
 
 
-def test_ingest_single_zip_detects_indices():
-    """
-    A filename like HTICIT110.20230104.1.zip should auto-detect as
-    data_type='indices'.
-    """
-    pytest.skip(
-        "The synthetic Stage-2 fixture covers individual_stock (TICST120) only; "
-        "an indices ingest fixture is out of scope for this pass."
-    )
+def test_ingest_single_zip_detects_indices(tmp_path):
+    """HTICIT110.*.zip auto-detects as indices and ingests to Parquet."""
+    if not os.path.exists(REAL_TICIT110_ZIP):
+        pytest.skip(f"Real ZIP not found: {REAL_TICIT110_ZIP}")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    meta = ingest_single_zip(REAL_TICIT110_ZIP, str(out_dir))
+    assert meta["data_type"] == "indices"
+    assert meta["rows"] > 0
+    assert list(out_dir.rglob("*.parquet"))
 
 
-def test_ingest_single_zip_detects_indices_summary():
-    """
-    A filename like HTICIS110.20230104.1.zip should auto-detect as
-    data_type='indices_summary'.
-    """
-    pytest.skip(
-        "The synthetic Stage-2 fixture covers individual_stock (TICST120) only; "
-        "an indices_summary ingest fixture is out of scope for this pass."
-    )
+def test_ingest_single_zip_detects_indices_summary(tmp_path):
+    """HTICIS110.*.zip auto-detects as indices_summary and ingests to Parquet."""
+    if not os.path.exists(REAL_TICIS110_ZIP):
+        pytest.skip(f"Real ZIP not found: {REAL_TICIS110_ZIP}")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    meta = ingest_single_zip(REAL_TICIS110_ZIP, str(out_dir))
+    assert meta["data_type"] == "indices_summary"
+    assert meta["rows"] > 0
+    assert list(out_dir.rglob("*.parquet"))
 
 
 def test_ingest_single_zip_creates_parquet_file(tmp_path):

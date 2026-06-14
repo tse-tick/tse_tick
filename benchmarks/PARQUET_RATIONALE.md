@@ -7,8 +7,8 @@ our benchmark suite.
 ## 1. Columnar Selective Reads
 
 Parquet stores data column-by-column. Reading 3 of 95 columns from Parquet
-(Snappy) takes 0.0166s versus 8.3091s for CSV
-(500.5x faster). CSV must scan every byte of every row to extract a
+(Snappy) takes 0.0169s versus 11.42s for CSV
+(676x faster). CSV must scan every byte of every row to extract a
 subset of columns; Parquet skips column chunks that aren't requested.
 
 ## 2. Predicate Pushdown
@@ -16,9 +16,9 @@ subset of columns; Parquet skips column chunks that aren't requested.
 DuckDB pushes filter predicates (e.g., ticker = '7203' AND time BETWEEN
 '090000' AND '100000') into the Parquet reader, which uses min/max row-group
 statistics to skip irrelevant row groups entirely. The query benchmark shows
-this effect: a targeted query on the Hive Parquet store runs in 0.0205s,
-versus 10.3823s for a pandas full-CSV scan
-(506.5x faster).
+this effect: a targeted query on the Hive Parquet store runs in 0.0135s,
+versus 9.37s for a pandas full-CSV scan
+(694.1x faster).
 
 ## 3. Hive Partition Pruning
 
@@ -39,10 +39,11 @@ property but it eliminates a category of user errors when querying.
 
 | Format           | Size (MB) | Read All (s) | Read 3/95 (s) |
 |------------------|-----------|--------------|----------------|
-| CSV              | 2212.84     | 24.1905       | 8.3091          |
-| Parquet (Snappy) | 99.33     | 0.2873       | 0.0166          |
-| Feather (IPC)    | 795.6     | 1.9966       | 0.0671          |
+| CSV              | 2209.59   | 30.0052      | 11.4198         |
+| Parquet (Snappy) | 99.68     | 0.9127       | 0.0169          |
+| Feather (IPC)    | 797.61    | 2.1837       | 0.0862          |
 
-Feather matches or beats Parquet on raw I/O speed, but lacks predicate
-pushdown and Hive partition pruning — the two properties that make sub-second
-queries on multi-year datasets possible.
+Feather is uncompressed and the largest binary format, and here is no faster
+than Parquet on raw I/O; more importantly it lacks predicate pushdown and Hive
+partition pruning — the two properties that make sub-second queries on
+multi-year datasets possible.

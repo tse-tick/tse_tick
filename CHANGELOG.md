@@ -19,6 +19,7 @@
 
 ### Changed
 - Author order set to Kazumi Li, Masataka Hayashi, Peter Romero across CITATION.cff, LICENSE, pyproject.toml, `__init__.py`, and README.
+- Benchmarks re-run on the reference machine (Intel i5-14400F, 10c/16t, 32 GB; Python 3.11, Polars 1.40, pandas 2.2); all `results_*.csv` refreshed (previous run preserved as `results_*_prev.csv`). The Polars↔pandas correctness gate passes for all four data types. Updated headline figures: engine (HTICST120) 55.5× vs the Python-engine prototype, 22.8× vs the fair C-engine baseline (16 threads), 6.2× single-threaded; query (DuckDB + Hive Parquet vs pandas CSV scan) 694×; Parquet 22.2× smaller than CSV with 676× faster 3-column selective reads. Fixed the stale `G:\flash_crash_pilot` data path in `benchmarks/run_format.py`.
 
 ## [0.2.3] - 2026-05-29
 

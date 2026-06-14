@@ -5,7 +5,7 @@ from statistics import median
 
 BENCHMARKS_DIR = Path(__file__).parent
 WORKER = BENCHMARKS_DIR / "worker_engine.py"
-ZIP_PATH = Path(r"G:\flash_crash_pilot\raw_2017\201701\HTICST120.20170104.1.zip")
+ZIP_PATH = Path(r"G:\flash_crash\raw_2017\201701\HTICST120.20170104.1.zip")
 REPS = 7
 WARMUP = 1
 

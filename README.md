@@ -183,19 +183,19 @@ No user action needed — if your ZIP filename contains `2016`, the fixed-width 
 
 ## Performance
 
-`tse_tick` is built on Polars (CSV parsing, vectorized cleaning) and DuckDB over Hive-partitioned Parquet (queries). Measured on one day of HTICST120 (4.78 M rows, 95 columns, 2.16 GB raw CSV) on a 10-core / 16-thread Intel CPU with 32 GB RAM, Python 3.11.
+`tse_tick` is built on Polars (CSV parsing, vectorized cleaning) and DuckDB over Hive-partitioned Parquet (queries). Measured on one day of HTICST120 (4.78 M rows, 95 columns, 2.16 GB raw CSV) on an Intel Core i5-14400F (10-core / 16-thread) with 32 GB RAM, Python 3.11, Polars 1.40, pandas 2.2.
 
 | Comparison | Speedup | Source |
 |------------|---------|--------|
-| Polars (16T) vs pandas (Python engine) | **85.2×** | `benchmarks/results_engine.csv` |
-| Polars (16T) vs pandas (C engine, fair baseline) | **28.1×** | `benchmarks/results_engine.csv` |
-| Polars (1 thread) vs pandas (C engine) | **7.2×** | `benchmarks/results_engine.csv` |
-| DuckDB + Hive Parquet vs pandas CSV scan (single-ticker hour slice) | **506.5×** | `benchmarks/results_query.csv` |
-| Parquet (Snappy) storage size vs raw CSV | **22× smaller** (99 MB vs 2.2 GB) | `benchmarks/results_format.csv` |
+| Polars (16T) vs pandas (Python engine) | **55.5×** | `benchmarks/results_engine_summary.csv` |
+| Polars (16T) vs pandas (C engine, fair baseline) | **22.8×** | `benchmarks/results_engine_summary.csv` |
+| Polars (1 thread) vs pandas (C engine) | **6.2×** | `benchmarks/results_engine_summary.csv` |
+| DuckDB + Hive Parquet vs pandas CSV scan (single-ticker hour slice) | **694.1×** | `benchmarks/results_query.csv` |
+| Parquet (Snappy) storage size vs raw CSV | **22× smaller** (100 MB vs 2.2 GB) | `benchmarks/results_format.csv` |
 
 The three Polars speedup numbers are deliberately reported together: against the original pandas Python-engine prototype, against a fair C-engine baseline (all-string dtypes, forced column count), and at single-thread parity to isolate the contribution of threading from the engine itself. Polars wins on all three.
 
-`tse_tick` defaults to Polars because the ingest workload (multi-GB daily CSVs, mostly columnar transformations) hits exactly the case where lazy expression planning and parallel CSV parsing dominate; pandas-on-DataFrame's row-oriented model leaves throughput on the table even with the C engine. For querying, the Parquet store + DuckDB combination converts repeated single-ticker / single-date filters from full file scans into partition pruning, which is the source of the ~500× query speedup.
+`tse_tick` defaults to Polars because the ingest workload (multi-GB daily CSVs, mostly columnar transformations) hits exactly the case where lazy expression planning and parallel CSV parsing dominate; pandas-on-DataFrame's row-oriented model leaves throughput on the table even with the C engine. For querying, the Parquet store + DuckDB combination converts repeated single-ticker / single-date filters from full file scans into partition pruning, which is the source of the ~700× query speedup.
 
 To reproduce: `python benchmarks/run_all.py` (see `benchmarks/ENVIRONMENT.md`).
 
