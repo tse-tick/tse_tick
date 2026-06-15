@@ -115,7 +115,6 @@ cython_debug/
 
 # Technical paper
 technical_paper/
-STAGE2_FIXTURE_SUMMARY.md
 
 # Local agent settings
 .claude/
