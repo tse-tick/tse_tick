@@ -16,6 +16,7 @@
 - Real-data tests covering all four NEEDS types across the 2016 fixed-width and 2017+ CSV eras (`test_real_data.py`; `test_ingest.py` ingest auto-detection for stock_summary / indices / indices_summary). Suite is **181 tests**: without proprietary data 133 pass / 48 skip; with a complete local NEEDS store, all 181 pass / 0 skip.
 - GitHub Actions test workflow (`.github/workflows/tests.yml`).
 - Benchmarks suite tracked in-repo (scripts, environment documentation, aggregate results CSVs).
+- `rclone_guide.md`: step-by-step guide for downloading the Nikkei NEEDS dataset from a Shared-with-me Google Drive folder to local disk via rclone (remote setup, the required `--drive-shared-with-me` flag, structure mapping and sizing, a one-slice smoke test, PowerShell/bash transfer loops, and `rclone check` MD5 verification).
 
 ### Changed
 - Author order set to Kazumi Li, Masataka Hayashi, Peter Romero across CITATION.cff, LICENSE, pyproject.toml, `__init__.py`, and README.
