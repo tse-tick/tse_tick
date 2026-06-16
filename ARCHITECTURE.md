@@ -9,10 +9,10 @@
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
-| Repository | `https://github.com/jevwithwind/tse_tick.git` |
+| Repository | `https://github.com/tse-tick/tse_tick.git` |
 | Data | Nikkei NEEDS high-frequency tick data (Tokyo Stock Exchange, proprietary) |
 | Year range | 2016–2025 |
-| Architecture | Two-stage: **INGEST** (ZIP→Parquet) → **QUERY** (DuckDB + features) |
+| Architecture | Two-stage: **INGEST** (ZIP→Parquet) → **QUERY** (DuckDB + features). A one-shot ZIP→DataFrame reader (`read_ticks`) is planned for 0.3.0 (see §13) |
 
 ---
 
@@ -435,3 +435,18 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 | C8 | ZIP bomb guard | `enhanced.py` (checked before decompression) |
 | C9 | Max parallel workers: 8 | `ingest.py` |
 | C10 | Query row limit: 10M | `query.py` |
+
+---
+
+## 13. Planned (0.3.0)
+
+The public API names are **stable** — no renames (an earlier rename-to-yfinance/Polygon/ccxt proposal
+was reversed). Planned additions are purely additive:
+
+| Item | What |
+|------|------|
+| `read_ticks` (one-shot) | Raw ZIPs → ticker/time-filtered DataFrame with **no** Parquet store — composes `discover_zips` + `create_df`'s byte-level ticker fast-path + the `event_window` time filter (factored into a shared `_tick_datetime` helper). For quick, targeted exploration; the two-stage store path remains the tool for wide/repeated work. |
+| `translate` module | Static, dependency-free mapping from yfinance / Polygon / ccxt names → `tse_tick` names, plus a `translate(source, name)` lookup. Lets users of those libraries find our equivalents **without** coupling us to their APIs. |
+| `DataType` / `Language` enums | `tse_tick/constants.py` — `str`-subclassing enums for the four data types and the two languages (autocomplete; no magic strings). |
+
+See `PYPI_RELEASE_PLAN.md` for the full plan.

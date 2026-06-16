@@ -26,6 +26,25 @@ def ingest_single_zip(
     language: str = "en",
     ticker_filter: Optional[set] = None,
 ) -> dict:
+    """Ingest one raw NEEDS ZIP into the Hive-partitioned Parquet store.
+
+    Cleans the ZIP with :func:`tse_tick.create_df` and writes per-ticker Parquet
+    files under ``output_dir/<data_type>/date=YYYYMMDD/ticker=NNNN.parquet``.
+
+    Args:
+        zip_path: Path to the NEEDS ``.zip``.
+        output_dir: Store root to write under.
+        data_type: NEEDS type; auto-detected from the path when ``None``.
+        year: Era year; auto-detected from the path when ``None``.
+        language: Output column-name language (``"en"`` / ``"jp"``).
+        ticker_filter: Optional ``set`` of string stock codes
+            (``individual_stock`` only).
+
+    Returns:
+        A dict with keys ``"zip_path"``, ``"data_type"``, ``"year"``, ``"rows"``
+        (rows written) and ``"output_path"`` (the store dir, or ``None`` when the
+        ZIP yielded no rows).
+    """
     path = Path(zip_path)
     if not path.exists():
         raise FileNotFoundError(f"ZIP not found: {zip_path}")
@@ -194,6 +213,27 @@ def ingest_period(
     max_workers: int = 1,
     ticker_filter: Optional[set] = None,
 ) -> list[dict]:
+    """Ingest a whole period from a structured NEEDS root into the Parquet store.
+
+    Resolves ``period`` with :func:`tse_tick.parse_period`, discovers the ZIPs
+    with :func:`tse_tick.discover_zips`, and ingests each via
+    :func:`ingest_single_zip`.
+
+    Args:
+        input_root: Root of the ``{year}/{yearmonth}/`` NEEDS hierarchy.
+        output_dir: Store root to write under.
+        period: ``"YYYY"``, ``"YYYYMM-YYYYMM"`` or ``"YYYYMMDD-YYYYMMDD"``.
+        data_type: NEEDS type to ingest.
+        language: Output column-name language (``"en"`` / ``"jp"``).
+        resume: Skip dates whose Parquet output already exists (default ``True``).
+        max_workers: Reserved for parallel ingestion.
+        ticker_filter: Optional ``set`` of string stock codes
+            (``individual_stock`` only).
+
+    Returns:
+        One result dict per processed ZIP (see :func:`ingest_single_zip`); a
+        failed ZIP contributes ``{"zip_path": ..., "error": ...}`` instead.
+    """
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
         raise ValueError(

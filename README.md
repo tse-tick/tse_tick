@@ -6,7 +6,7 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 
 **What it solves:** NEEDS data is delivered as daily ZIP files (1–27 parts per day) with era-dependent schemas — 2016 used fixed-width records for indices, 2017+ switched to CSV, and individual stocks have 95 columns with complex quote-book nesting. This library detects the format automatically, validates for security, parses everything into clean DataFrames, and writes Hive-partitioned Parquet.
 
-**Data access required:** This tool does NOT provide NEEDS data itself. You must have an institutional subscription (Nikkei NEEDS) and access to the raw TICST120/TICSS110/TICIT110/TICIS110 ZIP files. If your data is shared via Google Drive, see [the rclone download guide](rclone_guide.md) for mirroring it to local disk.
+**Data access required:** This tool does NOT provide NEEDS data itself. You must have an institutional subscription (Nikkei NEEDS) and access to the raw TICST120/TICSS110/TICIT110/TICIS110 ZIP files. If your data is shared via Google Drive, see [the rclone download guide](https://github.com/tse-tick/tse_tick/blob/main/rclone_guide.md) for mirroring it to local disk.
 
 ---
 
@@ -25,10 +25,15 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 
 ## Installation
 
-> Not yet on PyPI — install from source for now. A PyPI release (`pip install tse-tick`) will follow.
+```bash
+pip install tse-tick               # from PyPI: core (polars, pyarrow)
+pip install "tse-tick[query]"      # + DuckDB-powered Parquet queries
+```
+
+To work from the latest (unreleased) source instead, install in editable mode:
 
 ```bash
-git clone https://github.com/jevwithwind/tse_tick.git
+git clone https://github.com/tse-tick/tse_tick.git
 cd tse_tick
 
 pip install -e .             # core: polars, pyarrow
@@ -147,6 +152,13 @@ ofi = tse_tick.compute_flow_imbalance(df, window="5min")
 # All features in one pass
 features = tse_tick.compute_all_features(df)
 ```
+
+### Two access patterns
+
+`tse_tick` gives you a filtered DataFrame two ways:
+
+1. **Two-stage (scale / repeated work)** — `ingest` the raw ZIPs into a Hive-partitioned Parquet store once, then `query_ticks` it repeatedly. Querying the store prunes by date/ticker and is far faster than re-reading raw files (~694× vs a pandas CSV scan; see [Performance](#performance)).
+2. **One-shot (quick, targeted exploration)** *(planned for 0.3.0)* — `read_ticks(...)` reads straight from raw ZIPs to a ticker/time-filtered DataFrame with no store to build first; best for a few tickers over a bounded window. Today, `create_df(zip, ticker_filter=...)` already covers the single-file, ticker-filtered case.
 
 ---
 
@@ -313,6 +325,19 @@ Built-in protections for local data processing:
 
 ---
 
+## Roadmap (0.3.0)
+
+The public API names are **stable** — no renames (an earlier proposal to rename functions to
+yfinance/Polygon/ccxt conventions was reversed). Planned additions are purely additive:
+
+- **`read_ticks` one-shot reader** — raw ZIPs → ticker/time-filtered DataFrame without building a Parquet store (see [Two access patterns](#two-access-patterns)).
+- **`translate()` name mapping** — a static lookup from yfinance / Polygon / ccxt names to `tse_tick`'s, so users of those libraries can find the equivalent call without us coupling to their (changing) APIs.
+- **`DataType` / `Language` enums** — for autocomplete and to avoid magic strings.
+
+See `PYPI_RELEASE_PLAN.md` for the full plan.
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please open an issue or submit a pull request.
@@ -359,7 +384,7 @@ If you use this software in your research, please cite it using the `CITATION.cf
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/tse-tick/tse_tick/blob/main/LICENSE)
 
 ---
 

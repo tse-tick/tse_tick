@@ -1,6 +1,51 @@
 import polars as pl
 
 
+def _tick_datetime_expr(
+    date_col: str = "Data Date",
+    time_col: str = "Execution Time",
+) -> pl.Expr:
+    """Polars expression for a tick's full timestamp (naive, no timezone).
+
+    Combines ``date_col`` (a ``Data Date`` Datetime/Date) with ``time_col``
+    (``Execution Time``, stored as ``"HHMMSS"`` or already ``"HH:MM:SS"``) into a
+    ``%Y-%m-%d %H:%M:%S`` datetime. This centralises the ``HHMMSS``/colon handling
+    that was duplicated across ``query.py``, ``features._exec_time_index`` and the
+    two ``event_window`` paths. Parsing is non-strict, so malformed values become
+    null rather than raising.
+    """
+    time_raw = pl.col(time_col).cast(pl.String)
+    has_colon = time_raw.str.contains(":")
+    time_str = (
+        pl.when(has_colon)
+        .then(time_raw)
+        .otherwise(
+            time_raw.str.slice(0, 2) + ":"
+            + time_raw.str.slice(2, 2) + ":"
+            + time_raw.str.slice(4, 2)
+        )
+    )
+    date_part = pl.col(date_col).cast(pl.Date).cast(pl.String)
+    return (date_part + pl.lit(" ") + time_str).str.to_datetime(
+        "%Y-%m-%d %H:%M:%S", strict=False
+    )
+
+
+def _tick_datetime(
+    df: pl.DataFrame,
+    date_col: str = "Data Date",
+    time_col: str = "Execution Time",
+) -> pl.Series:
+    """Eager naive-``Datetime`` Series of tick timestamps for ``df``.
+
+    Thin wrapper over :func:`_tick_datetime_expr` for call sites that already
+    hold a DataFrame (e.g. event-window filtering).
+    """
+    return df.select(
+        _tick_datetime_expr(date_col, time_col).alias("_tick_dt")
+    ).to_series()
+
+
 def parse_line(line: bytes, kind="indices_summary"):
     text = line.decode().rstrip("\r\n")
 
