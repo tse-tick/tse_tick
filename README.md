@@ -19,6 +19,9 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 - **Ticker filtering** (`--tickers`) — keep only specific stock codes at read time
 - **Event-window extraction** (`--filter-csv`) — extract ±N minute windows around corporate events with automatic after-hours reaction-anchor shifting
 - **Bilingual columns** — English and Japanese column names via `--language en|jp`
+- **One-shot reader** (`read_ticks`) — raw ZIPs → a ticker/time-filtered DataFrame with no Parquet store to build first
+- **Name translation** (`translate`) — look up the `tse_tick` equivalent of a yfinance / Polygon / ccxt call
+- **Typed enums** (`DataType`, `Language`) — autocomplete-friendly and accepted anywhere the magic strings are
 - **Security guards** — ZIP bomb detection (5 GB max decompressed, 100:1 compression ratio cap, max 5 entries), path traversal prevention, query row limits (10M)
 
 ---
@@ -158,7 +161,20 @@ features = tse_tick.compute_all_features(df)
 `tse_tick` gives you a filtered DataFrame two ways:
 
 1. **Two-stage (scale / repeated work)** — `ingest` the raw ZIPs into a Hive-partitioned Parquet store once, then `query_ticks` it repeatedly. Querying the store prunes by date/ticker and is far faster than re-reading raw files (~694× vs a pandas CSV scan; see [Performance](#performance)).
-2. **One-shot (quick, targeted exploration)** *(planned for 0.3.0)* — `read_ticks(...)` reads straight from raw ZIPs to a ticker/time-filtered DataFrame with no store to build first; best for a few tickers over a bounded window. Today, `create_df(zip, ticker_filter=...)` already covers the single-file, ticker-filtered case.
+2. **One-shot (quick, targeted exploration)** — `read_ticks(...)` reads straight from raw ZIPs to a ticker/time-filtered DataFrame with no store to build first; best for a few tickers over a bounded window.
+
+```python
+import tse_tick
+
+# Toyota (7203) on 2024-02-01, 09:00–11:30 — straight from the raw ZIPs, no store:
+df = tse_tick.read_ticks(
+    "/path/to/TSE_DATA",          # a single .zip, a flat folder, or a {year}/{yearmonth}/ root
+    ticker_filter={"7203"},
+    date="20240201",
+    start_time="09:00:00",
+    end_time="11:30:00",
+)
+```
 
 ---
 
@@ -325,16 +341,18 @@ Built-in protections for local data processing:
 
 ---
 
-## Roadmap (0.3.0)
+## What's New in 0.3.0
 
-The public API names are **stable** — no renames (an earlier proposal to rename functions to
-yfinance/Polygon/ccxt conventions was reversed). Planned additions are purely additive:
+`tse_tick` 0.3.0 is **available on PyPI** — `pip install tse-tick`. The public API names are
+**stable** — no renames (an earlier proposal to rename functions to yfinance/Polygon/ccxt
+conventions was reversed). The additions are purely additive and backward-compatible:
 
 - **`read_ticks` one-shot reader** — raw ZIPs → ticker/time-filtered DataFrame without building a Parquet store (see [Two access patterns](#two-access-patterns)).
-- **`translate()` name mapping** — a static lookup from yfinance / Polygon / ccxt names to `tse_tick`'s, so users of those libraries can find the equivalent call without us coupling to their (changing) APIs.
+- **`translate()` / `mapping()` name mapping** — a static lookup from yfinance / Polygon / ccxt names to `tse_tick`'s, so users of those libraries can find the equivalent call without coupling to their (changing) APIs.
 - **`DataType` / `Language` enums** — for autocomplete and to avoid magic strings.
+- **`query_ticks(ticker=…)` now accepts `str` or `int`**, plus PEP 257 docstrings across the public API.
 
-See `PYPI_RELEASE_PLAN.md` for the full plan.
+See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
 ---
 
@@ -362,7 +380,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **181 tests**. Without a local NEEDS store, **133 pass** and **48 skip**; with a complete NEEDS store, **all 181 pass**. Stage-1
+The suite collects **208 tests**. Without a local NEEDS store, **160 pass** and **48 skip**; with a complete NEEDS store, **all 208 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
