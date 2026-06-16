@@ -1,7 +1,7 @@
 # tse_tick/query.py
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import polars as pl
 import duckdb
@@ -40,16 +40,63 @@ def _validate_time(time_str: str) -> None:
         raise ValueError(f"Invalid time format (expected HH:MM:SS): {time_str!r}")
 
 
+def _normalize_ticker(ticker: Union[int, str]) -> str:
+    """Normalize an int/str ticker to the code token used in ``ticker=….parquet``.
+
+    Accepts an ``int`` (e.g. ``7203``) or an alphanumeric ``str`` code (e.g.
+    ``"7203"`` or ``"130A"``) and returns the bare token. Anything else raises a
+    ``ValueError`` naming the expected type. The token is interpolated into a
+    filename glob, so non-alphanumeric input (glob/path metacharacters) is
+    rejected rather than silently globbed.
+    """
+    if isinstance(ticker, bool) or not isinstance(ticker, (int, str)):
+        raise ValueError(f"Invalid ticker (expected int or str code): {ticker!r}")
+    token = str(ticker).strip()
+    if not re.fullmatch(r"[A-Za-z0-9]+", token):
+        raise ValueError(
+            f"Invalid ticker (expected an alphanumeric stock/index code): {ticker!r}"
+        )
+    return token
+
+
 def query_ticks(
     data_dir: str,
     data_type: str = "individual_stock",
-    ticker: Optional[int] = None,
+    ticker: Optional[Union[int, str]] = None,
     date: Optional[str] = None,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
     columns: Optional[list[str]] = None,
     limit: Optional[int] = _MAX_QUERY_ROWS,
 ) -> pl.DataFrame:
+    """Query a **pre-built Parquet store** for ticks, with optional filters.
+
+    Reads the Hive-partitioned Parquet store produced by the ``ingest_*``
+    functions; it does **not** read raw ZIPs (use :func:`tse_tick.create_df` or
+    :func:`tse_tick.read_ticks` for those). Requires the ``[query]`` extra —
+    DuckDB — installed via ``pip install tse-tick[query]``.
+
+    Args:
+        data_dir: Store root: the directory that contains ``<data_type>/``.
+        data_type: One of ``"individual_stock"``, ``"stock_summary"``,
+            ``"indices"``, ``"indices_summary"`` (a :class:`DataType` works too).
+        ticker: Stock code (``individual_stock``) or index code (``indices``) as
+            ``int`` or ``str`` — e.g. ``7203`` or ``"7203"``; ``None`` for all.
+        date: Trading day as ``"YYYYMMDD"``; ``None`` for every stored date.
+        start_time: Inclusive lower bound on ``Execution Time`` (``"HH:MM:SS"``).
+        end_time: Inclusive upper bound on ``Execution Time`` (``"HH:MM:SS"``).
+        columns: Column projection; ``None`` selects all columns.
+        limit: Maximum rows returned (default 10,000,000); ``None`` for no cap.
+
+    Returns:
+        A Polars DataFrame ordered by ``Data Date`` then ``Execution Time``
+        (empty if no file matches the requested ``ticker``).
+
+    Example:
+        >>> df = query_ticks(store, data_type=DataType.INDIVIDUAL_STOCK,
+        ...                  ticker=7203, date="20240201",
+        ...                  start_time="09:00:00", end_time="11:30:00")
+    """
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
         raise ValueError(
@@ -72,9 +119,10 @@ def query_ticks(
     # code column being categorically decoded (e.g. Index Code "101" -> "Nikkei
     # 225"), which would defeat a value-based filter.
     if ticker is not None:
+        ticker_token = _normalize_ticker(ticker)
         ticker_files = sorted(
             str(p).replace("\\", "/")
-            for p in type_dir.glob(f"**/ticker={ticker}.parquet")
+            for p in type_dir.glob(f"**/ticker={ticker_token}.parquet")
         )
         if not ticker_files:
             return pl.DataFrame()
@@ -154,6 +202,15 @@ def get_available_dates(
     data_dir: str,
     data_type: str = "individual_stock",
 ) -> list[str]:
+    """List the trading days present in a Parquet store.
+
+    Args:
+        data_dir: Store root: the directory that contains ``<data_type>/``.
+        data_type: Which store to inspect (see :func:`query_ticks`).
+
+    Returns:
+        Sorted ``"YYYYMMDD"`` date strings (from the ``date=`` partition dirs).
+    """
     type_dir = _resolve_type_dir(data_dir, data_type)
 
     dates = []
@@ -169,6 +226,16 @@ def get_available_tickers(
     data_type: str = "individual_stock",
     date: Optional[str] = None,
 ) -> list[int]:
+    """List the ticker/index codes present in a Parquet store.
+
+    Args:
+        data_dir: Store root: the directory that contains ``<data_type>/``.
+        data_type: Which store to inspect (see :func:`query_ticks`).
+        date: Restrict to a single ``"YYYYMMDD"`` day; ``None`` scans all days.
+
+    Returns:
+        Sorted integer codes (parsed from the ``ticker=NNNN.parquet`` filenames).
+    """
     type_dir = _resolve_type_dir(data_dir, data_type)
 
     tickers: set[int] = set()

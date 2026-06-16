@@ -5,7 +5,7 @@ Thank you for your interest in contributing.
 ## Development Setup
 
 ```bash
-git clone https://github.com/jevwithwind/tse_tick.git
+git clone https://github.com/tse-tick/tse_tick.git
 cd tse_tick
 pip install -e ".[dev]"
 ```

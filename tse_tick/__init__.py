@@ -12,13 +12,13 @@ Developed at Keio University, Nakatsuma Seminar.
 # tse_tick/__init__.py
 import polars as pl
 
-__version__ = "0.2.3"
+__version__ = "0.3.0"
 __author__ = "Kazumi Li"
 __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
 __copyright__ = "Copyright 2025-2026"
 
-from .enhanced import create_df, export_to_csv, discover_zips, parse_period
+from .enhanced import create_df, export_to_csv, discover_zips, parse_period, read_ticks
 
 from .schemas import (
     get_schema_individual_stock_95,
@@ -54,6 +54,9 @@ from .features import (
     compute_all_features,
 )
 
+from .constants import DataType, Language
+from .translate import translate, mapping
+
 try:
     from .query import (
         query_ticks,
@@ -77,6 +80,7 @@ except ImportError:
 
 __all__ = [
     "create_df",
+    "read_ticks",
     "export_to_csv",
     "discover_zips",
     "parse_period",
@@ -106,6 +110,10 @@ __all__ = [
     "compute_flow_imbalance",
     "compute_volatility",
     "compute_all_features",
+    "translate",
+    "mapping",
+    "DataType",
+    "Language",
     "__version__",
     "__author__",
 ]
@@ -116,7 +124,8 @@ def get_version():
 
 
 def get_supported_data_types():
-    return ["individual_stock", "stock_summary", "indices", "indices_summary"]
+    # Derive from the DataType enum so this list can never drift from it.
+    return DataType.values()
 
 
 def get_supported_years():
@@ -142,16 +151,24 @@ def get_info():
 
     Languages: English (en), Japanese (jp)
 
-    Quick Start:
+    Quick Start (two access paths):
+    # One-shot - read raw ZIPs straight to a filtered DataFrame (no store):
     >>> import tse_tick
-    >>> df = tse_tick.create_df("data.zip", language='en')
-    >>> tse_tick.export_to_csv("data.zip", "output.csv")
+    >>> df = tse_tick.read_ticks("DATA_ROOT", ticker_filter={{"7203"}},
+    ...                          date="20240201", start_time="09:00:00",
+    ...                          end_time="11:30:00")
+
+    # Two-stage - ingest once into a Parquet store, then query repeatedly:
+    >>> from tse_tick import DataType
+    >>> tse_tick.query_ticks(store, data_type=DataType.INDIVIDUAL_STOCK,
+    ...                      ticker=7203, date="20240201",
+    ...                      start_time="09:00:00", end_time="11:30:00")
 
     CLI Usage:
     >>> tse-tick ingest --data-type individual_stock --period 2024 \\
                 --input-root /path/to/data --output-root /path/to/store
 
     For more information, visit:
-    https://github.com/jevwithwind/tse_tick
+    https://github.com/tse-tick/tse_tick
     """
     print(info)

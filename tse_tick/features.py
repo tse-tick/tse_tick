@@ -38,6 +38,17 @@ def _exec_time_index(df: pl.DataFrame) -> pl.Series:
 
 
 def compute_spread(df: pl.DataFrame) -> pl.Series:
+    """Best-quote spread (``Sell Quote 1 Best`` − ``Buy Quote 1 Best``) per row.
+
+    Expects **English** column names (the ``create_df`` / ``query_ticks``
+    default). Rows missing either side (zero or null) yield ``None``.
+
+    Args:
+        df: An ``individual_stock`` tick frame.
+
+    Returns:
+        A ``Float64`` Series named ``"spread"``, aligned to ``df``'s rows.
+    """
     sell = df["Sell Quote 1 Best"].cast(pl.Float64)
     buy = df["Buy Quote 1 Best"].cast(pl.Float64)
     spread_series = sell - buy
@@ -59,6 +70,19 @@ def compute_depth(
     levels: int = 10,
     side: str = "both",
 ) -> pl.DataFrame:
+    """Order-book depth: quote volumes for levels 1..``levels``.
+
+    Expects **English** column names (``Sell Quote Vol N`` / ``Buy Quote Vol N``).
+
+    Args:
+        df: An ``individual_stock`` tick frame.
+        levels: How many price levels to include (1-10).
+        side: ``"sell"``, ``"buy"``, or ``"both"``.
+
+    Returns:
+        A DataFrame of ``sell_depth_i`` / ``buy_depth_i`` columns (only those
+        present in ``df``).
+    """
     if not (1 <= levels <= 10):
         raise ValueError(f"levels must be 1-10, got {levels}")
     if side not in ("sell", "buy", "both"):
@@ -85,6 +109,18 @@ def compute_flow_imbalance(
     df: pl.DataFrame,
     window: str = "5min",
 ) -> pl.Series:
+    """Rolling order-flow imbalance ``(buy − sell) / (buy + sell)`` over ``window``.
+
+    Trades are signed by comparing ``Execution Price`` to the best-quote mid,
+    then summed in a time-based rolling window. Expects **English** column names.
+
+    Args:
+        df: An ``individual_stock`` tick frame.
+        window: Rolling window, e.g. ``"5min"`` (``"5m"`` is also accepted).
+
+    Returns:
+        A ``Float64`` Series named ``"flow_imbalance"``.
+    """
     sell_best = df["Sell Quote 1 Best"].cast(pl.Float64)
     buy_best = df["Buy Quote 1 Best"].cast(pl.Float64)
     mid = (sell_best + buy_best) * 0.5
@@ -138,6 +174,20 @@ def compute_volatility(
     window: str = "5min",
     method: str = "realized",
 ) -> pl.Series:
+    """Rolling volatility over ``window``.
+
+    Expects **English** column names (uses ``Execution Price`` / ``Execution
+    Time``).
+
+    Args:
+        df: An ``individual_stock`` tick frame.
+        window: Rolling window, e.g. ``"5min"``.
+        method: ``"realized"`` (sqrt of summed squared log returns) or
+            ``"garman_klass"`` (OHLC range estimator).
+
+    Returns:
+        A ``Float64`` Series named ``"volatility"``.
+    """
     if method not in ("realized", "garman_klass"):
         raise ValueError(f"method must be 'realized' or 'garman_klass', got {method!r}")
 
@@ -192,6 +242,22 @@ def compute_all_features(
     volatility_window: str = "5min",
     imbalance_window: str = "5min",
 ) -> pl.DataFrame:
+    """Append spread, depth, flow-imbalance and volatility columns to ``df``.
+
+    Runs :func:`compute_spread`, :func:`compute_depth`,
+    :func:`compute_flow_imbalance` and :func:`compute_volatility` and returns a
+    copy of ``df`` with their outputs added. Expects **English** column names.
+
+    Args:
+        df: An ``individual_stock`` tick frame.
+        levels: Depth levels to include (1-10).
+        volatility_window: Window for the realized-volatility column.
+        imbalance_window: Window for the flow-imbalance column.
+
+    Returns:
+        ``df`` plus ``spread``, ``sell_depth_*`` / ``buy_depth_*``,
+        ``flow_imbalance`` and ``volatility`` columns.
+    """
     result = df.clone()
     result = result.with_columns(compute_spread(df).alias("spread"))
 

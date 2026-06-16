@@ -6,6 +6,8 @@ from typing import Optional
 
 import polars as pl
 
+from .core import _tick_datetime
+
 
 _OFFSET_MAP = {
     "1min": datetime.timedelta(minutes=1),
@@ -47,21 +49,7 @@ def _filter_ticks_for_events(
     if raw_df.is_empty() or events.is_empty():
         return raw_df.clear()
 
-    date_part = raw_df["Data Date"].cast(pl.Date).cast(pl.String)
-    time_raw = raw_df["Execution Time"].cast(pl.String)
-    has_colon = time_raw.str.contains(":")
-    time_str = (
-        pl.when(has_colon)
-        .then(time_raw)
-        .otherwise(
-            time_raw.str.slice(0, 2) + ":"
-            + time_raw.str.slice(2, 2) + ":"
-            + time_raw.str.slice(4, 2)
-        )
-    )
-    tick_dt = (date_part + " " + time_str).str.to_datetime(
-        "%Y-%m-%d %H:%M:%S", strict=False
-    )
+    tick_dt = _tick_datetime(raw_df)
 
     raw_df = raw_df.with_columns(
         tick_dt.dt.replace_time_zone("Asia/Tokyo").alias("_tick_dt"),

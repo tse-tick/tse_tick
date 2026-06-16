@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tse_tick"
-version = "0.2.3"
+name = "tse-tick"
+version = "0.3.0"
 description = "High-performance Nikkei NEEDS tick data processing with Polars"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "Kazumi Li", email = "kaiwenli@keio.jp"},
     {name = "Masataka Hayashi"},
@@ -31,7 +32,7 @@ keywords = [
     "parquet",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Financial and Insurance Industry",
     "Intended Audience :: Science/Research",
     "Topic :: Office/Business :: Financial",
@@ -82,10 +83,10 @@ docs = [
 tse-tick = "tse_tick.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/jevwithwind/tse_tick"
-Repository = "https://github.com/jevwithwind/tse_tick"
-"Bug Tracker" = "https://github.com/jevwithwind/tse_tick/issues"
-Changelog = "https://github.com/jevwithwind/tse_tick/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/tse-tick/tse_tick"
+Repository = "https://github.com/tse-tick/tse_tick"
+"Bug Tracker" = "https://github.com/tse-tick/tse_tick/issues"
+Changelog = "https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md"
 
 # Tool configurations
 [tool.setuptools.packages.find]

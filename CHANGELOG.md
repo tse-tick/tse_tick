@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-16
+
 ### Fixed
 - **indices_summary output was missing the Index Code column** (16 columns instead of the documented 17): the 83-column raw layout names column 5 "Stock Code" while the final column selection expects "Index Code", so the identifier was silently dropped — leaving index-summary rows unidentifiable. `set_columns()` now renames the field for `indices_summary`, which also routes it through the Index Code decoder (e.g. `101` → "Nikkei 225") instead of the stock-suffix decoder. Found by the new 2017 real-data smoke test.
 - `pyproject.toml` version aligned to 0.2.3 (was 0.2.2), so build artifacts match `__version__` and this changelog.
@@ -12,6 +14,11 @@
 - CI test workflow installs pandas via a new `test` extra (`pip install -e .[query,test]`); the previous `.[query]`-only install lacked pandas (imported by `tests/test_event_window.py`), which aborted pytest collection on all Python versions. Added `from __future__ import annotations` to `tests/test_event_window.py` and `tests/synthetic_data.py` so their PEP 604 `X | None` annotations remain importable under Python 3.9.
 
 ### Added
+- **Optional name-translation layer** (`tse_tick/translate.py`): `translate(source, name)` maps yfinance / Polygon / ccxt function and argument names to the `tse_tick` equivalent (e.g. `translate("polygon", "get_aggs") == "query_ticks"`, `translate("yfinance", "tickers") == "ticker_filter"`); `mapping(source=None)` dumps the tables for docs / `help()`. Static and dependency-free — the package does not import those libraries. **No public name was renamed** (an earlier rename-everywhere proposal was reversed).
+- **`read_ticks()` one-shot reader** (`enhanced.py`): reads raw NEEDS ZIPs straight to a ticker/time-filtered Polars DataFrame with **no Parquet store** to build first — tuned for exploration (e.g. "ticker 7203 on 2024-02-01, 09:00–11:30" in one call). Accepts a single ZIP, a flat folder, or a structured `{year}/{yearmonth}/` root; composes `create_df`'s `individual_stock` raw-byte ticker fast path, `discover_zips` / `parse_period`, and the new shared `_tick_datetime` helper. Complements the two-stage `ingest_*` → `query_ticks` scale path.
+- **`DataType` / `Language` enums** (`tse_tick/constants.py`): `str`-subclassing enums for the four data types and two languages, accepted anywhere the magic strings are; `get_supported_data_types()` now derives from `DataType`.
+- **PEP 257 docstrings** across the public API — `query_ticks` / `get_available_dates` / `get_available_tickers`, `create_df` / `export_to_csv` / `discover_zips`, the `compute_*` features, `ingest_single_zip` / `ingest_period`, and the two Parquet store readers (`read_parquet_partition` vs `read_partitioned_parquet`, now clearly disambiguated).
+- Tests for the new additive API (`tests/test_api_additions.py`, `tests/test_read_ticks.py`).
 - `tests/test_cli.py`: CLI coverage (argument parsing, validation errors, and end-to-end synthetic-data ingestion), previously 0% — now 82%. Package coverage 61% → 76%.
 - Real-data tests covering all four NEEDS types across the 2016 fixed-width and 2017+ CSV eras (`test_real_data.py`; `test_ingest.py` ingest auto-detection for stock_summary / indices / indices_summary). Suite is **181 tests**: without proprietary data 133 pass / 48 skip; with a complete local NEEDS store, all 181 pass / 0 skip.
 - GitHub Actions test workflow (`.github/workflows/tests.yml`).
@@ -19,6 +26,9 @@
 - `rclone_guide.md`: step-by-step guide for downloading the Nikkei NEEDS dataset from a Shared-with-me Google Drive folder to local disk via rclone (remote setup, the required `--drive-shared-with-me` flag, structure mapping and sizing, a one-slice smoke test, PowerShell/bash transfer loops, and `rclone check` MD5 verification).
 
 ### Changed
+- **`query_ticks` `ticker` now accepts `str` or `int`** (e.g. `7203` or `"7203"`) and is normalized to the stored code; the parameter was previously typed `Optional[int]`. Backward-compatible; invalid or unsafe values (glob/path metacharacters, wrong types) now raise a clear `ValueError`.
+- Shared `_tick_datetime` / `_tick_datetime_expr` helper (`core.py`) consolidates the `HHMMSS`/colon timestamp construction previously duplicated in `event_window.py` (and mirrored in `query.py` / `features.py`); `_filter_ticks_for_events` now uses it (behaviour unchanged).
+- `pyproject.toml`: `setuptools>=77` and `license-files = ["LICENSE"]` for a clean PEP 639 build; the project `name` is normalized to `tse-tick`; Development Status moved to `4 - Beta`.
 - Author order set to Kazumi Li, Masataka Hayashi, Peter Romero across CITATION.cff, LICENSE, pyproject.toml, `__init__.py`, and README.
 - Benchmarks re-run on the reference machine (Intel i5-14400F, 10c/16t, 32 GB; Python 3.11, Polars 1.40, pandas 2.2); all `results_*.csv` refreshed (previous run preserved as `results_*_prev.csv`). The Polars↔pandas correctness gate passes for all four data types. Updated headline figures: engine (HTICST120) 55.5× vs the Python-engine prototype, 22.8× vs the fair C-engine baseline (16 threads), 6.2× single-threaded; query (DuckDB + Hive Parquet vs pandas CSV scan) 694×; Parquet 22.2× smaller than CSV with 676× faster 3-column selective reads. Fixed the stale `G:\flash_crash_pilot` data path in `benchmarks/run_format.py`.
 

@@ -13,9 +13,9 @@ authors:
   - family-names: "Romero"
     given-names: "Peter"
     affiliation: "Psychometrics Centre, University of Cambridge"
-repository-code: "https://github.com/jevwithwind/tse_tick"
+repository-code: "https://github.com/tse-tick/tse_tick"
 license: MIT
-version: 0.2.3
+version: 0.3.0
 keywords:
   - "tick data"
   - "Tokyo Stock Exchange"

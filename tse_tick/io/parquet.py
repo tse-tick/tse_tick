@@ -144,6 +144,28 @@ def read_parquet_partition(
     ticker: Optional[int] = None,
     columns: Optional[list[str]] = None,
 ) -> pl.DataFrame:
+    """Read from the **main** Parquet store with PyArrow only (no DuckDB).
+
+    A dependency-light alternative to :func:`tse_tick.query_ticks`: it reads the
+    same ``ingest_*`` store (``<data_dir>/<data_type>/date=…/ticker=….parquet``),
+    filters by ``date`` / ``ticker`` and projects ``columns`` — but has **no**
+    time filter and **no** ordering. For time-range queries use
+    :func:`tse_tick.query_ticks` (the ``[query]`` / DuckDB extra).
+
+    Contrast :func:`read_partitioned_parquet`, which reads the separate
+    *event-window* store.
+
+    Args:
+        data_dir: Store root: the directory that contains ``<data_type>/``.
+        data_type: Which store to read.
+        date: ``"YYYYMMDD"`` day filter; ``None`` for all days.
+        ticker: Stock/index code filter (matched on the in-file code column);
+            ``None`` for all.
+        columns: Column projection; ``None`` selects all.
+
+    Returns:
+        A Polars DataFrame of the matching rows.
+    """
     type_dir = Path(data_dir) / data_type
     if not type_dir.exists():
         raise FileNotFoundError(f"Parquet store not found: {type_dir}")
@@ -209,6 +231,24 @@ def read_partitioned_parquet(
     year: Optional[int] = None,
     month: Optional[int] = None,
 ) -> pl.DataFrame:
+    """Read from the **event-window** Parquet store (``year=`` / ``month=``).
+
+    Reads the store written by :func:`write_event_window_parquet` /
+    ``ingest_event_windows_period`` (laid out as
+    ``<data_dir>/year=YYYY/month=MM/<date>.parquet``), optionally restricted to a
+    ``year`` / ``month``.
+
+    Not to be confused with :func:`read_parquet_partition`, which reads the main
+    per-ticker tick store.
+
+    Args:
+        data_dir: Root of the event-window store.
+        year: Restrict to this year; ``None`` for all.
+        month: Restrict to this month; ``None`` for all.
+
+    Returns:
+        A Polars DataFrame of the matching event-window ticks.
+    """
     root = Path(data_dir)
     if not root.exists():
         raise FileNotFoundError(f"Event window Parquet store not found: {root}")
