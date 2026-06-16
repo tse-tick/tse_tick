@@ -5,14 +5,14 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.2.3 (Alpha) |
+| Version | 0.3.0 (Beta) — live on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
 | Repository | `https://github.com/tse-tick/tse_tick.git` |
 | Data | Nikkei NEEDS high-frequency tick data (Tokyo Stock Exchange, proprietary) |
 | Year range | 2016–2025 |
-| Architecture | Two-stage: **INGEST** (ZIP→Parquet) → **QUERY** (DuckDB + features). A one-shot ZIP→DataFrame reader (`read_ticks`) is planned for 0.3.0 (see §13) |
+| Architecture | Two-stage: **INGEST** (ZIP→Parquet) → **QUERY** (DuckDB + features), plus a one-shot ZIP→DataFrame reader (`read_ticks`) shipped in 0.3.0 (see §13) |
 
 ---
 
@@ -21,20 +21,23 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.2.3)
+├── CHANGELOG.md                     # version history (current: 0.3.0)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
 ├── LICENSE                          # MIT
 ├── .gitignore                       # Ignores: *.zip, *.parquet, *.csv, data/, output/, descriptions/, technical_paper/
 ├── .github/workflows/tests.yml      # CI: pytest on Python 3.9 / 3.11 / 3.13
+├── .github/workflows/publish.yml    # Release: build + twine check + PyPI trusted publishing (OIDC)
 │
 ├── tse_tick/                        # *** Main package (pip-installable) ***
-│   ├── __init__.py                  # Public API: re-exports all functions, get_info(), get_version()
+│   ├── __init__.py                  # Public API: re-exports all functions, enums, translate, get_info()
 │   ├── cli.py                       # CLI: tse-tick ingest with --period, --years/--year, --flat
+│   ├── constants.py                 # DataType / Language enums (str-subclassing; new in 0.3.0)
+│   ├── translate.py                 # Static yfinance/Polygon/ccxt → tse_tick name map; translate()/mapping() (0.3.0)
 │   ├── schemas.py                   # Column name definitions (EN/JP) for all 4 data types
-│   ├── enhanced.py                  # Core ETL: create_df(), discover_zips(), parse_period(), _expand_*()
-│   ├── core.py                      # Data cleaning + 2016 fixed-width parser + categorical schemas
+│   ├── enhanced.py                  # Core ETL: create_df(), read_ticks(), discover_zips(), parse_period()
+│   ├── core.py                      # Data cleaning + 2016 fixed-width parser + categorical schemas + _tick_datetime()
 │   ├── ingest.py                    # Batch ZIP→Parquet: ingest_period(), ingest_year_from_root(), _process_zips()
 │   ├── query.py                     # DuckDB SQL interface over partitioned Parquet stores
 │   ├── event_window.py              # ±N-minute tick extraction around corporate disclosure events
@@ -44,7 +47,7 @@ tse_tick/                          # Project root
 │   │   └── parquet.py              # Hive-partitioned Parquet read/write + event-window I/O
 │   └── py.typed                     # PEP 561 marker
 │
-├── tests/                           # Test suite (pytest, 181 tests; 133 pass / 48 skip w/o data, 181/0 with a NEEDS store)
+├── tests/                           # Test suite (pytest, 208 tests; 160 pass / 48 skip w/o data, 208/0 with a NEEDS store)
 │   ├── __init__.py
 │   ├── conftest.py                  # Session-scoped synthetic Parquet fixtures (stock_store, indices_store, events_df)
 │   ├── synthetic_data.py            # Generates obviously-fake NEEDS-format ZIPs feeding those fixtures
@@ -55,6 +58,8 @@ tse_tick/                          # Project root
 │   ├── test_features.py             # 20 — order-book features (synthetic store)
 │   ├── test_event_window.py         # 22 — event-window extraction (synthetic + real-data-gated)
 │   ├── test_cli.py                  # 13 — CLI end-to-end (synthetic)
+│   ├── test_api_additions.py        # 13 — translate / DataType / Language / query_ticks str-int (synthetic)
+│   ├── test_read_ticks.py           # 14 — one-shot read_ticks: single ZIP / flat dir / structured root (synthetic)
 │   ├── test_paper_examples.py       # 5  — locks the paper's API listings
 │   ├── test_real_data.py            # 64 — real NEEDS files, all 4 types/eras (data-gated)
 │   ├── test_schemas.py              # STUB (1 line; schema coverage in test_real_data.py)
@@ -134,7 +139,7 @@ tse_tick/                          # Project root
 | Removed files | `debug_regex.py`, `validate.py`, `validate_final.py`, `enhanced_backup.py` |
 | PDFs moved | Manual PDFs + `manual_text.txt` moved to `descriptions/` (gitignored) |
 
-### v0.2.2 → 0.2.3 and [Unreleased] (see `CHANGELOG.md` for full detail)
+### v0.2.2 → 0.2.3 (see `CHANGELOG.md` for full detail)
 
 | Change | Detail |
 |--------|--------|
@@ -142,8 +147,20 @@ tse_tick/                          # Project root
 | Stage-2 test fixture | Synthetic Hive-Parquet store built via the real ingest pipeline — unblocks query/feature/event-window tests with no proprietary data |
 | Index Code fix | `indices_summary` (TICIS110) col 5 named `Index Code` (was silently dropped); raw 2017+ summary layout is 83 cols, output 17 |
 | Field-count convention | All surfaces report **output** field counts (95 / 82 / 10 / 17) with raw counts in parentheses |
-| CI + real-data tests | GitHub Actions (3.9/3.11/3.13); real-data tests for all 4 types across eras; suite is 181 tests |
+| CI + real-data tests | GitHub Actions (3.9/3.11/3.13); real-data tests for all 4 types across eras |
 | Benchmarks | Tracked, reproducible engine/format/query suite + a Polars==pandas correctness gate (see §9) |
+
+### v0.3.0 — PyPI release + import API polish (2026-06-16)
+
+| Change | Detail |
+|--------|--------|
+| **Published to PyPI** | `pip install tse-tick` (0.3.0, Beta); a release-triggered `publish.yml` builds sdist+wheel, runs `twine check`, and uploads via **OIDC trusted publishing** (no stored token) |
+| `read_ticks()` (one-shot) | Raw ZIPs → ticker/time-filtered DataFrame with no Parquet store (see §13) |
+| `translate` / `mapping` | Static yfinance/Polygon/ccxt → `tse_tick` name lookup (`tse_tick/translate.py`) |
+| `DataType` / `Language` enums | `tse_tick/constants.py`; `get_supported_data_types()` now derives from `DataType` |
+| `query_ticks(ticker=…)` | Now accepts `str` or `int` (normalized); PEP 257 docstrings added across the public API |
+| Packaging | `setuptools>=77` + `license-files` (PEP 639), `name = "tse-tick"`, Development Status **Beta** |
+| Tests | Suite grew to **208** (`test_api_additions` 13, `test_read_ticks` 14): 160 pass / 48 skip without data, all 208 pass with a NEEDS store |
 
 ---
 
@@ -359,7 +376,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Tool | Config |
 |------|--------|
-| **Build** | setuptools + wheel; static `version = "0.2.3"`; `packages.find` include=`tse_tick*` |
+| **Build** | setuptools>=77 + wheel; static `version = "0.3.0"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
 | **CLI** | `tse-tick = "tse_tick.cli:main"` |
 | **Extras** | `query` (duckdb), `test` (pandas/pytest/pytest-cov), `dev` (test + black/flake8/mypy/jupyter), `docs` |
 | **Black** | line-length=100, target Python 3.9–3.12 |
@@ -392,14 +409,15 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**181 tests.** Without proprietary data (the CI profile): **133 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 181 pass**.
+**208 tests.** Without proprietary data (the CI profile): **160 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 208 pass**.
 
 | Area | Coverage |
 |------|----------|
 | Stage-1 (ingest) | `test_ingest` (16), `test_parquet` (12), `test_parquet_io` (14) — synthetic + real-ZIP cases |
 | Stage-2 (query / features / event-window from Parquet) | `test_query` (15), `test_features` (20), `test_event_window` (22) — run against a **synthetic Hive-Parquet store** built by the real ingest pipeline (`conftest.py` + `synthetic_data.py`), so they need no proprietary data |
 | CLI | `test_cli` (13) — end-to-end on synthetic data |
+| Additive API (0.3.0) | `test_api_additions` (13), `test_read_ticks` (14) — `translate` / enums / `query_ticks` str-int ticker and the one-shot `read_ticks`, all on synthetic data |
 | Paper examples | `test_paper_examples` (5) — locks the technical paper's API listings |
 | Real data | `test_real_data` (64) + real-ZIP cases in `test_ingest` — all 4 types across the 2016 fixed-width and 2017+ CSV eras; **gated on local NEEDS files** (these are the 48 no-data skips) |
 
@@ -417,7 +435,7 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 | Path traversal | `query.py` | Resolved path prefix validation in `_resolve_type_dir()` |
 | Parallel cap | `ingest.py` | `_MAX_WORKERS = 8`, enforced in `ingest_directory()` |
 | Query overflow | `query.py` | Default `LIMIT 10_000_000` on `query_ticks()` |
-| SQL injection | `query.py` | Regex validation: `^[A-Za-z_]\w*$` identifiers, `^\d{8}$` dates, `^\d{2}:\d{2}:\d{2}$` times |
+| SQL injection | `query.py` | Column identifiers screened by a character **blocklist** (rejects `"` `\` `;` backticks, CR/LF/TAB, NUL — but allows spaces in NEEDS column names); dates `^\d{8}$`, times `^\d{2}:\d{2}:\d{2}$`; `ticker` normalized to an alphanumeric token |
 | Traceback leak | `ingest.py` | `traceback.print_exc()` → `logger.error(exc_info=True)` |
 | Privileged SQL | `query.py` | `query_sql()` documented with WARNING docstring; read-only by DuckDB in-memory design |
 
@@ -438,10 +456,10 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 
 ---
 
-## 13. Planned (0.3.0)
+## 13. Shipped in 0.3.0
 
 The public API names are **stable** — no renames (an earlier rename-to-yfinance/Polygon/ccxt proposal
-was reversed). Planned additions are purely additive:
+was reversed). These additions shipped in 0.3.0 (live on PyPI) and are purely additive:
 
 | Item | What |
 |------|------|
@@ -449,4 +467,4 @@ was reversed). Planned additions are purely additive:
 | `translate` module | Static, dependency-free mapping from yfinance / Polygon / ccxt names → `tse_tick` names, plus a `translate(source, name)` lookup. Lets users of those libraries find our equivalents **without** coupling us to their APIs. |
 | `DataType` / `Language` enums | `tse_tick/constants.py` — `str`-subclassing enums for the four data types and the two languages (autocomplete; no magic strings). |
 
-See `PYPI_RELEASE_PLAN.md` for the full plan.
+See [`CHANGELOG.md`](CHANGELOG.md) for the full list.

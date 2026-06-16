@@ -4,6 +4,8 @@
 
 ## [0.3.0] - 2026-06-16
 
+First release published to **PyPI**: `pip install tse-tick`.
+
 ### Fixed
 - **indices_summary output was missing the Index Code column** (16 columns instead of the documented 17): the 83-column raw layout names column 5 "Stock Code" while the final column selection expects "Index Code", so the identifier was silently dropped — leaving index-summary rows unidentifiable. `set_columns()` now renames the field for `indices_summary`, which also routes it through the Index Code decoder (e.g. `101` → "Nikkei 225") instead of the stock-suffix decoder. Found by the new 2017 real-data smoke test.
 - `pyproject.toml` version aligned to 0.2.3 (was 0.2.2), so build artifacts match `__version__` and this changelog.
@@ -20,7 +22,7 @@
 - **PEP 257 docstrings** across the public API — `query_ticks` / `get_available_dates` / `get_available_tickers`, `create_df` / `export_to_csv` / `discover_zips`, the `compute_*` features, `ingest_single_zip` / `ingest_period`, and the two Parquet store readers (`read_parquet_partition` vs `read_partitioned_parquet`, now clearly disambiguated).
 - Tests for the new additive API (`tests/test_api_additions.py`, `tests/test_read_ticks.py`).
 - `tests/test_cli.py`: CLI coverage (argument parsing, validation errors, and end-to-end synthetic-data ingestion), previously 0% — now 82%. Package coverage 61% → 76%.
-- Real-data tests covering all four NEEDS types across the 2016 fixed-width and 2017+ CSV eras (`test_real_data.py`; `test_ingest.py` ingest auto-detection for stock_summary / indices / indices_summary). Suite is **181 tests**: without proprietary data 133 pass / 48 skip; with a complete local NEEDS store, all 181 pass / 0 skip.
+- Real-data tests covering all four NEEDS types across the 2016 fixed-width and 2017+ CSV eras (`test_real_data.py`; `test_ingest.py` ingest auto-detection for stock_summary / indices / indices_summary). With the 0.3.0 additive-API tests, the suite now totals **208 tests**: without proprietary data **160 pass / 48 skip**; with a complete local NEEDS store, **all 208 pass / 0 skip**.
 - GitHub Actions test workflow (`.github/workflows/tests.yml`).
 - Benchmarks suite tracked in-repo (scripts, environment documentation, aggregate results CSVs).
 - `rclone_guide.md`: step-by-step guide for downloading the Nikkei NEEDS dataset from a Shared-with-me Google Drive folder to local disk via rclone (remote setup, the required `--drive-shared-with-me` flag, structure mapping and sizing, a one-slice smoke test, PowerShell/bash transfer loops, and `rclone check` MD5 verification).
