@@ -94,7 +94,7 @@ where = ["."]
 include = ["tse_tick*"]
 
 [tool.setuptools.package-data]
-tse_tick = ["py.typed"]
+tse_tick = ["py.typed", "data/*.json"]
 
 [tool.black]
 line-length = 100

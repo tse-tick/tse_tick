@@ -1,0 +1,48 @@
+{
+  "_meta": {
+    "description": "external library name -> tse_tick name. Edit this file to amend the translation tables; no code change needed.",
+    "resolution": "translate() checks 'arguments' before 'functions'; a list value returns its first item (closest equivalent).",
+    "override": "Set TSE_TICK_TRANSLATIONS to a JSON file of the same shape to merge your own entries over these."
+  },
+  "yfinance": {
+    "functions": {
+      "download": ["create_df", "read_ticks", "ingest_period"],
+      "Ticker.history": "query_ticks",
+      "history": "query_ticks",
+      "tickers": "get_available_tickers",
+      "Tickers": "get_available_tickers"
+    },
+    "arguments": {
+      "tickers": "ticker_filter",
+      "start": "start_time",
+      "end": "end_time"
+    }
+  },
+  "polygon": {
+    "functions": {
+      "get_aggs": "query_ticks",
+      "list_aggs": "query_ticks",
+      "list_trades": "query_ticks",
+      "list_tickers": "get_available_tickers"
+    },
+    "arguments": {
+      "ticker": "ticker",
+      "from_": "start_time",
+      "to": "end_time",
+      "limit": "limit"
+    }
+  },
+  "ccxt": {
+    "functions": {
+      "fetch_ohlcv": "query_ticks",
+      "fetch_trades": ["query_ticks", "read_ticks"],
+      "symbols": "get_available_tickers",
+      "load_markets": "get_available_tickers"
+    },
+    "arguments": {
+      "symbol": "ticker",
+      "since": "start_time",
+      "limit": "limit"
+    }
+  }
+}
