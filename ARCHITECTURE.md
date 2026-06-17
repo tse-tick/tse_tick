@@ -34,7 +34,7 @@ tse_tick/                          # Project root
 │   ├── __init__.py                  # Public API: re-exports all functions, enums, translate, get_info()
 │   ├── cli.py                       # CLI: tse-tick ingest with --period, --years/--year, --flat
 │   ├── constants.py                 # DataType / Language enums (str-subclassing; new in 0.3.0)
-│   ├── translate.py                 # Static yfinance/Polygon/ccxt → tse_tick name map; translate()/mapping() (0.3.0)
+│   ├── translate.py                 # yfinance/Polygon/ccxt → tse_tick name map; loads data/translations.json (0.3.0)
 │   ├── schemas.py                   # Column name definitions (EN/JP) for all 4 data types
 │   ├── enhanced.py                  # Core ETL: create_df(), read_ticks(), discover_zips(), parse_period()
 │   ├── core.py                      # Data cleaning + 2016 fixed-width parser + categorical schemas + _tick_datetime()
@@ -45,9 +45,11 @@ tse_tick/                          # Project root
 │   ├── io/
 │   │   ├── __init__.py              # (empty)
 │   │   └── parquet.py              # Hive-partitioned Parquet read/write + event-window I/O
+│   ├── data/
+│   │   └── translations.json        # translate() mapping tables (override: TSE_TICK_TRANSLATIONS)
 │   └── py.typed                     # PEP 561 marker
 │
-├── tests/                           # Test suite (pytest, 208 tests; 160 pass / 48 skip w/o data, 208/0 with a NEEDS store)
+├── tests/                           # Test suite (pytest, 215 tests; 167 pass / 48 skip w/o data, 215/0 with a NEEDS store)
 │   ├── __init__.py
 │   ├── conftest.py                  # Session-scoped synthetic Parquet fixtures (stock_store, indices_store, events_df)
 │   ├── synthetic_data.py            # Generates obviously-fake NEEDS-format ZIPs feeding those fixtures
@@ -156,7 +158,7 @@ tse_tick/                          # Project root
 |--------|--------|
 | **Published to PyPI** | `pip install tse-tick` (0.3.0, Beta); a release-triggered `publish.yml` builds sdist+wheel, runs `twine check`, and uploads via **OIDC trusted publishing** (no stored token) |
 | `read_ticks()` (one-shot) | Raw ZIPs → ticker/time-filtered DataFrame with no Parquet store (see §13) |
-| `translate` / `mapping` | Static yfinance/Polygon/ccxt → `tse_tick` name lookup (`tse_tick/translate.py`) |
+| `translate` / `mapping` | yfinance/Polygon/ccxt → `tse_tick` name lookup; tables in `tse_tick/data/translations.json` (override: `TSE_TICK_TRANSLATIONS`) |
 | `DataType` / `Language` enums | `tse_tick/constants.py`; `get_supported_data_types()` now derives from `DataType` |
 | `query_ticks(ticker=…)` | Now accepts `str` or `int` (normalized); PEP 257 docstrings added across the public API |
 | Packaging | `setuptools>=77` + `license-files` (PEP 639), `name = "tse-tick"`, Development Status **Beta** |
@@ -409,15 +411,15 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**208 tests.** Without proprietary data (the CI profile): **160 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 208 pass**.
+**215 tests.** Without proprietary data (the CI profile): **167 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 215 pass**.
 
 | Area | Coverage |
 |------|----------|
 | Stage-1 (ingest) | `test_ingest` (16), `test_parquet` (12), `test_parquet_io` (14) — synthetic + real-ZIP cases |
 | Stage-2 (query / features / event-window from Parquet) | `test_query` (15), `test_features` (20), `test_event_window` (22) — run against a **synthetic Hive-Parquet store** built by the real ingest pipeline (`conftest.py` + `synthetic_data.py`), so they need no proprietary data |
 | CLI | `test_cli` (13) — end-to-end on synthetic data |
-| Additive API (0.3.0) | `test_api_additions` (13), `test_read_ticks` (14) — `translate` / enums / `query_ticks` str-int ticker and the one-shot `read_ticks`, all on synthetic data |
+| Additive API | `test_api_additions` (13), `test_read_ticks` (14), `test_translate_data` (7) — `translate` / enums / `query_ticks` str-int ticker, the one-shot `read_ticks`, and the file-driven translation tables + `TSE_TICK_TRANSLATIONS` override, all on synthetic data |
 | Paper examples | `test_paper_examples` (5) — locks the technical paper's API listings |
 | Real data | `test_real_data` (64) + real-ZIP cases in `test_ingest` — all 4 types across the 2016 fixed-width and 2017+ CSV eras; **gated on local NEEDS files** (these are the 48 no-data skips) |
 

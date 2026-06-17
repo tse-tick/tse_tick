@@ -32,6 +32,16 @@ pytest tests/ -v
 - Run `black`, `flake8`, and `mypy` before submitting
 - Update CHANGELOG.md with a summary of your change
 
+## Adding a name-translation mapping
+
+The yfinance / Polygon / ccxt → `tse_tick` tables live in
+`tse_tick/data/translations.json` (no Python). To add or change a mapping, edit that
+file: under the source, add the external name → our name to `functions` or `arguments`
+(a list value means several of our names map to one external call; `translate()` returns
+the first). Run `pytest tests/test_translate_data.py` and open a PR. End users can
+override without editing the package by pointing `TSE_TICK_TRANSLATIONS` at a JSON file
+of the same shape.
+
 ## Reporting Issues
 
 Open an issue on GitHub with:

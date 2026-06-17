@@ -20,7 +20,7 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 - **Event-window extraction** (`--filter-csv`) — extract ±N minute windows around corporate events with automatic after-hours reaction-anchor shifting
 - **Bilingual columns** — English and Japanese column names via `--language en|jp`
 - **One-shot reader** (`read_ticks`) — raw ZIPs → a ticker/time-filtered DataFrame with no Parquet store to build first
-- **Name translation** (`translate`) — look up the `tse_tick` equivalent of a yfinance / Polygon / ccxt call
+- **Name translation** (`translate`) — look up the `tse_tick` equivalent of a yfinance / Polygon / ccxt call (tables in `tse_tick/data/translations.json`; override with `TSE_TICK_TRANSLATIONS`)
 - **Typed enums** (`DataType`, `Language`) — autocomplete-friendly and accepted anywhere the magic strings are
 - **Security guards** — ZIP bomb detection (5 GB max decompressed, 100:1 compression ratio cap, max 5 entries), path traversal prevention, query row limits (10M)
 
@@ -380,7 +380,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **208 tests**. Without a local NEEDS store, **160 pass** and **48 skip**; with a complete NEEDS store, **all 208 pass**. Stage-1
+The suite collects **215 tests**. Without a local NEEDS store, **167 pass** and **48 skip**; with a complete NEEDS store, **all 215 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+- **Translation tables externalized to data** (`tse_tick/data/translations.json`): the yfinance /
+  Polygon / ccxt → `tse_tick` name maps now load from a shipped JSON file at import instead of inline
+  Python dicts, so contributors can amend them with no code change. Power users can merge their own
+  entries by pointing the optional `TSE_TICK_TRANSLATIONS` env var at a JSON file of the same shape.
+  The public API (`translate` / `mapping` / `SUPPORTED_SOURCES`) and default behaviour are unchanged.
+
 ## [0.3.0] - 2026-06-16
 
 First release published to **PyPI**: `pip install tse-tick`.

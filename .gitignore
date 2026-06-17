@@ -4,6 +4,9 @@
 *.csv
 data/
 output/
+# ...but the package's own shipped data dir (translation tables, etc.) IS tracked
+!tse_tick/data/
+!tse_tick/data/**
 
 # Python
 __pycache__/
