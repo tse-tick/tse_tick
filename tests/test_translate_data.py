@@ -37,3 +37,48 @@ def test_load_data_returns_normalized_structure():
     for src in data.values():
         assert set(src) == {"functions", "arguments"}
     assert data["polygon"]["functions"]["get_aggs"] == "query_ticks"
+
+
+@pytest.fixture
+def restore_translations():
+    """Restore the built-in tables after a test (independent of env teardown order)."""
+    yield
+    _translate._reload("")  # empty path -> no override -> built-in only
+
+
+def test_override_merges_and_adds_source(tmp_path, monkeypatch, restore_translations):
+    override = tmp_path / "ov.json"
+    override.write_text(json.dumps({
+        "polygon": {"functions": {"get_aggs": "OVERRIDDEN"}},   # override existing
+        "alpaca": {"functions": {"get_bars": "query_ticks"}},   # brand-new source
+    }), encoding="utf-8")
+
+    monkeypatch.setenv("TSE_TICK_TRANSLATIONS", str(override))
+    _translate._reload()
+
+    assert _translate.translate("polygon", "get_aggs") == "OVERRIDDEN"      # user wins
+    assert _translate.translate("alpaca", "get_bars") == "query_ticks"      # new source works
+    assert "alpaca" in _translate.SUPPORTED_SOURCES
+    assert "alpaca" in _translate.mapping()
+    assert _translate.translate("ccxt", "fetch_ohlcv") == "query_ticks"     # untouched entry intact
+
+
+def test_malformed_override_is_ignored(tmp_path, monkeypatch, restore_translations):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not valid json", encoding="utf-8")
+    monkeypatch.setenv("TSE_TICK_TRANSLATIONS", str(bad))
+    _translate._reload()  # must not raise
+    assert _translate.translate("polygon", "get_aggs") == "query_ticks"     # built-in intact
+    assert set(_translate.SUPPORTED_SOURCES) == {"yfinance", "polygon", "ccxt"}
+
+
+def test_missing_override_path_is_ignored(tmp_path, monkeypatch, restore_translations):
+    monkeypatch.setenv("TSE_TICK_TRANSLATIONS", str(tmp_path / "does_not_exist.json"))
+    _translate._reload()  # must not raise
+    assert _translate.translate("yfinance", "tickers") == "ticker_filter"
+
+
+def test_unset_env_uses_builtin_only(monkeypatch, restore_translations):
+    monkeypatch.delenv("TSE_TICK_TRANSLATIONS", raising=False)
+    _translate._reload()
+    assert set(_translate.SUPPORTED_SOURCES) == {"yfinance", "polygon", "ccxt"}
