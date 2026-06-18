@@ -1,5 +1,6 @@
 # tse_tick/event_window.py
 import datetime
+import logging
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -7,6 +8,8 @@ from typing import Optional
 import polars as pl
 
 from .core import _tick_datetime
+
+logger = logging.getLogger(__name__)
 
 
 _OFFSET_MAP = {
@@ -213,12 +216,12 @@ def extract_batch_event_windows(
                 before=before, after=after, columns=columns,
             )
             if progress:
-                print(f"[{idx + 1}/{total}] ticker={ticker} date={date_str} -> {len(df)} rows")
+                logger.info("[%d/%d] ticker=%s date=%s -> %d rows", idx + 1, total, ticker, date_str, len(df))
             return key, df
         except Exception as exc:
             warnings.warn(f"Failed event {key}: {exc}")
             if progress:
-                print(f"[{idx + 1}/{total}] ticker={ticker} date={date_str} -> ERROR: {exc}")
+                logger.info("[%d/%d] ticker=%s date=%s -> ERROR: %s", idx + 1, total, ticker, date_str, exc)
             return key, None
 
     if max_workers > 1:

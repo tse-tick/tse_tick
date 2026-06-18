@@ -235,7 +235,7 @@ def get_1y_dataframe(
     if not zip_files:
         raise FileNotFoundError(f"No ZIP files found in: {folder_path}")
 
-    print(f"Found {len(zip_files)} ZIP file(s) in {folder_path}")
+    logger.debug("Found %d ZIP file(s) in %s", len(zip_files), folder_path)
 
     dfs = []
     total_rows_read = 0
@@ -340,7 +340,7 @@ def get_1y_dataframe(
         except (zipfile.BadZipFile, EOFError):
             raise
         except Exception as e:
-            print(f"Error reading {zip_file}: {e}")
+            logger.warning("Error reading %s: %s", zip_file, e)
             continue
 
     if not dfs:
@@ -349,7 +349,7 @@ def get_1y_dataframe(
         raise ValueError("No data was successfully read")
 
     result = pl.concat(dfs, how="vertical")
-    print(f"Total rows read: {len(result)}")
+    logger.debug("Total rows read: %d", len(result))
 
     return result
 
@@ -483,13 +483,13 @@ def create_df(
     """
     if auto_detect:
         data_type, year = detect_data_type_and_year(folder_path)
-        print(f"Auto-detected: {data_type}, Year: {year}")
+        logger.debug("Auto-detected: %s, Year: %s", data_type, year)
     else:
         if data_type is None or year is None:
             raise ValueError(
                 "When auto_detect=False, data_type and year must be explicitly provided"
             )
-        print(f"Manual: {data_type}, Year: {year}")
+        logger.debug("Manual: %s, Year: %s", data_type, year)
 
     df_raw = get_1y_dataframe(
         folder_path,
@@ -500,7 +500,7 @@ def create_df(
     )
 
     if df_raw.is_empty():
-        print("Data successfully created")
+        logger.debug("Data successfully created")
         return df_raw
 
     df_with_columns = set_columns(df_raw, data_type, language)
@@ -533,7 +533,7 @@ def create_df(
         else:
             df_final = df_cleaned
 
-    print("Data successfully created")
+    logger.debug("Data successfully created")
     return df_final
 
 
@@ -567,8 +567,8 @@ def export_to_csv(
         output_path = f"{data_type}_{year}{lang_suffix}_cleaned.csv"
 
     df.write_csv(output_path)
-    print(f"Data exported to: {output_path}")
-    print(f"Shape: {df.shape}")
+    logger.info("Data exported to: %s", output_path)
+    logger.debug("Shape: %s", df.shape)
 
     return output_path
 
