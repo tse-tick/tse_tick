@@ -125,7 +125,15 @@ def query_ticks(
             for p in type_dir.glob(f"**/ticker={ticker_token}.parquet")
         )
         if not ticker_files:
-            return pl.DataFrame()
+            # Unknown ticker: return the store schema with 0 rows so chained
+            # column access doesn't raise (instead of a schemaless (0, 0) frame).
+            any_file = next(type_dir.glob("**/*.parquet"), None)
+            if any_file is None:
+                return pl.DataFrame()
+            empty = pl.read_parquet(any_file, n_rows=0)
+            if columns:
+                empty = empty.select([c for c in columns if c in empty.columns])
+            return empty
         source = "[" + ", ".join(f"'{f}'" for f in ticker_files) + "]"
     else:
         glob_pattern = str(type_dir / "**" / "*.parquet").replace("\\", "/")

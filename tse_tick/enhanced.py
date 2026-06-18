@@ -252,6 +252,15 @@ def discover_zips(
     return all_zips
 
 
+def _raw_width(kind: str, year: int) -> int:
+    """Expected raw (pre-clean) column count for a NEEDS data type/era."""
+    if kind == "indices":
+        return 15 if year == 2016 else 23
+    if kind in ("stock_summary", "indices_summary"):
+        return 83
+    return 95  # individual_stock
+
+
 def get_1y_dataframe(
     folder_path: str,
     year: int,
@@ -386,7 +395,11 @@ def get_1y_dataframe(
 
     if not dfs:
         if ticker_filter:
-            return pl.DataFrame()
+            # No matching rows: return a 0-row frame of the correct raw width so
+            # the cleaning pipeline still yields a fully-typed empty result.
+            return pl.DataFrame(
+                schema={f"column_{i + 1}": pl.String for i in range(_raw_width(kind, year))}
+            )
         raise ValueError("No data was successfully read")
 
     result = pl.concat(dfs, how="vertical")
@@ -539,10 +552,6 @@ def create_df(
         rows,
         ticker_filter=ticker_filter if data_type == "individual_stock" else None,
     )
-
-    if df_raw.is_empty():
-        logger.debug("Data successfully created")
-        return df_raw
 
     df_with_columns = set_columns(df_raw, data_type, language)
 
@@ -839,6 +848,7 @@ def read_ticks(
 
     parts: List[pl.DataFrame] = []
     total = 0
+    schema_frame: Optional[pl.DataFrame] = None
     for zip_path in zips:
         df = None
         try:
@@ -851,18 +861,11 @@ def read_ticks(
                 year=year,
                 ticker_filter=cdf_filter,
             )
-            if df.is_empty():
-                continue
-
             if norm_filter is not None and data_type != "individual_stock":
                 df = _filter_codes(df, data_type, norm_filter)
-                if df.is_empty():
-                    continue
 
             if start_time is not None or end_time is not None:
                 df = _filter_time_window(df, start_time, end_time)
-                if df.is_empty():
-                    continue
 
             if columns:
                 missing = [c for c in columns if c not in df.columns]
@@ -872,7 +875,11 @@ def read_ticks(
                     )
                 df = df.select(columns)
 
-            if not df.is_empty():
+            # Capture the typed schema from the first part so a no-match read
+            # returns an empty-but-typed frame, not a schemaless (0, 0).
+            if schema_frame is None:
+                schema_frame = df.clear()
+            if df.height:
                 parts.append(df)
                 total += df.height
         finally:
@@ -883,10 +890,13 @@ def read_ticks(
         if rows is not None and total >= rows:
             break
 
-    if not parts:
-        return pl.DataFrame()
+    if parts:
+        result = pl.concat(parts, how="vertical")
+    elif schema_frame is not None:
+        result = schema_frame
+    else:
+        result = pl.DataFrame()
 
-    result = pl.concat(parts, how="vertical")
     if rows is not None and result.height > rows:
         result = result.head(rows)
     return result
