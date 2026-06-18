@@ -10,9 +10,6 @@ Developed at Keio University, Nakatsuma Seminar.
 """
 
 # tse_tick/__init__.py
-import os
-import sys
-
 import polars as pl
 
 __version__ = "0.6.0"
@@ -31,6 +28,9 @@ def _configure_windows_console() -> None:
     borders keeps interactive inspection working out of the box. This is a no-op
     off Windows; opt out by setting ``TSE_TICK_ASCII_TABLES=0``.
     """
+    import os
+    import sys
+
     if sys.platform != "win32":
         return
     if os.environ.get("TSE_TICK_ASCII_TABLES", "1") == "0":
@@ -55,6 +55,8 @@ def display(df, *, file=None) -> None:
         df: A Polars DataFrame (anything with a ``__str__`` works).
         file: Target text stream; defaults to ``sys.stdout``.
     """
+    import sys
+
     stream = sys.stdout if file is None else file
     text = str(df) + "\n"
     buffer = getattr(stream, "buffer", None)
@@ -182,6 +184,11 @@ def get_supported_years():
 
 
 def get_info():
+    """Return (and print) a human-readable summary of the package.
+
+    Prints the banner for interactive use and also returns it as a string, so it
+    can be captured programmatically: ``info = tse_tick.get_info()``.
+    """
     info = f"""
     tse_tick v{__version__}
     ========================
@@ -223,3 +230,4 @@ def get_info():
     https://github.com/tse-tick/tse_tick
     """
     print(info)
+    return info
