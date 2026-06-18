@@ -149,7 +149,7 @@ def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
                 sample_file = files[0].name.upper()
                 if "TICST" in sample_file:
                     data_type = "individual_stock"
-                elif "HTICIS" in sample_file or "TICSS" in sample_file:
+                elif "TICSS" in sample_file:
                     data_type = "stock_summary"
                 elif "TICIT" in sample_file:
                     data_type = "indices"
@@ -869,9 +869,16 @@ def _filter_codes(df: pl.DataFrame, data_type: str, wanted: set) -> pl.DataFrame
         return df
     from .io.parquet import _index_code_lookup
 
+    # Index Code is now the raw code in-column, but accept a display name as
+    # input too (and still match old stores that hold names): map names->code
+    # and code->name(s) so wanted matches whichever form the column holds.
+    lookup = _index_code_lookup()  # display name (en+jp) -> raw code
     expanded = set(wanted)
-    for display, code in _index_code_lookup().items():  # display (en+jp) -> raw code
-        if code in wanted:
+    for w in list(wanted):
+        if w in lookup:
+            expanded.add(lookup[w])
+    for display, code in lookup.items():
+        if code in expanded:
             expanded.add(display)
     disp = pl.col(col).cast(pl.String).str.strip_chars()
     return df.filter(disp.is_in(list(expanded)))

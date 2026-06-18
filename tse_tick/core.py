@@ -217,6 +217,12 @@ def clean_data(df, kind="individual_stock", language="en"):
     skip_exact = {
         "Data Date", "Management Number", "Identification Flag", "Index Value",
         "Record Type (Executions/Quotes)",
+        # Keep Index Code as the raw numeric code (e.g. "101") for both index
+        # types: it then equals the ticker_filter input and the partition
+        # filename (ticker=101), is language-independent, lets the two index
+        # types be joined, and avoids an "Unknown (NNN)" string for codes not in
+        # the name table (e.g. 108).
+        "Index Code",
     }
 
     for col in col_names:

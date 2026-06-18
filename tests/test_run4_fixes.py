@@ -15,7 +15,7 @@ import polars as pl
 import tse_tick
 from tse_tick import ingest_year_from_root, read_ticks
 from tse_tick.core import _tick_datetime_expr
-from tse_tick.enhanced import discover_zips, parse_period, _empty_typed_frame
+from tse_tick.enhanced import discover_zips, parse_period, _empty_typed_frame, detect_data_type_and_year
 from tse_tick.query import query_ticks, get_available_tickers
 from tests.synthetic_data import indices_csv, write_zip
 
@@ -147,3 +147,33 @@ def test_f10_get_info_returns_string():
 def test_f11_stdlib_modules_not_exposed():
     assert "os" not in dir(tse_tick)
     assert "sys" not in dir(tse_tick)
+
+
+# --------------------------------------------------------------------------- #
+# F9 / F12 — Index Code is the raw code for both index types; unknown codes
+# (e.g. 108, absent from the name table) show as the code, not "Unknown (108)"
+# --------------------------------------------------------------------------- #
+def test_f9_f12_indices_index_code_is_raw(tmp_path):
+    zp = tmp_path / "HTICIT110.20230508.1.zip"
+    _indices_zip(zp, "HTICIT110.20230508.1.csv", indices_csv("20230508", ["101", "108"], rows_per_code=4))
+    df = read_ticks(str(zp), data_type="indices", date="20230508")
+    codes = set(df["Index Code"].cast(pl.String).to_list())
+    assert codes == {"101", "108"}          # raw codes (F9), not decoded names
+    assert "Nikkei 225" not in codes        # F9: indices no longer decodes to a name
+    assert "Unknown (108)" not in codes     # F12: an unknown code is just its code
+
+
+def test_f9_indices_filter_still_accepts_display_name(tmp_path):
+    zp = tmp_path / "HTICIT110.20230508.1.zip"
+    _indices_zip(zp, "HTICIT110.20230508.1.csv", indices_csv("20230508", ["101", "113"], rows_per_code=4))
+    by_code = read_ticks(str(zp), data_type="indices", ticker_filter={"101"}, date="20230508")
+    by_name = read_ticks(str(zp), data_type="indices", ticker_filter={"Nikkei 225"}, date="20230508")
+    assert by_code.height == 4 and by_name.height == by_code.height
+
+
+# Bonus: HTICIS* files auto-detect as indices_summary, not stock_summary.
+def test_bonus_autodetect_indices_summary_not_stock_summary(tmp_path):
+    d = tmp_path / "2023"
+    d.mkdir()
+    write_zip(d / "HTICIS110.202305.zip", "HTICIS110.202305.csv", b"x")
+    assert detect_data_type_and_year(str(d))[0] == "indices_summary"

@@ -93,13 +93,14 @@ def test_query_ticks_indices_data_type(indices_store):
     # 10 output fields + the Hive 'date' partition column.
     assert df.width == 11
 
-    # ticker is the raw Index Code (101 = Nikkei 225); the display decode is kept.
+    # Index Code is the raw numeric code (101 = Nikkei 225), matching the
+    # ticker_filter input and the partition filename (not the decoded name).
     nikkei = query_ticks(indices_store, data_type="indices", ticker=101)
     assert nikkei.height > 0
-    assert nikkei["Index Code"].unique().to_list() == ["Nikkei 225"]
+    assert nikkei["Index Code"].unique().to_list() == ["101"]
     topix = query_ticks(indices_store, data_type="indices", ticker=113)
     assert topix.height > 0
-    assert topix["Index Code"].unique().to_list() == ["TOPIX"]
+    assert topix["Index Code"].unique().to_list() == ["113"]
 
 
 def test_query_ticks_empty_result(stock_store):

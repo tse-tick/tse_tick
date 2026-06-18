@@ -29,8 +29,17 @@ non-stock types and under `language="jp"`, and the 2016 index era.
   `individual_stock` files and with `query_ticks`.
 - **`parse_period` (and `ingest_period`) rejected a bare single day/month**: now accept `YYYYMM` and
   `YYYYMMDD`, matching the forms `read_ticks(date=…)` already takes.
+- **`create_df(auto_detect=True)` misdetected `indices_summary` files as `stock_summary`**: the filename
+  probe matched `HTICIS` (the indices_summary prefix) for stock_summary. `HTICIS*` files now correctly
+  auto-detect as `indices_summary`.
 
 ### Changed
+- **`Index Code` is now the raw numeric code for both index types.** `indices` previously decoded it to
+  a display name (e.g. "Nikkei 225") while `indices_summary` already showed the code. The in-file value
+  now equals the `ticker_filter` input and the partition filename (`ticker=101`), is language-independent,
+  and lets the two index types be joined; `ticker_filter` still accepts a display name. Codes missing
+  from the name table (e.g. 108) show as the code itself rather than "Unknown (108)". **Re-ingest index
+  stores** to refresh the column.
 - **`get_info()` now returns the banner string** (in addition to printing it) and has a docstring.
 - **Stdlib modules `os` / `sys` no longer leak** into the public `tse_tick` namespace.
 

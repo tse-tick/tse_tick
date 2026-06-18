@@ -132,7 +132,7 @@ def test_rows_cap(single_stock_zip):
 
 def test_indices_code_filter_and_time(indices_zip):
     df = read_ticks(str(indices_zip), data_type="indices", ticker_filter={"101"})
-    assert set(df["Index Code"].cast(pl.String).to_list()) == {"Nikkei 225"}
+    assert set(df["Index Code"].cast(pl.String).to_list()) == {"101"}
     df2 = read_ticks(str(indices_zip), data_type="indices", ticker_filter={"101"},
                      start_time="09:00:00", end_time="10:00:00")
     assert 0 < df2.height <= df.height
