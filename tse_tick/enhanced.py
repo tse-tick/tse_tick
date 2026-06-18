@@ -219,13 +219,17 @@ def discover_zips(
     months: Optional[List[int]] = None,
     dates: Optional[List[str]] = None,
 ) -> List[Path]:
-    """Find NEEDS ZIPs under a structured ``{year}/{yearmonth}/`` root.
+    """Find NEEDS ZIPs for the requested year/month/date under ``input_root``.
 
-    Globs ``input_root/<year>/<yearmonth>/<PREFIX>.<date>.*.zip`` using the data
-    type's record prefix (e.g. ``HTICST120`` for ``individual_stock``).
+    Tries two fast-path layouts — the documented ``{year}/{yearmonth}/`` tree and
+    a ``{yearmonth}/`` directory directly under ``input_root`` (e.g. when it
+    already points at a ``.../TICST120`` type folder) — then, if neither matched,
+    falls back to a recursive search that handles deeper real-world delivery
+    trees such as ``個別株式{year}/TICST120/{yyyymm}/``. Uses the data type's
+    record prefix (e.g. ``HTICST120`` for ``individual_stock``).
 
     Args:
-        input_root: Root of the NEEDS ``{year}/{yearmonth}/`` hierarchy.
+        input_root: Root of (or a folder above) the NEEDS delivery tree.
         data_type: One of the four NEEDS types (selects the filename prefix).
         years: Years to scan.
         months: Months (1-12) to scan; ``None`` means all twelve.
@@ -249,24 +253,30 @@ def discover_zips(
     for year in years:
         for month in months:
             month_str = f"{year}{month:02d}"
-            if dates is not None:
-                for date_str in dates:
-                    if date_str[:6] != month_str:
-                        continue
-                    pattern = str(root / str(year) / month_str / f"{prefix}.{date_str}.*.zip")
-                    matched = sorted(glob.glob(pattern))
-                    all_zips.extend(Path(p) for p in matched)
-            else:
-                pattern = str(root / str(year) / month_str / f"{prefix}.*.zip")
-                matched = sorted(glob.glob(pattern))
-                all_zips.extend(Path(p) for p in matched)
+            # Two fast-path layouts: the documented {year}/{yearmonth}/ tree, and
+            # a {yearmonth}/ folder directly under root (e.g. input_root already
+            # points at a .../TICST120 type folder, as in G:\NEEDS\個別株式2023\TICST120).
+            subdirs = [Path(str(year)) / month_str, Path(month_str)]
+            targets = [d for d in dates if d[:6] == month_str] if dates is not None else [None]
+            for sub in subdirs:
+                for date_str in targets:
+                    fname = f"{prefix}.{date_str}.*.zip" if date_str else f"{prefix}.*.zip"
+                    all_zips.extend(Path(p) for p in glob.glob(str(root / sub / fname)))
 
-    # The documented layout above is the fast path; if it matched nothing, fall
-    # back to a recursive search so nested real-world trees still work.
+    # The fast paths cover the common deliveries; if none matched, fall back to a
+    # full recursive search so deeper nested trees still work
+    # (e.g. 個別株式{year}/TICST120/{yyyymm}/).
     if not all_zips:
         all_zips = _discover_zips_recursive(root, prefix, years, months, dates)
 
-    return sorted(all_zips, key=_zip_sort_key)
+    # Dedupe (a file can match more than one fast-path subdir) and natural-sort.
+    seen: set = set()
+    unique: List[Path] = []
+    for z in all_zips:
+        if str(z) not in seen:
+            seen.add(str(z))
+            unique.append(z)
+    return sorted(unique, key=_zip_sort_key)
 
 
 def _raw_width(kind: str, year: int) -> int:
@@ -519,6 +529,69 @@ def get_final_columns(data_type):
         ]
 
 
+def _finalize_raw(
+    df_raw: pl.DataFrame,
+    data_type: str,
+    language: Literal["en", "jp"] = "en",
+) -> pl.DataFrame:
+    """Name, clean, and project a raw NEEDS frame into the final cleaned frame.
+
+    Shared by :func:`create_df` (populated frames) and :func:`_empty_typed_frame`
+    (a 0-row frame), so a no-data read carries a schema byte-identical to a
+    populated read instead of drifting from it.
+    """
+    df_with_columns = set_columns(df_raw, data_type, language)
+
+    if language == "jp":
+        jp_mapping = get_japanese_column_mapping()
+        en_to_jp = {v: k for k, v in jp_mapping.items()}
+        jp_cols = df_with_columns.columns
+        en_cols = [en_to_jp.get(col, col) for col in jp_cols]
+        df_with_columns = df_with_columns.rename(dict(zip(jp_cols, en_cols)))
+        df_cleaned = clean_data(df_with_columns, data_type, language)
+        df_cleaned = df_cleaned.rename(dict(zip(en_cols, jp_cols)))
+        if data_type != "individual_stock":
+            final_cols = get_final_columns(data_type)
+            final_cols_jp = [jp_mapping.get(c, c) for c in final_cols]
+            available = [c for c in final_cols_jp if c in df_cleaned.columns]
+            return df_cleaned.select(available)
+        return df_cleaned
+
+    df_cleaned = clean_data(df_with_columns, data_type, language)
+    if data_type != "individual_stock":
+        final_cols = get_final_columns(data_type)
+        available = [c for c in final_cols if c in df_cleaned.columns]
+        return df_cleaned.select(available)
+    return df_cleaned
+
+
+def _empty_typed_frame(
+    data_type: str,
+    language: Literal["en", "jp"] = "en",
+    year: Optional[int] = None,
+) -> pl.DataFrame:
+    """A 0-row frame whose schema matches :func:`create_df`'s output for
+    ``data_type`` — so a "no ZIPs found" read returns full typed columns rather
+    than a schemaless ``(0, 0)`` frame (consistent with the no-match path).
+    """
+    if year is None:
+        year = datetime.datetime.now().year
+    width = _raw_width(data_type, year)
+    raw = pl.DataFrame(schema={f"column_{i + 1}": pl.String for i in range(width)})
+    return _finalize_raw(raw, data_type, language)
+
+
+def _year_hint_from_date(date: Optional[str]) -> Optional[int]:
+    """A representative 4-digit year parsed from a date/period string, used only
+    to size an empty frame; ``None`` when none is present."""
+    if date is None:
+        return None
+    for tok in re.split(r"[-\s]+", str(date).strip()):
+        if len(tok) >= 4 and tok[:4].isdigit() and tok.startswith("20"):
+            return int(tok[:4])
+    return None
+
+
 def create_df(
     folder_path: str,
     language: Literal["en", "jp"] = "en",
@@ -547,7 +620,9 @@ def create_df(
         year: Required when ``auto_detect=False`` (selects era-specific parsing).
         ticker_filter: A ``set`` of **string** stock codes (e.g. ``{"7203"}``)
             kept via the raw-byte fast path. Applied for ``individual_stock``
-            **only** — ignored for the other data types.
+            **only** — ignored for the other data types. Note a single numbered
+            ZIP holds only part of a day's code range, so filtering a lone part
+            may yield 0 rows; pass the day's directory for complete coverage.
 
     Returns:
         The cleaned DataFrame (empty if ``ticker_filter`` matched no rows).
@@ -570,36 +645,7 @@ def create_df(
         ticker_filter=ticker_filter if data_type == "individual_stock" else None,
     )
 
-    df_with_columns = set_columns(df_raw, data_type, language)
-
-    if language == "jp":
-        jp_mapping = get_japanese_column_mapping()
-        en_to_jp = {v: k for k, v in jp_mapping.items()}
-        jp_cols = df_with_columns.columns
-        en_cols = [en_to_jp.get(col, col) for col in jp_cols]
-        rename_back_en = dict(zip(jp_cols, en_cols))
-        df_with_columns = df_with_columns.rename(rename_back_en)
-        df_cleaned = clean_data(df_with_columns, data_type, language)
-        rename_to_jp = dict(zip(en_cols, jp_cols))
-        df_cleaned = df_cleaned.rename(rename_to_jp)
-
-        if not data_type == "individual_stock":
-            final_cols = get_final_columns(data_type)
-            final_cols_jp = [jp_mapping.get(c, c) for c in final_cols]
-            available = [c for c in final_cols_jp if c in df_cleaned.columns]
-            df_final = df_cleaned.select(available)
-        else:
-            df_final = df_cleaned
-    else:
-        df_cleaned = clean_data(df_with_columns, data_type, language)
-
-        if not data_type == "individual_stock":
-            final_cols = get_final_columns(data_type)
-            available = [c for c in final_cols if c in df_cleaned.columns]
-            df_final = df_cleaned.select(available)
-        else:
-            df_final = df_cleaned
-
+    df_final = _finalize_raw(df_raw, data_type, language)
     logger.debug("Data successfully created")
     return df_final
 
@@ -833,6 +879,11 @@ def read_ticks(
           wide span this re-scans raw ZIPs on every call; for repeated or large
           analyses, ``ingest_*`` once + :func:`tse_tick.query_ticks` is far
           faster.
+        * **A single numbered ZIP is only part of a day.** NEEDS splits each day
+          across numbered parts by ascending code, so one
+          ``HTICST120.<date>.N.zip`` holds a code subset (part ``1`` starts at
+          1301; Toyota 7203 is in a later part). Pass the directory or structured
+          root — not a lone part — for complete ticker coverage.
 
     Example:
         >>> df = read_ticks("G:/NEEDS_root", ticker_filter={"7203"},
@@ -858,7 +909,13 @@ def read_ticks(
 
     zips = _resolve_source_zips(source, data_type, date)
     if not zips:
-        return pl.DataFrame()
+        logger.warning(
+            "read_ticks: no ZIP files found for the requested date(s) in %r. "
+            "Verify these are trading days — exchange holidays (e.g. Golden Week "
+            "or year-end) have no data.",
+            source,
+        )
+        return _empty_typed_frame(data_type, language, _year_hint_from_date(date))
 
     # create_df reaches the raw-byte fast path only for individual_stock.
     cdf_filter = norm_filter if data_type == "individual_stock" else None
@@ -912,7 +969,7 @@ def read_ticks(
     elif schema_frame is not None:
         result = schema_frame
     else:
-        result = pl.DataFrame()
+        result = _empty_typed_frame(data_type, language, _year_hint_from_date(date))
 
     if rows is not None and result.height > rows:
         logger.warning(
