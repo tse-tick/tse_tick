@@ -149,6 +149,23 @@ def clean_data(df, kind="individual_stock", language="en"):
             price_exprs = [(pl.col(c).cast(pl.Float64) * 0.01).alias(c) for c in price_columns]
             if price_exprs:
                 df_cleaned = df_cleaned.with_columns(price_exprs)
+        else:  # stock_summary
+            # Every stock_summary measure (OHLC, VWAP, volumes, amounts, counts)
+            # is numeric; without this they came back as String and aggregations
+            # (.mean(), arithmetic, …) silently returned null. Only the id/code
+            # columns and the HHMMSS time columns stay String (times are sliced
+            # below; codes/Record Type/Exchange/Security are handled separately).
+            _summary_id_cols = {
+                "Record Type", "Data Date", "Identification Flag",
+                "Exchange Code", "Security Type", "Stock Code",
+            }
+            measure_cols = [
+                c for c in df_cleaned.columns
+                if c not in _summary_id_cols and "Time" not in c
+            ]
+            df_cleaned = df_cleaned.with_columns(
+                [pl.col(c).str.strip_chars().cast(pl.Float64, strict=False) for c in measure_cols]
+            )
     elif (kind == "indices") and df_cleaned.height and (df_cleaned["Data Date"][0][:4] == "2016"):
         time_list = []
         int_list = []

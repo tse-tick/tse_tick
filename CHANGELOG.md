@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+Fixes from a sixth real-data run: a silent wrong result (`stock_summary` numbers typed as `String`) and a
+silent data loss (time-filtering `individual_stock` dropped ~94% of the day).
+
+### Fixed
+- **`stock_summary` measures are numeric again.** Every measure column (OHLC, VWAP, volumes, amounts,
+  counts) came back as `String`, so `.mean()` / arithmetic silently produced `null` — contradicting the
+  README's `Float64` guarantee that the other three types honor. The `stock_summary` cleaning path now
+  casts all measure columns to `Float64` (id/code columns and the `HHMMSS` time columns stay string).
+  **Re-ingest `stock_summary` stores** to refresh the column dtypes.
+- **Time-filtering `individual_stock` no longer silently drops quote-only rows.** Pure order-book updates
+  (no trade) carry a blank `Execution Time` but a real `Update Time`; the time window keyed only on
+  `Execution Time`, so a 09:00–15:00 filter kept ~6% of a liquid day (trade-coincident snapshots only)
+  and silently discarded ~94% of in-session quote updates. The window now falls back to `Update Time` for
+  those rows in both `read_ticks` and `query_ticks` (the `Execution Time` column itself is unchanged in
+  the output), so the advertised order-book features see the whole in-window book.
+
+### Changed
+- **`read_ticks` docstring** now notes typical one-shot timing — every ZIP part of each requested day is
+  opened, so a single ticker-day can take tens of seconds; use `ingest_*` + `query_ticks` for faster
+  repeated/narrow work.
+
 ## [0.8.0] - 2026-06-18
 
 Polish from a fifth real-data run that exercised all four data types and found **no crashes or wrong
