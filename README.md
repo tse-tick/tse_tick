@@ -366,17 +366,19 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.4.0
+## What's New in 0.5.0
 
-`tse_tick` 0.4.0 — `pip install -U tse-tick`. Backward-compatible; the public API is unchanged.
+`tse_tick` 0.5.0 — `pip install -U tse-tick`. Backward-compatible; the public API is unchanged.
 
-- **Editable translation tables** — the yfinance / Polygon / ccxt → `tse_tick` name maps now live in `tse_tick/data/translations.json` (contributors edit one file); override them at runtime with the optional `TSE_TICK_TRANSLATIONS` env var.
-- **Reliability fixes from a clean-room run** — no more `UnicodeEncodeError` on non-ASCII paths (library diagnostics moved to `logging`, quiet by default); `discover_zips` finds nested NEEDS delivery trees (`個別株式{year}/TICST120/{yyyymm}/`); price/quote columns are consistently `Float64`; no-match reads return an empty-but-typed frame; `read_ticks` parts sort chronologically and warn on row-cap truncation.
+- **Complete multi-part-day ingest (important fix).** NEEDS splits each trading day across several ZIP parts; the CLI `ingest` path previously kept only the first part of each day (so e.g. Toyota 7203 went missing). Ingest now reads **all parts of a day**, concatenates them, and writes each ticker once.
+- **New `tse-tick export` CLI verb** — read raw ZIPs and write one ticker over a date range straight to CSV or Parquet (`--tickers` / `--period` / `--output`), no Parquet store and no Python required.
+- **Robust auto-location** — point `--input-root` / `read_ticks` / `export` at *any* folder that contains the data (e.g. `G:\NEEDS`); files are found by type + date regardless of nesting.
+- Smaller fixes: `--parallel` is flagged as `--flat`-only, CLI progress logs to stdout (no red `NativeCommandError` on PowerShell), and the README query example notes the `[query]` (DuckDB) extra.
 
-> **Heads-up:** price/quote columns are now `Float64` (were a `str`/`f64` mix), which also changes the ingested Parquet store schema — re-ingest to refresh older stores.
+> **Upgrading a store?** If you ingested multi-part days with ≤ 0.4.0, **re-ingest** — those runs were missing parts.
 
-Earlier highlights (0.3.0): the `read_ticks` one-shot reader, the `translate()`/`mapping()` lookup,
-`DataType`/`Language` enums, and `query_ticks(ticker=…)` accepting `str` or `int`.
+Earlier highlights (0.4.0): editable/overridable translation tables, quiet `logging`, nested-layout
+discovery, consistent `Float64` price/quote dtypes, and empty-but-typed reads.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 

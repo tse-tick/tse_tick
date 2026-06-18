@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.4.0 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.5.0 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
@@ -21,7 +21,7 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.4.0)
+├── CHANGELOG.md                     # version history (current: 0.5.0)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
@@ -175,6 +175,16 @@ tse_tick/                          # Project root
 | Empty-but-typed reads | No-match `read_ticks` / `create_df` / `query_ticks` return the full schema with 0 rows |
 | Ordering | `read_ticks` parts sort naturally by `(date, part#)`; row-cap truncation logs a warning |
 | Tests | Suite **227** (`+12` regression tests across 4 new files) |
+
+### v0.5.0 — complete multi-part ingest + CLI export (2026-06-18)
+
+| Change | Detail |
+|--------|--------|
+| Multi-part-day ingest | `ingest_*` group all ZIP parts of a date, concat, and write each ticker once (atomic per-date resume) — fixes the silent loss of all-but-the-first part (e.g. Toyota 7203 absent) |
+| `tse-tick export` | New CLI verb: raw ZIPs → CSV/Parquet for a ticker/time slice via `read_ticks`, no store needed |
+| Auto-location | `--input-root` / `read_ticks` / `export` accept any folder containing the data (located by type + date), at any nesting |
+| Smaller fixes | `--parallel` flagged `--flat`-only; CLI progress → stdout; README query example notes the `[query]` extra |
+| Tests | Suite **237** (`+10` regression tests: `test_ingest_multipart`, `test_locate`, export CLI) |
 
 ---
 
@@ -390,7 +400,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Tool | Config |
 |------|--------|
-| **Build** | setuptools>=77 + wheel; static `version = "0.4.0"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
+| **Build** | setuptools>=77 + wheel; static `version = "0.5.0"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
 | **CLI** | `tse-tick = "tse_tick.cli:main"` |
 | **Extras** | `query` (duckdb), `test` (pandas/pytest/pytest-cov), `dev` (test + black/flake8/mypy/jupyter), `docs` |
 | **Black** | line-length=100, target Python 3.9–3.12 |
