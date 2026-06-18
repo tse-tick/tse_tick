@@ -403,8 +403,14 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
 - **One numbered ZIP is part of a day.** NEEDS splits each day across parts by ascending code, so
   filtering a lone `HTICST120.<date>.N.zip` by ticker can return 0 rows (Toyota 7203 is in a later
   part) — pass the day's directory or a structured root for complete coverage.
-- **Numeric dtypes.** Price/quote columns (`Execution Price`, `Sell Quote 1 Best`, …) are `Float64`.
-  (Parquet stores ingested before this change stored them as `String` — re-ingest to refresh.)
+- **Numeric dtypes.** Price/quote columns (`Execution Price`, `Sell Quote 1 Best`, …) are `Float64`, and
+  **all `stock_summary` measures** (OHLC, VWAP, volumes, amounts, counts) are `Float64` too — so `.mean()`
+  and arithmetic work without manual casting. (Stores ingested before the relevant change held these as
+  `String` — re-ingest to refresh.)
+- **Time filters keep the whole order book.** For `individual_stock`, quote-only book updates have a blank
+  `Execution Time` but a real `Update Time`; `read_ticks` / `query_ticks` time windows fall back to
+  `Update Time` for those rows, so a session filter retains in-window quote updates (not just
+  trade-coincident snapshots) — what `compute_depth` / `compute_spread` / `compute_flow_imbalance` need.
 - **Index codes are raw codes.** `indices` and `indices_summary` both return `Index Code` as the raw
   numeric code (e.g. `"101"`), matching what you pass to `ticker_filter` and the `ticker=` partition;
   `ticker_filter` also accepts the display name (`"Nikkei 225"`). (Stores written before 0.7.0 held

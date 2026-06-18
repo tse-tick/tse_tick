@@ -16,10 +16,15 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from tse_tick.schemas import get_schema_individual_stock_95, get_schema_indices_23
+from tse_tick.schemas import (
+    get_schema_individual_stock_95,
+    get_schema_indices_23,
+    get_schema_summary_83,
+)
 
 _SCHEMA_95 = get_schema_individual_stock_95()
 _SCHEMA_INDICES_23 = get_schema_indices_23()
+_SCHEMA_83 = get_schema_summary_83()
 
 # TSE session boundaries, in minutes since midnight.
 _AM_OPEN, _AM_CLOSE = 540, 690   # 09:00 - 11:30
@@ -171,6 +176,85 @@ def indices_2016_csv(date: str, codes: list[str], times: list[str] | None = None
                 + "0".rjust(3)       # Volume Flag (3)    -> "Final"
             )
             lines.append(line)
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def individual_stock_with_quote_rows_csv(
+    date: str,
+    ticker: str,
+    *,
+    trade_times: list[str],
+    quote_times: list[str],
+    base_price: int = 2100,
+) -> bytes:
+    """Build a TICST120 (95-field) CSV mixing trade rows and quote-only rows.
+
+    Trade rows carry an ``Execution Time`` (``"HHMMSS"``) and ``Volume>0``;
+    quote-only book updates carry a **blank** ``Execution Time`` but a real
+    ``Update Time`` and ``Volume=0`` — the shape behind the time-filter
+    ``Update Time`` fallback. ``trade_times`` / ``quote_times`` are ``"HHMMSS"``.
+    """
+    lines: list[str] = []
+
+    def _row(overrides: dict, hhmmss: str) -> str:
+        cells = [
+            overrides[name]
+            if name in overrides
+            else _field(name, date=date, ticker=ticker, hhmmss=hhmmss,
+                        session="1", price=base_price)
+            for name in _SCHEMA_95
+        ]
+        return ",".join('"' + c + '"' for c in cells)
+
+    for hhmmss in trade_times:
+        lines.append(_row({}, hhmmss))
+    for hhmmss in quote_times:
+        lines.append(_row(
+            {"Execution Time": "", "Update Time": hhmmss + "000000", "Volume": "0"},
+            hhmmss,
+        ))
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def stock_summary_csv(
+    date: str,
+    tickers: list[str],
+    *,
+    vwap: float = 1855.88528,
+    volume: int = 9565000,
+) -> bytes:
+    """Build a headerless TICSS110 (83-field) daily-summary CSV as raw bytes.
+
+    Quoted, comma-separated, one row per ticker. Every *measure* column carries
+    an obviously-fake but valid numeric string (prices/VWAP as floats, volumes/
+    counts/amounts as integers) so the numeric cast can be exercised; id/code
+    columns carry codes and time columns carry ``HHMMSS``.
+    """
+    lines: list[str] = []
+    for ticker in tickers:
+        values: list[str] = []
+        for name in _SCHEMA_83:
+            if name == "Record Type":
+                v = "DB13"            # -> "Stocks"
+            elif name == "Data Date":
+                v = date
+            elif name == "Identification Flag":
+                v = "0"
+            elif name == "Exchange Code":
+                v = "11"              # -> TSE
+            elif name == "Security Type":
+                v = "1"               # -> First Section
+            elif name == "Stock Code":
+                v = ticker
+            elif "Time" in name:
+                v = "090000"
+            elif ("Price" in name or "VWAP" in name or "Std Dev" in name
+                  or "Spread" in name or "Avg" in name or "Quote" in name):
+                v = f"{vwap:.5f}"     # float-valued measures
+            else:
+                v = str(volume)       # volumes / counts / amounts / units / shares
+            values.append(v)
+        lines.append(",".join('"' + v + '"' for v in values))
     return ("\n".join(lines) + "\n").encode("ascii")
 
 

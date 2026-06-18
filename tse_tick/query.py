@@ -83,8 +83,11 @@ def query_ticks(
         ticker: Stock code (``individual_stock``) or index code (``indices``) as
             ``int`` or ``str`` — e.g. ``7203`` or ``"7203"``; ``None`` for all.
         date: Trading day as ``"YYYYMMDD"``; ``None`` for every stored date.
-        start_time: Inclusive lower bound on ``Execution Time`` (``"HH:MM:SS"``).
-        end_time: Inclusive upper bound on ``Execution Time`` (``"HH:MM:SS"``).
+        start_time: Inclusive lower bound on time-of-day (``"HH:MM:SS"``). For
+            ``individual_stock``, quote-only rows (blank ``Execution Time``) are
+            matched on their ``Update Time`` instead, so an in-window order book
+            is kept whole rather than reduced to trade rows.
+        end_time: Inclusive upper bound on time-of-day (``"HH:MM:SS"``).
         columns: Column projection; ``None`` selects all columns.
         limit: Maximum rows returned (default 10,000,000); ``None`` for no cap.
 
@@ -142,6 +145,19 @@ def query_ticks(
         glob_pattern = str(type_dir / "**" / "*.parquet").replace("\\", "/")
         source = f"'{glob_pattern}'"
 
+    # individual_stock quote-only book rows have a blank Execution Time but a real
+    # Update Time (stored "HHMMSSssssss"); fall back to its first 6 chars so a time
+    # window keeps in-window order-book rows, not just trade-coincident snapshots
+    # (~94% of a liquid day is quotes). Scoped to individual_stock: the other types
+    # have no Update Time column (and indices' Execution Time is never blank).
+    if data_type == "individual_stock":
+        time_expr = (
+            'CASE WHEN "Execution Time" IS NULL OR "Execution Time" = \'\' '
+            'THEN substr("Update Time", 1, 6) ELSE "Execution Time" END'
+        )
+    else:
+        time_expr = '"Execution Time"'
+
     conditions: list[str] = []
     if date is not None:
         _validate_date(date)
@@ -151,20 +167,24 @@ def query_ticks(
     # lexicographic comparison so it matches the stored format.
     if start_time is not None:
         _validate_time(start_time)
-        conditions.append(f'"Execution Time" >= \'{start_time.replace(":", "")}\'')
+        conditions.append(f"{time_expr} >= '{start_time.replace(':', '')}'")
     if end_time is not None:
         _validate_time(end_time)
-        conditions.append(f'"Execution Time" <= \'{end_time.replace(":", "")}\'')
+        conditions.append(f"{time_expr} <= '{end_time.replace(':', '')}'")
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     limit_clause = f"LIMIT {limit}" if limit is not None else ""
 
-    # Summary types are daily aggregates with no "Execution Time" column, so
-    # order only by the columns this data_type actually has (a hard-coded
-    # ORDER BY "Execution Time" makes query_ticks unusable for both summaries).
+    # Summary types are daily aggregates with no "Execution Time" column, so order
+    # only by the columns this data_type actually has (a hard-coded ORDER BY
+    # "Execution Time" makes query_ticks unusable for both summaries).
+    # individual_stock orders by the same effective time so quote rows interleave
+    # chronologically rather than all sorting first on a blank Execution Time.
     order_cols = ['"Data Date"']
-    if data_type in ("individual_stock", "indices"):
+    if data_type == "individual_stock":
+        order_cols.append(time_expr)
+    elif data_type == "indices":
         order_cols.append('"Execution Time"')
     order_clause = "ORDER BY " + ", ".join(order_cols)
 

@@ -867,7 +867,26 @@ def _filter_time_window(
             "read_ticks: start_time/end_time require an 'Execution Time' column"
         )
     date_col = _resolve_col(df, "Data Date") or "Data Date"
-    time_of_day = _tick_datetime_expr(date_col, time_col).dt.time()
+
+    # individual_stock quote-only book updates have a blank Execution Time but a
+    # real Update Time; fall back to it so a time window keeps in-window order-book
+    # rows, not just trade-coincident snapshots (~94% of a liquid day is quotes).
+    # Scoped automatically: only individual_stock carries an Update Time column
+    # (the indices/summary projections drop it), so the fallback is inactive there.
+    update_col = _resolve_col(df, "Update Time")
+    work = df
+    eff_col = time_col
+    if update_col is not None:
+        exec_raw = pl.col(time_col).cast(pl.String).str.strip_chars()
+        work = df.with_columns(
+            pl.when(exec_raw.is_null() | (exec_raw == ""))
+            .then(pl.col(update_col))
+            .otherwise(pl.col(time_col))
+            .alias("__eff_time")
+        )
+        eff_col = "__eff_time"
+
+    time_of_day = _tick_datetime_expr(date_col, eff_col).dt.time()
     expr = None
     if start_time is not None:
         cond = time_of_day >= pl.lit(_parse_hms(start_time))
@@ -875,7 +894,11 @@ def _filter_time_window(
     if end_time is not None:
         cond = time_of_day <= pl.lit(_parse_hms(end_time))
         expr = cond if expr is None else (expr & cond)
-    return df.filter(expr) if expr is not None else df
+
+    result = work.filter(expr) if expr is not None else work
+    if eff_col == "__eff_time":
+        result = result.drop("__eff_time")
+    return result
 
 
 def _filter_codes(df: pl.DataFrame, data_type: str, wanted: set) -> pl.DataFrame:
@@ -963,13 +986,20 @@ def read_ticks(
         * **Time filtering applies to tick types only.** ``individual_stock`` /
           ``indices`` have ``Execution Time``; the two ``*_summary`` types are
           daily aggregates, so passing ``start_time``/``end_time`` for them
-          raises — filter on ``date`` only.
+          raises — filter on ``date`` only. For ``individual_stock``, quote-only
+          book updates have a blank ``Execution Time`` but a real ``Update Time``,
+          so the time window falls back to ``Update Time`` for those rows — an
+          in-window order book is kept whole, not reduced to trade-coincident
+          snapshots.
         * **The fast path is ``individual_stock``-only.** Other types parse in
           full then filter (fine — those files are far smaller).
-        * **Not a store replacement at scale.** With no ``ticker_filter`` over a
-          wide span this re-scans raw ZIPs on every call; for repeated or large
-          analyses, ``ingest_*`` once + :func:`tse_tick.query_ticks` is far
-          faster.
+        * **Not a store replacement at scale.** Even one ticker-day opens **every
+          ZIP part** of each requested day, so a one-shot read can take tens of
+          seconds per day (the raw-byte fast path still scans all parts). With no
+          ``ticker_filter`` over a wide span it re-scans raw ZIPs on every call;
+          for repeated or large analyses — or just faster single-ticker lookups —
+          ``ingest_*`` once + :func:`tse_tick.query_ticks` is far faster
+          (sub-second).
         * **A single numbered ZIP is only part of a day.** NEEDS splits each day
           across numbered parts by ascending code, so one
           ``HTICST120.<date>.N.zip`` holds a code subset (part ``1`` starts at
