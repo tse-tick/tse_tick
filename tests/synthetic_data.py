@@ -222,13 +222,16 @@ def stock_summary_csv(
     *,
     vwap: float = 1855.88528,
     volume: int = 9565000,
+    time_value: str = "090000",
 ) -> bytes:
     """Build a headerless TICSS110 (83-field) daily-summary CSV as raw bytes.
 
     Quoted, comma-separated, one row per ticker. Every *measure* column carries
     an obviously-fake but valid numeric string (prices/VWAP as floats, volumes/
     counts/amounts as integers) so the numeric cast can be exercised; id/code
-    columns carry codes and time columns carry ``HHMMSS``.
+    columns carry codes and every time column carries ``time_value`` (default
+    ``"090000"``; pass an era-specific width like ``"0900"`` (2016 ``HHMM``) or
+    ``"090005000000"`` (2017+ ``HHMMSSffffff``) to exercise time normalization).
     """
     lines: list[str] = []
     for ticker in tickers:
@@ -247,7 +250,7 @@ def stock_summary_csv(
             elif name == "Stock Code":
                 v = ticker
             elif "Time" in name:
-                v = "090000"
+                v = time_value
             elif ("Price" in name or "VWAP" in name or "Std Dev" in name
                   or "Spread" in name or "Avg" in name or "Quote" in name):
                 v = f"{vwap:.5f}"     # float-valued measures

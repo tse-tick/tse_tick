@@ -8,11 +8,17 @@ import polars as pl
 
 import pyarrow.dataset as ds
 
+# Tick types partition by (date, code): each ticker-day holds thousands of ticks,
+# so a per-ticker file is large and prunes well. The two *daily-aggregate* summary
+# types hold ~1 row per (date, code), so a per-ticker file there is one tiny row —
+# tens of thousands of files, ~160x size amplification, minutes to build. They
+# partition by date only (one file per date) and keep the code as a column;
+# query_ticks / get_available_tickers prune that column via row-group statistics.
 _DEFAULT_PARTITION_COLS: dict[str, list[str]] = {
     "individual_stock": ["Data Date", "Stock Code"],
-    "stock_summary": ["Data Date", "Stock Code"],
+    "stock_summary": ["Data Date"],
     "indices": ["Data Date", "Index Code"],
-    "indices_summary": ["Data Date", "Index Code"],
+    "indices_summary": ["Data Date"],
 }
 
 _VALID_DATA_TYPES = set(_DEFAULT_PARTITION_COLS.keys())

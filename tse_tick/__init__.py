@@ -97,6 +97,7 @@ from .enhanced import (
     parse_period,
     read_ticks,
     NoDataWarning,
+    TruncationWarning,
 )
 
 from .schemas import (
@@ -165,6 +166,7 @@ __all__ = [
     "discover_zips",
     "parse_period",
     "NoDataWarning",
+    "TruncationWarning",
     "get_schema_individual_stock_95",
     "get_schema_summary_83",
     "get_schema_indices_23",

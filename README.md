@@ -418,7 +418,14 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
   fully-typed* DataFrame (all columns present), so chained access like `df["Exchange Code"]` won't raise.
   `read_ticks` also emits a capturable `tse_tick.NoDataWarning` (a `UserWarning`) for **every** zero-row
   result across all four types, so "no data" is never silent — trap it with `warnings.catch_warnings()`
-  or silence it with `warnings.filterwarnings("ignore", category=tse_tick.NoDataWarning)`.
+  or silence it with `warnings.filterwarnings("ignore", category=tse_tick.NoDataWarning)`. The `rows=`
+  cap likewise emits a capturable `tse_tick.TruncationWarning` when it truncates a result (the signal to
+  build a store and use `query_ticks`).
+- **Summary stores are compact (date-partitioned).** The two daily-aggregate types (`stock_summary`,
+  `indices_summary`) write **one Parquet file per date** with the code kept as a column — not one tiny
+  file per (date × ticker), which previously blew a 15 MB month up to a 2.4 GB store of ~87k files.
+  `query_ticks` / `get_available_tickers` prune/read that column; the tick types keep per-ticker files.
+  Re-ingest summary stores built before this change.
 - **Ingestion entry points** are the functions `ingest_period`, `ingest_single_zip`,
   `ingest_year_from_root`, … — `tse_tick.ingest` itself is the submodule.
 

@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+Fixes from a seventh real-data run: a Major store-build scalability defect for the summary types, plus
+warning/discovery/time-format papercuts. Read paths were already correct on all four types (the 2016
+legacy `…010` era probe did not reproduce).
+
+### Fixed
+- **`stock_summary` / `indices_summary` ingest no longer explodes into tens of thousands of tiny Parquet
+  files.** The store partitioned summary types by `(date, code)` — one file per (date × ticker) — but each
+  summary (date, code) is ~1 row, so one 15 MB month became a 2.4 GB store of ~87k one-row files (~160×
+  size amplification, ~3 min; a multi-year build was impractical). Summary stores now partition by **date
+  only** (one file per date, the code kept as a column), ~20 files/month at ~1× size; `query_ticks` and
+  `get_available_tickers` prune/read the code column for these types. Tick types
+  (`individual_stock`/`indices`) are unchanged. **Re-ingest summary stores** to adopt the compact layout.
+- **`read_ticks` `rows` cap now warns through `warnings`, not `logging`.** Hitting the cap emits a
+  capturable `tse_tick.TruncationWarning` (a `UserWarning`) — the same channel as `NoDataWarning`, so
+  `warnings.catch_warnings()` / `simplefilter("error")` catch it — and the docstring no longer claims the
+  cap "silently truncates".
+- **`*_summary` intraday `*Time` columns are normalized to a fixed-width 6-char `HHMMSS` across eras**
+  (2016 `…010` emitted 4-char `HHMM`, 2017+ `…110` emitted 12-char `HHMMSSffffff`), matching the
+  `Data Date` normalization and the index `Execution Time` treatment.
+
+### Changed
+- **Store-only discovery helpers give an actionable error on a raw NEEDS path.** `get_available_dates` /
+  `get_available_tickers` / `query_ticks` now explain, when no store exists, that they read a *built*
+  Parquet store — run `ingest_*` first, or discover codes from raw data via `read_ticks` (no
+  `ticker_filter`) and the `Stock Code` / `Index Code` column.
+
 ## [0.9.0] - 2026-06-18
 
 Fixes from a sixth real-data run: a silent wrong result (`stock_summary` numbers typed as `String`) and a

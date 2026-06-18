@@ -9,7 +9,7 @@ index-tick ZIP.
 import polars as pl
 import pytest
 
-from tse_tick import read_ticks
+from tse_tick import read_ticks, TruncationWarning
 from tests.synthetic_data import individual_stock_csv, indices_csv, write_zip
 
 _BASE = {"7203": 2100, "6758": 13000}
@@ -162,12 +162,12 @@ def test_zip_parts_sorted_chronologically(tmp_path):
     assert nums == [1, 2, 10]
 
 
-def test_read_ticks_warns_on_row_cap(tmp_path, caplog):
-    import logging
+def test_read_ticks_warns_on_row_cap(tmp_path):
     zp = tmp_path / "HTICST120.20240104.1.zip"
     write_zip(zp, "HTICST120.20240104.1.csv",
               individual_stock_csv("20240104", ["7203"], rows_per_ticker=10, base_prices={"7203": 2100}))
-    with caplog.at_level(logging.WARNING, logger="tse_tick.enhanced"):
+    # The cap now warns via a capturable TruncationWarning (not logging), the same
+    # warnings channel as NoDataWarning.
+    with pytest.warns(TruncationWarning, match="row cap"):
         df = read_ticks(str(zp), ticker_filter={"7203"}, rows=3)
     assert df.height == 3
-    assert any("row cap" in r.getMessage() for r in caplog.records)

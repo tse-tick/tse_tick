@@ -219,10 +219,14 @@ def clean_data(df, kind="individual_stock", language="en"):
         )
 
     elif (kind == "stock_summary") or (kind == "indices_summary"):
-        for col_idx in time_list:
-            col = df_cleaned.columns[col_idx]
+        # Normalize every time-of-day column to a fixed-width 6-char HHMMSS across
+        # eras: 2016 (…010) emits 4-char HHMM, 2017+ (…110) emits 12-char
+        # HHMMSSffffff. (Was: slice to 12, leaving 2016 at 4 chars and 2017+ at 12
+        # — inconsistent widths across eras for the same column.)
+        time_cols = [c for c in df_cleaned.columns if "Time" in c]
+        if time_cols:
             df_cleaned = df_cleaned.with_columns(
-                pl.col(col).str.slice(0, 12).alias(col)
+                [_exec_time_6char(c).alias(c) for c in time_cols]
             )
 
     elif kind == "indices":

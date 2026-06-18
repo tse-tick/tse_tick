@@ -21,7 +21,14 @@ def _resolve_type_dir(data_dir: str, data_type: str) -> Path:
     if not str(type_dir).startswith(str(resolved)):
         raise ValueError(f"Path traversal detected in data_dir: {data_dir!r}")
     if not type_dir.exists():
-        raise FileNotFoundError(f"No Parquet store for {data_type!r} under {data_dir!r}")
+        raise FileNotFoundError(
+            f"No Parquet store for {data_type!r} under {data_dir!r}. "
+            f"query_ticks / get_available_dates / get_available_tickers read a "
+            f"built Parquet store, not raw NEEDS files — run "
+            f"ingest_period(...) or ingest_year_from_root(...) first. To discover "
+            f"codes straight from raw data, read the period with read_ticks (no "
+            f"ticker_filter) and inspect the 'Stock Code' / 'Index Code' column."
+        )
     return type_dir
 
 
@@ -124,23 +131,35 @@ def query_ticks(
     # matching per-ticker files directly. This is also robust to the in-file
     # code column being categorically decoded (e.g. Index Code "101" -> "Nikkei
     # 225"), which would defeat a value-based filter.
+    summary = data_type in ("stock_summary", "indices_summary")
+    code_condition: Optional[str] = None
     if ticker is not None:
         ticker_token = _normalize_ticker(ticker)
-        ticker_files = sorted(
-            str(p).replace("\\", "/")
-            for p in type_dir.glob(f"**/ticker={ticker_token}.parquet")
-        )
-        if not ticker_files:
-            # Unknown ticker: return the store schema with 0 rows so chained
-            # column access doesn't raise (instead of a schemaless (0, 0) frame).
-            any_file = next(type_dir.glob("**/*.parquet"), None)
-            if any_file is None:
-                return pl.DataFrame()
-            empty = pl.read_parquet(any_file, n_rows=0)
-            if columns:
-                empty = empty.select([c for c in columns if c in empty.columns])
-            return empty
-        source = "[" + ", ".join(f"'{f}'" for f in ticker_files) + "]"
+        if summary:
+            # Summary stores partition by date only (no per-ticker files), so the
+            # code lives in a column — prune it instead, matching on its first 4
+            # chars to mirror the old ticker= partition value. An unknown code then
+            # yields a typed-empty frame naturally (the SELECT keeps the schema).
+            code_col = "Index Code" if data_type == "indices_summary" else "Stock Code"
+            glob_pattern = str(type_dir / "**" / "*.parquet").replace("\\", "/")
+            source = f"'{glob_pattern}'"
+            code_condition = f"substr(\"{code_col}\", 1, 4) = '{ticker_token}'"
+        else:
+            ticker_files = sorted(
+                str(p).replace("\\", "/")
+                for p in type_dir.glob(f"**/ticker={ticker_token}.parquet")
+            )
+            if not ticker_files:
+                # Unknown ticker: return the store schema with 0 rows so chained
+                # column access doesn't raise (instead of a schemaless (0, 0) frame).
+                any_file = next(type_dir.glob("**/*.parquet"), None)
+                if any_file is None:
+                    return pl.DataFrame()
+                empty = pl.read_parquet(any_file, n_rows=0)
+                if columns:
+                    empty = empty.select([c for c in columns if c in empty.columns])
+                return empty
+            source = "[" + ", ".join(f"'{f}'" for f in ticker_files) + "]"
     else:
         glob_pattern = str(type_dir / "**" / "*.parquet").replace("\\", "/")
         source = f"'{glob_pattern}'"
@@ -162,6 +181,8 @@ def query_ticks(
     if date is not None:
         _validate_date(date)
         conditions.append(f"date = '{date}'")
+    if code_condition is not None:
+        conditions.append(code_condition)
     # Execution Time is stored as a 6-digit "HHMMSS" string; the public API
     # accepts validated "HH:MM:SS" values, so strip the colons before the
     # lexicographic comparison so it matches the stored format.
@@ -273,16 +294,15 @@ def get_available_tickers(
         date: Restrict to a single ``"YYYYMMDD"`` day; ``None`` scans all days.
 
     Returns:
-        Sorted **string** codes parsed from the ``ticker=CODE.parquet`` filenames
-        (e.g. ``["6758", "7203", "9984"]``) — ready to pass straight to
-        ``read_ticks(ticker_filter=...)`` with no conversion. Strings (not ints)
-        so modern alphanumeric codes (e.g. ``"130A"``) are preserved instead of
-        silently dropped; pure-digit codes sort numerically, ahead of any
-        alphanumeric ones.
+        Sorted **string** codes (e.g. ``["6758", "7203", "9984"]``) — ready to
+        pass straight to ``read_ticks(ticker_filter=...)`` with no conversion.
+        For the tick types they come from the ``ticker=CODE.parquet`` filenames;
+        for the date-only summary stores they are read from the in-file code
+        column. Strings (not ints) so modern alphanumeric codes (e.g. ``"130A"``)
+        are preserved instead of silently dropped; pure-digit codes sort
+        numerically, ahead of any alphanumeric ones.
     """
     type_dir = _resolve_type_dir(data_dir, data_type)
-
-    tickers: set[str] = set()
 
     date_dirs = (
         [type_dir / f"date={date}"]
@@ -290,6 +310,31 @@ def get_available_tickers(
         else [d for d in type_dir.iterdir() if d.is_dir() and d.name.startswith("date=")]
     )
 
+    def _sort_key(code: str):
+        # Pure-digit codes sort numerically ("9984" < "10000"); alphanumeric
+        # codes sort lexically, after all the numeric ones.
+        return (0, int(code)) if code.isdigit() else (1, code)
+
+    if data_type in ("stock_summary", "indices_summary"):
+        # Summary stores partition by date only, so codes live in a column rather
+        # than per-ticker filenames; read it (first 4 chars, mirroring the
+        # partition value the tick types encode in the filename).
+        code_col = "Index Code" if data_type == "indices_summary" else "Stock Code"
+        codes: set[str] = set()
+        for date_dir in date_dirs:
+            if not date_dir.exists():
+                continue
+            for fpath in date_dir.glob("*.parquet"):
+                try:
+                    series = pl.read_parquet(fpath, columns=[code_col]).to_series()
+                except Exception:
+                    continue
+                codes.update(
+                    str(v).strip()[:4] for v in series.unique().to_list() if v is not None
+                )
+        return sorted(codes, key=_sort_key)
+
+    tickers: set[str] = set()
     prefix = "ticker="
     for date_dir in date_dirs:
         if not date_dir.exists():
@@ -297,10 +342,4 @@ def get_available_tickers(
         for fpath in date_dir.iterdir():
             if fpath.suffix == ".parquet" and fpath.stem.startswith(prefix):
                 tickers.add(fpath.stem[len(prefix):])
-
-    def _sort_key(code: str):
-        # Pure-digit codes sort numerically ("9984" < "10000"); alphanumeric
-        # codes sort lexically, after all the numeric ones.
-        return (0, int(code)) if code.isdigit() else (1, code)
-
     return sorted(tickers, key=_sort_key)
