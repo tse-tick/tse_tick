@@ -166,7 +166,9 @@ def clean_data(df, kind="individual_stock", language="en"):
 
     for i in float_list:
         col = df_cleaned.columns[i]
-        df_cleaned = df_cleaned.with_columns(pl.col(col).fill_null(0.0))
+        df_cleaned = df_cleaned.with_columns(
+            pl.col(col).cast(pl.Float64, strict=False).fill_null(0.0)
+        )
 
     df_cleaned = df_cleaned.with_columns(
         pl.col("Data Date").str.to_datetime("%Y%m%d", strict=False)
