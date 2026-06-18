@@ -22,11 +22,19 @@ __copyright__ = "Copyright 2025-2026"
 def _configure_windows_console() -> None:
     """Make ``print(df)`` safe on a legacy Windows console.
 
-    Polars renders DataFrames with Unicode box-drawing characters that the
-    default Windows console codepage (cp1252) cannot encode, so a bare
-    ``print(df)`` raises ``UnicodeEncodeError``. Switching Polars to ASCII table
-    borders keeps interactive inspection working out of the box. This is a no-op
-    off Windows; opt out by setting ``TSE_TICK_ASCII_TABLES=0``.
+    Two distinct glyph problems break a bare ``print(df)`` on the default Windows
+    console codepage (cp1252):
+
+    * Polars renders DataFrames with Unicode **box-drawing** borders — fixed by
+      switching Polars to ASCII table borders.
+    * The frame's **content** still carries non-cp1252 glyphs even with ASCII
+      borders: the ``datetime[μs]`` dtype header (U+03BC), column names like
+      ``"Executions ≤3 units"`` (U+2264), and exchange values with ``—``
+      (U+2014). These are fixed by reconfiguring ``stdout``/``stderr`` to UTF-8.
+
+    Both are no-ops off Windows; opt out of both with ``TSE_TICK_ASCII_TABLES=0``.
+    ``tse_tick.display(df)`` remains an explicit, cross-platform UTF-8 alternative
+    regardless of this setting.
     """
     import os
     import sys
@@ -39,6 +47,21 @@ def _configure_windows_console() -> None:
         pl.Config.set_ascii_tables(True)
     except Exception:  # a cosmetic tweak must never break import
         pass
+    # ASCII borders don't help the cell/column glyphs above, so make the standard
+    # streams UTF-8 too. Heavily guarded: skip streams that can't be reconfigured
+    # (pytest capture, redirected pipes) or are already UTF-8, and never let this
+    # break import.
+    for _stream_name in ("stdout", "stderr"):
+        _stream = getattr(sys, _stream_name, None)
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is None:
+            continue
+        try:
+            _encoding = (getattr(_stream, "encoding", "") or "").lower()
+            if _encoding not in ("utf-8", "utf8"):
+                _reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
 
 
 _configure_windows_console()
@@ -67,7 +90,14 @@ def display(df, *, file=None) -> None:
         stream.write(text)
 
 
-from .enhanced import create_df, export_to_csv, discover_zips, parse_period, read_ticks
+from .enhanced import (
+    create_df,
+    export_to_csv,
+    discover_zips,
+    parse_period,
+    read_ticks,
+    NoDataWarning,
+)
 
 from .schemas import (
     get_schema_individual_stock_95,
@@ -134,6 +164,7 @@ __all__ = [
     "display",
     "discover_zips",
     "parse_period",
+    "NoDataWarning",
     "get_schema_individual_stock_95",
     "get_schema_summary_83",
     "get_schema_indices_23",

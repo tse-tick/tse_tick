@@ -388,8 +388,14 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
   `logging`, not `print`, so they never write to stdout (or crash on non-ASCII paths) unless you opt
   in with `logging.basicConfig(level=logging.INFO)`. The `tse-tick` CLI still prints progress.
 - **Windows-friendly `print`.** On Windows, importing `tse_tick` switches Polars to ASCII table borders
-  so a bare `print(df)` doesn't raise `UnicodeEncodeError` on a cp1252 console (opt out with
-  `TSE_TICK_ASCII_TABLES=0`); `tse_tick.display(df)` prints any DataFrame as UTF-8 on any platform.
+  **and** reconfigures `stdout`/`stderr` to UTF-8, so a bare `print(df)` no longer raises
+  `UnicodeEncodeError` on a cp1252 console — neither the box-drawing borders nor the content glyphs
+  (`datetime[μs]`, `≤` in column names, `—` in exchange values). Opt out of both with
+  `TSE_TICK_ASCII_TABLES=0`; `tse_tick.display(df)` prints any DataFrame as UTF-8 on any platform
+  regardless.
+- **Discovery round-trips.** `get_available_tickers(...)` returns **string** codes (e.g. `["6758",
+  "7203"]`) you can pass straight to `read_ticks(ticker_filter=...)`; alphanumeric codes (e.g. `"130A"`)
+  are preserved rather than dropped. (`read_ticks` / `query_ticks` also accept `int` codes.)
 - **Flexible discovery.** Structured-root `read_ticks` / `discover_zips` find ZIPs under the documented
   `{year}/{yearmonth}/` layout, a `{yearmonth}/` folder directly under the root (e.g. a `…/TICST120`
   type folder), and — as a fallback — recursively under nested delivery trees such as
@@ -403,10 +409,12 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
   numeric code (e.g. `"101"`), matching what you pass to `ticker_filter` and the `ticker=` partition;
   `ticker_filter` also accepts the display name (`"Nikkei 225"`). (Stores written before 0.7.0 held
   decoded names for `indices` — re-ingest to refresh.)
-- **Empty results keep their schema.** A read that matches nothing — **including a date with no ZIPs**
-  (e.g. a market holiday) — returns an empty *but fully-typed* DataFrame (all columns present), so
-  chained access like `df["Exchange Code"]` won't raise. The no-ZIPs case also logs a warning, so a
-  holiday isn't silently mistaken for missing data.
+- **Empty results keep their schema and warn.** A read that matches nothing — a date with no ZIPs (e.g.
+  a market holiday), an unknown ticker/index code, or an over-tight filter — returns an empty *but
+  fully-typed* DataFrame (all columns present), so chained access like `df["Exchange Code"]` won't raise.
+  `read_ticks` also emits a capturable `tse_tick.NoDataWarning` (a `UserWarning`) for **every** zero-row
+  result across all four types, so "no data" is never silent — trap it with `warnings.catch_warnings()`
+  or silence it with `warnings.filterwarnings("ignore", category=tse_tick.NoDataWarning)`.
 - **Ingestion entry points** are the functions `ingest_period`, `ingest_single_zip`,
   `ingest_year_from_root`, … — `tse_tick.ingest` itself is the submodule.
 

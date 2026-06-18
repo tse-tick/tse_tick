@@ -6,6 +6,7 @@ import zipfile
 import io
 import glob
 import logging
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Literal, Tuple, List, Dict, Union
@@ -22,6 +23,24 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class NoDataWarning(UserWarning):
+    """Warned when a read resolves to zero rows (a typed-empty frame is returned).
+
+    Emitted by :func:`read_ticks` whenever nothing matches — a non-trading day
+    (e.g. a holiday), a ticker/index code not present, or filters that exclude
+    every row — for all four data types alike. Being a ``UserWarning`` subclass
+    it is capturable with ``warnings.catch_warnings(record=True)`` and silenceable
+    with ``warnings.filterwarnings("ignore", category=tse_tick.NoDataWarning)``.
+    """
+
+
+def _warn_no_data(message: str) -> None:
+    # stacklevel=3: report the user's read_ticks(...) call site, not this helper
+    # or its internal caller.
+    warnings.warn(message, NoDataWarning, stacklevel=3)
+
 
 _MAX_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
 _MAX_ZIP_ENTRIES = 5
@@ -67,9 +86,15 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
     """Parse a period string into structured parameters.
 
     Accepted formats:
-        YYYY                         -> process entire year
-        YYYYMM-YYYYMM                -> process all trading days from start month to end month
-        YYYYMMDD-YYYYMMDD            -> process all trading days from start date to end date
+        YYYY                         -> entire year
+        YYYYMM                       -> a single month
+        YYYYMMDD                     -> a single trading day
+        YYYYMM-YYYYMM                -> all trading days from start month to end month
+        YYYYMMDD-YYYYMMDD            -> all trading days from start date to end date
+
+    The single ``YYYYMM`` and ``YYYYMMDD`` forms are the same ones
+    ``read_ticks(date=…)`` accepts — a lone month or day needs no ``start-end``
+    range.
 
     Returns dict with keys:
         granularity: "year" | "month" | "date"
@@ -910,8 +935,10 @@ def read_ticks(
             root (``{year}/{yearmonth}/…``) — the same inputs the ``ingest_*``
             functions accept.
         data_type: One of the four NEEDS types (a :class:`DataType` works too).
-        ticker_filter: A ``set`` of **string** codes (e.g. ``{"7203"}``). For
-            ``individual_stock`` this drives the bounded-memory raw-byte fast
+        ticker_filter: A ``set`` of codes (e.g. ``{"7203"}``); ``int`` codes
+            such as ``{7203}`` are accepted too and coerced to strings — so the
+            output of :func:`tse_tick.get_available_tickers` feeds straight in.
+            For ``individual_stock`` this drives the bounded-memory raw-byte fast
             path; for ``indices`` it matches the index code (``"101"`` == Nikkei
             225) after parsing.
         date: A day ``"YYYYMMDD"``, month ``"YYYYMM"``, year ``"YYYY"``, or a
@@ -926,8 +953,11 @@ def read_ticks(
         language: Output column-name language, ``"en"`` or ``"jp"``.
 
     Returns:
-        The same cleaned Polars DataFrame shape as :func:`create_df` /
-        :func:`tse_tick.query_ticks` (empty if nothing matches).
+        The cleaned Polars DataFrame — empty but fully typed if nothing matches.
+        Its columns match :func:`create_df`. Note :func:`tse_tick.query_ticks`
+        returns these columns **plus** an extra ``date`` partition column
+        (``i64`` ``YYYYMMDD``, added by the store's Hive partitioning), so the
+        store path has one more column than this one-shot path.
 
     Caveats:
         * **Time filtering applies to tick types only.** ``individual_stock`` /
@@ -970,11 +1000,10 @@ def read_ticks(
 
     zips = _resolve_source_zips(source, data_type, date)
     if not zips:
-        logger.warning(
-            "read_ticks: no ZIP files found for the requested date(s) in %r. "
+        _warn_no_data(
+            f"read_ticks: no ZIP files found for the requested date(s) in {source!r}. "
             "Verify these are trading days — exchange holidays (e.g. Golden Week "
-            "or year-end) have no data.",
-            source,
+            "or year-end) have no data."
         )
         return _empty_typed_frame(data_type, language, _year_hint_from_date(date))
 
@@ -1040,6 +1069,18 @@ def read_ticks(
         if date_col is not None:
             dd = pl.col(date_col).cast(pl.Date).cast(pl.String).str.replace_all("-", "")
             result = result.filter(dd.is_in(list(days)))
+
+    # A zero-row result is the same "no data" condition for every data type —
+    # signal it the same capturable way (the ZIPs existed but a holiday/unknown
+    # code/over-tight filter left nothing), not silently as before.
+    if result.height == 0:
+        ft = f", ticker_filter={sorted(norm_filter)}" if norm_filter else ""
+        _warn_no_data(
+            f"read_ticks: 0 rows for the requested filters "
+            f"(data_type={data_type!r}, date={date!r}{ft}). Possible causes: a "
+            "non-trading day (e.g. a holiday), a ticker/index code not present, "
+            "or time/column filters that exclude every row."
+        )
 
     if rows is not None and result.height > rows:
         logger.warning(

@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+Polish from a fifth real-data run that exercised all four data types and found **no crashes or wrong
+results** — only cross-type consistency and developer-experience gaps.
+
+### Fixed
+- **No-data signaling is now consistent and capturable.** `read_ticks` already returned a typed-empty
+  frame for every "no data" case, but only `individual_stock`'s no-ZIPs path *said* anything — and via
+  `logging`, which `warnings.catch_warnings(record=True)` can't trap. Every zero-row result (no ZIPs, a
+  holiday inside a monthly file, an unknown ticker/index code, an over-tight filter) now emits a
+  capturable `tse_tick.NoDataWarning` (a `UserWarning`), uniformly across all four types.
+- **`Execution Time` is a fixed-width 6-char `HHMMSS` for index ticks across eras.** 2016 index ticks
+  stored `HHMM` (`"0900"`) while 2017+ stored `HHMMSS` (`"090005"`), so raw string/number math or
+  cross-year comparison on the column was inconsistent. 2016 values are now padded to `HHMMSS`. (The time
+  *filter* already handled both widths.)
+- **Docstrings match the implementation.** `parse_period` / `ingest_period` now document the single
+  `YYYYMM` and `YYYYMMDD` forms the code already accepts; `ingest_directory` gained a docstring;
+  `ticker_filter` is documented as accepting `int` codes too; and `read_ticks` / `query_ticks` now note
+  that the store path returns one extra `date` partition column (the two access paths' schemas differ by
+  exactly that column).
+
+### Changed
+- **`get_available_tickers()` returns string codes** (e.g. `["6758", "7203"]`) instead of `int`s, so its
+  output feeds straight into `read_ticks(ticker_filter=...)` with no conversion, and modern
+  **alphanumeric** TSE codes (e.g. `"130A"`) are preserved rather than silently dropped by an `int()`
+  parse. Pure-digit codes still sort numerically. *(Return-type change — warrants a minor version bump.)*
+- **On Windows, importing `tse_tick` now also reconfigures `stdout`/`stderr` to UTF-8** (in addition to
+  the ASCII table borders from 0.6.0), so a naive `print(df)` no longer raises `UnicodeEncodeError` on the
+  non-ASCII *content* a DataFrame carries (the `datetime[μs]` dtype header, `≤` in column names, `—` in
+  exchange values). Windows-only, opt out with `TSE_TICK_ASCII_TABLES=0`; `tse_tick.display(df)` remains
+  the explicit cross-platform UTF-8 alternative.
+
 ## [0.7.0] - 2026-06-18
 
 Fixes from a fourth real-data run that exercised **all four** NEEDS data types (the prior runs were

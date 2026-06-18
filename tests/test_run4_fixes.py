@@ -57,7 +57,7 @@ def test_f2_ingest_ticker_filter_prunes_indices(tmp_path):
     _indices_zip(zp, "HTICIT110.20230508.1.csv", indices_csv("20230508", ["101", "113"], rows_per_code=8))
     store = tmp_path / "store"
     ingest_year_from_root(str(tmp_path), str(store), 2023, "indices", ticker_filter={"101"})
-    assert get_available_tickers(str(store), "indices") == [101]
+    assert get_available_tickers(str(store), "indices") == ["101"]
 
 
 # --------------------------------------------------------------------------- #

@@ -1,7 +1,7 @@
 # tests/test_empty_schema.py
 """A no-match read must return an empty-but-typed frame (full columns), not (0,0),
 so chained code like df["Exchange Code"] doesn't raise ColumnNotFoundError."""
-import logging
+import pytest
 
 import tse_tick
 from tests.synthetic_data import write_zip, individual_stock_csv
@@ -66,13 +66,12 @@ def test_read_ticks_no_zips_returns_typed_empty(tmp_path):
     assert df.select("Exchange Code").height == 0      # chained selection must not raise
 
 
-def test_read_ticks_no_zips_warns(tmp_path, caplog):
-    with caplog.at_level(logging.WARNING, logger="tse_tick.enhanced"):
+def test_read_ticks_no_zips_warns(tmp_path):
+    # The no-data signal is now a capturable NoDataWarning (a UserWarning), not a
+    # logging record — so warnings.catch_warnings() / pytest.warns can trap it
+    # (the old raw-stderr/logging message could not be, per the run5 report).
+    with pytest.warns(tse_tick.NoDataWarning, match="no ZIP"):
         tse_tick.read_ticks(str(_structured_root(tmp_path)), ticker_filter={"7203"}, date="20230504")
-    assert any(
-        "no ZIP" in r.getMessage() or "trading day" in r.getMessage().lower()
-        for r in caplog.records
-    )
 
 
 def test_read_ticks_empty_schema_is_consistent(tmp_path):
