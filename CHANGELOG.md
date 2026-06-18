@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-18
+
 Polish from a fifth real-data run that exercised all four data types and found **no crashes or wrong
 results** — only cross-type consistency and developer-experience gaps.
 
