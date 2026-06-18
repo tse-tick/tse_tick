@@ -366,17 +366,15 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.8.0
+## What's New in 0.9.0
 
-`tse_tick` 0.8.0 — `pip install -U tse-tick`. Consistency & developer-experience polish from a fifth real-data run that found **no crashes and no wrong results** across all four data types.
+`tse_tick` 0.9.0 — `pip install -U tse-tick`. Two real-data defect fixes from a sixth run.
 
-- **"No data" is never silent — and is now capturable.** Every zero-row `read_ticks` result (a holiday, an unknown code, an over-tight filter) emits a `tse_tick.NoDataWarning` (a `UserWarning`) you can trap with `warnings.catch_warnings()` or silence by category — uniformly across all four types (was: only `individual_stock`'s no-ZIPs path, via uncapturable logging).
-- **`Execution Time` is a fixed-width 6-char `HHMMSS` for index ticks across eras** (2016 `HHMM` → `HHMMSS`), so raw string/number math and cross-year comparison on the column behave alike.
-- **`get_available_tickers()` returns string codes** ready to pass straight into `read_ticks(ticker_filter=...)`, and preserves modern alphanumeric codes (e.g. `"130A"`) the old `int()` parse silently dropped. *(Return-type change: `list[int]` → `list[str]`.)*
-- **A naive `print(df)` no longer crashes on a Windows console.** Importing `tse_tick` now also reconfigures `stdout`/`stderr` to UTF-8 (Windows-only, opt-out `TSE_TICK_ASCII_TABLES=0`), fixing the content glyphs (`datetime[μs]`, `≤`, `—`) that ASCII borders alone didn't.
-- **Docs match the code:** `parse_period`/`ingest_period` document their single `YYYYMM`/`YYYYMMDD` forms, `ingest_directory` gained a docstring, the `int` ticker tolerance is noted, and the one-extra-`date`-column difference between `read_ticks` and `query_ticks` is documented.
+- **`stock_summary` numbers are numeric again.** Every measure column (OHLC, VWAP, volumes, amounts, counts) was returned as `String`, so `.mean()` / arithmetic silently produced `null`; they're now `Float64` like the other three types. **Re-ingest `stock_summary` stores** to refresh the dtypes.
+- **Time-filtering `individual_stock` keeps the whole order book.** Quote-only book updates (no trade) have a blank `Execution Time` but a real `Update Time`; a session window keyed only on `Execution Time` was silently dropping ~94% of a liquid day (only trade-coincident snapshots). `read_ticks` and `query_ticks` now fall back to `Update Time` for those rows, so `compute_depth`/`compute_spread`/`compute_flow_imbalance` see the full in-window book (the `Execution Time` column itself is unchanged in the output).
+- **Docs:** `read_ticks` now notes typical one-shot timing — it opens every ZIP part of each day, so use `ingest_*` + `query_ticks` for faster repeated/narrow work.
 
-Earlier highlights (0.7.0): all-four-types correctness — summary `query_ticks`, jp/ingest `ticker_filter`, the 2016 index era, raw `Index Code`. (0.6.0): Windows-safe `print(df)` (ASCII tables + `tse_tick.display`), missing-date warnings + typed-empty reads. (0.5.0): multi-part-day ingest (the Toyota-7203 fix), `tse-tick export`.
+Earlier highlights (0.8.0): capturable `NoDataWarning`, fixed-width index `Execution Time`, string `get_available_tickers` codes, UTF-8 Windows stdout. (0.7.0): all-four-types correctness — summary `query_ticks`, jp/ingest `ticker_filter`, the 2016 index era, raw `Index Code`. (0.6.0): Windows-safe `print(df)`, missing-date warnings + typed-empty reads.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
@@ -450,7 +448,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **277 tests**. Without a local NEEDS store, **229 pass** and **48 skip**; with a complete NEEDS store, **all 277 pass**. Stage-1
+The suite collects **282 tests**. Without a local NEEDS store, **234 pass** and **48 skip**; with a complete NEEDS store, **all 282 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by

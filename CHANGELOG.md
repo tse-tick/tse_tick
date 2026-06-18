@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-18
+
 Fixes from a sixth real-data run: a silent wrong result (`stock_summary` numbers typed as `String`) and a
 silent data loss (time-filtering `individual_stock` dropped ~94% of the day).
 
