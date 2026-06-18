@@ -154,6 +154,27 @@ def ingest_year(
     max_workers: int = 1,
     ticker_filter: Optional[set] = None,
 ) -> list[dict]:
+    """Ingest every ``.zip`` for one ``year`` from a **flat** directory.
+
+    Globs ``*.zip`` directly under ``input_dir`` (non-recursive) and keeps those
+    whose filename contains ``str(year)``, ingesting each via
+    :func:`ingest_single_zip`. For a structured ``{year}/{yearmonth}/`` NEEDS root
+    use :func:`ingest_year_from_root` (or :func:`ingest_period`) instead.
+
+    Args:
+        input_dir: Directory holding the NEEDS ``.zip`` files.
+        output_dir: Store root to write under.
+        year: Era year (also selects era-specific parsing).
+        data_type: One of the four NEEDS types.
+        language: Output column-name language (``"en"`` / ``"jp"``).
+        max_workers: Reserved for parallel ingestion.
+        ticker_filter: Optional ``set`` of string stock codes
+            (``individual_stock`` only).
+
+    Returns:
+        One result dict per ZIP (see :func:`ingest_single_zip`); a failed ZIP
+        contributes ``{"zip_path": ..., "error": ...}`` instead.
+    """
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
         raise ValueError(
@@ -253,6 +274,25 @@ def ingest_year_from_root(
     resume: bool = True,
     ticker_filter: Optional[set] = None,
 ) -> list[dict]:
+    """Ingest a whole ``year`` from a **structured** NEEDS root into the store.
+
+    Discovers the year's ZIPs with :func:`tse_tick.discover_zips` (handling the
+    ``{year}/{yearmonth}/`` tree, the legacy ``…010`` index code, and nested
+    delivery trees) and ingests each day as a unit, writing partitioned Parquet.
+
+    Args:
+        input_root: Root of (or a folder above) the NEEDS delivery tree.
+        output_dir: Store root to write under.
+        year: Year to ingest.
+        data_type: One of the four NEEDS types.
+        language: Output column-name language (``"en"`` / ``"jp"``).
+        resume: Skip dates already present in the store (default ``True``).
+        ticker_filter: Optional ``set`` of stock/index codes to keep.
+
+    Returns:
+        One result dict per ingested date (``{"date", "parts", "rows",
+        "output_path"}``).
+    """
     valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
     if data_type not in valid_types:
         raise ValueError(
@@ -363,6 +403,28 @@ def ingest_event_windows_period(
     resume: bool = True,
     max_workers: int = 1,
 ) -> None:
+    """Build the event-window Parquet store for a period from an events CSV.
+
+    For each event in ``filter_csv`` whose ``zip_date`` falls in ``period``, reads
+    that day's ``individual_stock`` ZIPs and keeps the ticks within
+    ``±window_minutes`` of the event's ``reaction_anchor_dt`` (per ticker), writing
+    them to the event-window store via :func:`write_event_window_parquet`
+    (``year=YYYY/month=MM/<date>.parquet``). Corrupt ZIPs are logged and skipped.
+
+    Args:
+        input_root: Root of the ``{year}/{yearmonth}/`` NEEDS hierarchy.
+        output_dir: Root of the event-window store to write.
+        period: ``"YYYY"``, single ``"YYYYMM"`` / ``"YYYYMMDD"``, or a
+            ``"YYYYMM-YYYYMM"`` / ``"YYYYMMDD-YYYYMMDD"`` range.
+        filter_csv: CSV of events with ``zip_date``, ``event_date``, ``ticker`` and
+            ``reaction_anchor_dt`` columns.
+        window_minutes: Half-width of the window kept around each anchor.
+        resume: Skip dates whose output file already exists (default ``True``).
+        max_workers: Reserved for parallel ingestion.
+
+    Returns:
+        ``None`` — results are written to the store; progress goes to ``logging``.
+    """
     parsed = parse_period(period)
     granularity = parsed["granularity"]
     years = parsed["years"]

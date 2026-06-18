@@ -94,6 +94,25 @@ def write_partitioned_parquet(
     data_type: str,
     partition_cols: Optional[list[str]] = None,
 ) -> str:
+    """Write a cleaned frame to the Hive-partitioned Parquet store.
+
+    Writes under ``output_dir/<data_type>/``. The tick types
+    (``individual_stock``, ``indices``) partition by ``(Data Date, code)`` —
+    ``date=YYYYMMDD/ticker=CODE.parquet`` — so each per-ticker-day file is large
+    and prunes well. The daily-aggregate summary types partition by date only —
+    ``date=YYYYMMDD/<date>.parquet``, the code kept as a column — to avoid a
+    tens-of-thousands-of-tiny-files fan-out. Index codes are stored as the raw
+    numeric code in the ``ticker=`` filename.
+
+    Args:
+        df: The cleaned DataFrame to write (must contain the partition columns).
+        output_dir: Store root; ``<data_type>/`` is created under it.
+        data_type: One of the four NEEDS types (selects the default partitioning).
+        partition_cols: Override the default partition columns (advanced use).
+
+    Returns:
+        The absolute path of the ``<output_dir>/<data_type>`` directory.
+    """
     if data_type not in _VALID_DATA_TYPES:
         raise ValueError(
             f"Unknown data_type {data_type!r}. Must be one of {sorted(_VALID_DATA_TYPES)}"
@@ -198,6 +217,19 @@ def read_parquet_partition(
 
 
 def write_event_window_parquet(df: pl.DataFrame, output_dir: str) -> None:
+    """Append event-window ticks to the **event-window** Parquet store.
+
+    Writes the separate event-window store (laid out as
+    ``<output_dir>/year=YYYY/month=MM/<date>.parquet``) that
+    :func:`tse_tick.read_partitioned_parquet` reads — distinct from the main
+    per-ticker tick store written by :func:`write_partitioned_parquet`. Rows are
+    grouped by ``Data Date``; if a date's file already exists the new rows are
+    concatenated onto it (so multiple ZIP parts of a day accumulate).
+
+    Args:
+        df: Event-window ticks; must contain a ``Data Date`` column.
+        output_dir: Root of the event-window store.
+    """
     out_root = Path(output_dir)
     df = _coerce_time_cols(df)
 

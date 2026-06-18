@@ -118,8 +118,48 @@ def extract_event_window(
     before: str = "60min",
     after: str = "60min",
     columns: Optional[list[str]] = None,
+    data_type: str = "individual_stock",
 ) -> pl.DataFrame:
+    """Extract the ticks around one event from a built Parquet store.
+
+    Queries the ``ingest_*`` store via :func:`tse_tick.query_ticks` for a single
+    ``ticker`` on ``event_date``. When ``event_time`` is given the result is
+    restricted to ``[event_time - before, event_time + after]`` and a
+    ``seconds_from_event`` column is added (signed seconds of each tick relative
+    to the event). When ``event_time`` is **omitted** the whole trading day is
+    returned and ``before`` / ``after`` are **not** applied — there is no anchor to
+    centre a window on.
+
+    Quote-only book updates have a blank ``Execution Time`` but a real
+    ``Update Time``; ``seconds_from_event`` falls back to ``Update Time`` for those
+    rows (matching how :func:`tse_tick.query_ticks` time-filters them), so the
+    whole in-window order book is timed rather than crashing on the blank field.
+
+    Args:
+        data_dir: Store root: the directory that contains ``<data_type>/``.
+        ticker: Stock code (``individual_stock``) or index code (``indices``).
+        event_date: Event day as ``"YYYYMMDD"``.
+        event_time: Event time-of-day ``"HH:MM:SS"``; ``None`` returns the day.
+        before: Window extent before the event (e.g. ``"30min"``, ``"1h"``).
+        after: Window extent after the event.
+        columns: Column projection; ``None`` selects all columns.
+        data_type: A tick type — ``"individual_stock"`` or ``"indices"`` (the two
+            ``*_summary`` types are daily aggregates with no intraday timestamp, so
+            event windows don't apply and are rejected).
+
+    Returns:
+        A Polars DataFrame of the window (with ``seconds_from_event`` when
+        ``event_time`` is given); empty if nothing matches.
+    """
     from tse_tick.query import query_ticks
+
+    _TICK_TYPES = {"individual_stock", "indices"}
+    if data_type not in _TICK_TYPES:
+        raise ValueError(
+            f"extract_event_window supports only tick types with an Execution Time "
+            f"({sorted(_TICK_TYPES)}); got {data_type!r}. The *_summary types are "
+            f"daily aggregates with no intraday timestamp."
+        )
 
     if len(event_date) != 8 or not event_date.isdigit():
         raise ValueError(f"event_date must be 'YYYYMMDD', got {event_date!r}")
@@ -138,7 +178,7 @@ def extract_event_window(
                 "%Y-%m-%d %H:%M:%S",
             )
         except Exception:
-            raise ValueError(f"Invalid event_time format: {event_time!r}")
+            raise ValueError(f"Invalid event_time format (expected 'HH:MM:SS'): {event_time!r}")
 
         start_dt = event_dt - before_offset
         end_dt = event_dt + after_offset
@@ -147,7 +187,7 @@ def extract_event_window(
 
     df = query_ticks(
         data_dir,
-        data_type="individual_stock",
+        data_type=data_type,
         ticker=ticker,
         date=event_date,
         start_time=start_time,
@@ -155,17 +195,43 @@ def extract_event_window(
         columns=columns,
     )
 
-    if event_time is not None and event_dt is not None and not df.is_empty():
-        exec_strs = df["Execution Time"].cast(pl.String)
-        exec_dts = [
-            datetime.datetime.strptime(
-                f"{event_date[:4]}-{event_date[4:6]}-{event_date[6:]} {ts[:2]}:{ts[2:4]}:{ts[4:6]}",
-                "%Y-%m-%d %H:%M:%S",
+    if (
+        event_time is not None
+        and event_dt is not None
+        and not df.is_empty()
+        and "Execution Time" in df.columns
+    ):
+        from .core import _tick_datetime_expr
+
+        # Quote-only rows have a blank Execution Time but a real Update Time (the
+        # rows query_ticks keeps via its Update Time fallback). Use the same
+        # effective time so seconds_from_event is defined for every row instead of
+        # blowing up on an empty "HHMMSS" -> "YYYY-MM-DD ::" (the run8 crash).
+        exec_raw = pl.col("Execution Time").cast(pl.String).str.strip_chars()
+        if "Update Time" in df.columns:
+            eff_time = (
+                pl.when(exec_raw.is_null() | (exec_raw == ""))
+                .then(pl.col("Update Time"))
+                .otherwise(pl.col("Execution Time"))
             )
-            for ts in exec_strs.to_list()
-        ]
-        seconds = [(dt - event_dt).total_seconds() for dt in exec_dts]
-        df = df.with_columns(pl.Series("seconds_from_event", seconds))
+        else:
+            eff_time = pl.col("Execution Time")
+
+        # Build the timestamp from the known event_date (so it still works when a
+        # columns= projection drops Data Date) + the effective time, via the
+        # shared tick-timestamp parser.
+        date_str = f"{event_date[:4]}-{event_date[4:6]}-{event_date[6:]}"
+        df = df.with_columns(
+            eff_time.alias("_eff_time"),
+            pl.lit(date_str).alias("_event_date"),
+        )
+        seconds = (
+            (_tick_datetime_expr("_event_date", "_eff_time") - pl.lit(event_dt))
+            .dt.total_seconds()
+            .cast(pl.Float64)
+            .alias("seconds_from_event")
+        )
+        df = df.with_columns(seconds).drop(["_eff_time", "_event_date"])
 
     return df
 
@@ -181,7 +247,30 @@ def extract_batch_event_windows(
     columns: Optional[list[str]] = None,
     max_workers: int = 1,
     progress: bool = True,
+    data_type: str = "individual_stock",
 ) -> dict[str, Optional[pl.DataFrame]]:
+    """Extract event windows for many events from a built Parquet store.
+
+    Calls :func:`extract_event_window` once per row of ``events_df`` and returns a
+    dict keyed by ``"{ticker}_{date}_{time}"`` (or ``"{ticker}_{date}_fullday"``
+    when the time is missing). A row whose extraction raises is recorded as
+    ``None`` (with a ``warnings.warn``) so one bad event never aborts the batch.
+
+    Args:
+        data_dir: Store root: the directory that contains ``<data_type>/``.
+        events_df: One row per event; must have ``ticker_col`` and ``date_col``
+            (``time_col`` optional — a missing/blank time gives a full-day result).
+        ticker_col / date_col / time_col: Column names in ``events_df``.
+        before / after: Window extent on each side of the event (see
+            :func:`extract_event_window`).
+        columns: Column projection passed through to each query.
+        max_workers: Thread workers for concurrent extraction (``1`` = serial).
+        progress: Log a per-event progress line.
+        data_type: A tick type — ``"individual_stock"`` or ``"indices"``.
+
+    Returns:
+        ``{event_key: DataFrame | None}`` — ``None`` for any event that failed.
+    """
     if ticker_col not in events_df.columns:
         raise ValueError(f"ticker_col {ticker_col!r} not in events_df")
     if date_col not in events_df.columns:
@@ -213,7 +302,7 @@ def extract_batch_event_windows(
         try:
             df = extract_event_window(
                 data_dir, ticker, date_str, time_str,
-                before=before, after=after, columns=columns,
+                before=before, after=after, columns=columns, data_type=data_type,
             )
             if progress:
                 logger.info("[%d/%d] ticker=%s date=%s -> %d rows", idx + 1, total, ticker, date_str, len(df))
