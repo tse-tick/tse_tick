@@ -111,7 +111,7 @@ def ingest_directory(
                 if progress:
                     fname = Path(meta.get("zip_path", "")).name
                     rows = meta.get("rows", "error")
-                    print(f"[{done}/{total}] {fname} -> {rows} rows")
+                    logger.info("[%d/%d] %s -> %s rows", done, total, fname, rows)
     else:
         for i, zf in enumerate(zip_files, 1):
             meta = _process(zf)
@@ -119,7 +119,7 @@ def ingest_directory(
             if progress:
                 fname = Path(meta.get("zip_path", "")).name
                 rows = meta.get("rows", "error")
-                print(f"[{i}/{total}] {fname} -> {rows} rows")
+                logger.info("[%d/%d] %s -> %s rows", i, total, fname, rows)
 
     return results
 
@@ -198,7 +198,7 @@ def ingest_year_from_root(
         except Exception as exc:
             meta = {"zip_path": str(zip_path), "error": str(exc)}
         results.append(meta)
-        print(f"  {zip_basename} -> {meta.get('rows', 'error')} rows")
+        logger.info("  %s -> %s rows", zip_basename, meta.get("rows", "error"))
 
     return results
 
@@ -315,7 +315,7 @@ def _process_zips(
         except Exception as exc:
             meta = {"zip_path": str(zip_path), "error": str(exc)}
         results.append(meta)
-        print(f"  {zip_basename} -> {meta.get('rows', 'error')} rows")
+        logger.info("  %s -> %s rows", zip_basename, meta.get("rows", "error"))
 
     return results
 
@@ -441,9 +441,9 @@ def ingest_event_windows_period(
                         all_filtered_parts.append(filtered)
 
                     if zip_counter % 50 == 0:
-                        print(
-                            f"[{zip_counter}/{total_dates}+] "
-                            f"Processing {zip_fname} - {len(filtered):,} ticks matched"
+                        logger.info(
+                            "[%d/%d+] Processing %s - %s ticks matched",
+                            zip_counter, total_dates, zip_fname, f"{len(filtered):,}",
                         )
 
                 except (zipfile.BadZipFile, EOFError) as exc:
@@ -469,9 +469,9 @@ def ingest_event_windows_period(
                 write_event_window_parquet(combined, output_dir)
                 del combined
                 gc.collect()
-                print(f"  {date_str}: {combined_rows:,} event-window ticks written")
+                logger.info("  %s: %s event-window ticks written", date_str, f"{combined_rows:,}")
             else:
                 logger.info("  %s: no matching ticks after filtering", date_str)
 
     if skipped_by_resume:
-        print(f"Resume: skipped {skipped_by_resume} already-processed dates")
+        logger.info("Resume: skipped %d already-processed dates", skipped_by_resume)

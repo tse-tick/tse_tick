@@ -356,6 +356,23 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
 
 ---
 
+## Notes for library users
+
+- **Quiet by default.** `create_df`, `read_ticks`, and the `ingest_*` functions emit diagnostics via
+  `logging`, not `print`, so they never write to stdout (or crash on non-ASCII paths) unless you opt
+  in with `logging.basicConfig(level=logging.INFO)`. The `tse-tick` CLI still prints progress.
+- **Flexible discovery.** Structured-root `read_ticks` / `discover_zips` find ZIPs under the documented
+  `{year}/{yearmonth}/` layout and, as a fallback, recursively under nested delivery trees such as
+  `個別株式{year}/TICST120/{yyyymm}/`.
+- **Numeric dtypes.** Price/quote columns (`Execution Price`, `Sell Quote 1 Best`, …) are `Float64`.
+  (Parquet stores ingested before this change stored them as `String` — re-ingest to refresh.)
+- **Empty results keep their schema.** A no-match read returns an empty *but fully-typed* DataFrame
+  (all columns present), so chained access like `df["Exchange Code"]` won't raise.
+- **Ingestion entry points** are the functions `ingest_period`, `ingest_single_zip`,
+  `ingest_year_from_root`, … — `tse_tick.ingest` itself is the submodule.
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please open an issue or submit a pull request.
@@ -380,7 +397,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **215 tests**. Without a local NEEDS store, **167 pass** and **48 skip**; with a complete NEEDS store, **all 215 pass**. Stage-1
+The suite collects **227 tests**. Without a local NEEDS store, **179 pass** and **48 skip**; with a complete NEEDS store, **all 227 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by

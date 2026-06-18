@@ -136,7 +136,7 @@ def clean_data(df, kind="individual_stock", language="en"):
             price_exprs = [(pl.col(c).cast(pl.Float64) * 0.01).alias(c) for c in price_columns]
             if price_exprs:
                 df_cleaned = df_cleaned.with_columns(price_exprs)
-    elif (df_cleaned["Data Date"][0][:4] == "2016") and (kind == "indices"):
+    elif (kind == "indices") and df_cleaned.height and (df_cleaned["Data Date"][0][:4] == "2016"):
         time_list = []
         int_list = []
         float_list = []
@@ -166,7 +166,9 @@ def clean_data(df, kind="individual_stock", language="en"):
 
     for i in float_list:
         col = df_cleaned.columns[i]
-        df_cleaned = df_cleaned.with_columns(pl.col(col).fill_null(0.0))
+        df_cleaned = df_cleaned.with_columns(
+            pl.col(col).cast(pl.Float64, strict=False).fill_null(0.0)
+        )
 
     df_cleaned = df_cleaned.with_columns(
         pl.col("Data Date").str.to_datetime("%Y%m%d", strict=False)
@@ -181,7 +183,7 @@ def clean_data(df, kind="individual_stock", language="en"):
             pl.col("Update Time").str.slice(0, 12).alias("Update Time")
         )
 
-    elif (kind == "indices") and (df_cleaned["Data Date"][0].year == 2016):
+    elif (kind == "indices") and df_cleaned.height and (df_cleaned["Data Date"][0].year == 2016):
         df_cleaned = df_cleaned.with_columns(
             pl.col("Execution Time").str.slice(0, 6).alias("Execution Time")
         )

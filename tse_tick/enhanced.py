@@ -159,6 +159,59 @@ def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
     return data_type, year
 
 
+def _zip_date_token(name: str) -> Optional[str]:
+    """The YYYYMMDD (daily) or YYYYMM (monthly) date token in a NEEDS filename."""
+    for part in name.split("."):
+        if part.isdigit() and part.startswith("20") and len(part) in (6, 8):
+            return part
+    return None
+
+
+def _zip_sort_key(path) -> Tuple[str, int]:
+    """Chronological natural sort key: (date token, part number) from the filename.
+
+    Sorts ``…20240104.1.zip``, ``…20240104.2.zip``, ``…20240104.10.zip`` in numeric
+    order rather than lexical (1, 10, 2, …).
+    """
+    parts = Path(path).name.split(".")
+    date_tok, part_num = "", 0
+    for i, p in enumerate(parts):
+        if p.isdigit() and p.startswith("20") and len(p) in (6, 8):
+            date_tok = p
+            if i + 1 < len(parts) and parts[i + 1].isdigit():
+                part_num = int(parts[i + 1])
+            break
+    return (date_tok, part_num)
+
+
+def _discover_zips_recursive(
+    root: Path,
+    prefix: str,
+    years: List[int],
+    months: Optional[List[int]],
+    dates: Optional[List[str]],
+) -> List[Path]:
+    """Fallback discovery: recursively find ``<PREFIX>.*.zip`` anywhere under
+    ``root`` (robust to nested delivery trees such as
+    ``個別株式{year}/TICST120/{yyyymm}/``), filtered by the requested
+    year/month/date tokens parsed from each filename.
+    """
+    year_set = {str(y) for y in years}
+    month_set = {f"{m:02d}" for m in (months if months is not None else range(1, 13))}
+    date_set = set(dates) if dates else None
+    pattern = str(root / "**" / f"{prefix}.*.zip")
+    out: List[Path] = []
+    for p in glob.glob(pattern, recursive=True):
+        tok = _zip_date_token(Path(p).name)
+        if tok is None or tok[:4] not in year_set or tok[4:6] not in month_set:
+            continue
+        # Daily files must match a requested date; monthly files match by month.
+        if date_set is not None and len(tok) == 8 and tok not in date_set:
+            continue
+        out.append(Path(p))
+    return sorted(out)
+
+
 def discover_zips(
     input_root: str,
     data_type: str,
@@ -208,7 +261,21 @@ def discover_zips(
                 matched = sorted(glob.glob(pattern))
                 all_zips.extend(Path(p) for p in matched)
 
-    return all_zips
+    # The documented layout above is the fast path; if it matched nothing, fall
+    # back to a recursive search so nested real-world trees still work.
+    if not all_zips:
+        all_zips = _discover_zips_recursive(root, prefix, years, months, dates)
+
+    return sorted(all_zips, key=_zip_sort_key)
+
+
+def _raw_width(kind: str, year: int) -> int:
+    """Expected raw (pre-clean) column count for a NEEDS data type/era."""
+    if kind == "indices":
+        return 15 if year == 2016 else 23
+    if kind in ("stock_summary", "indices_summary"):
+        return 83
+    return 95  # individual_stock
 
 
 def get_1y_dataframe(
@@ -226,7 +293,7 @@ def get_1y_dataframe(
     if path.is_file() and path.suffix.lower() == ".zip":
         zip_files = [path]
     elif path.is_dir():
-        zip_files = sorted(list(path.glob("*.zip")))
+        zip_files = sorted(path.glob("*.zip"), key=_zip_sort_key)
     else:
         raise ValueError(
             f"Path must be either a directory containing ZIP files or a ZIP file: {folder_path}"
@@ -235,7 +302,7 @@ def get_1y_dataframe(
     if not zip_files:
         raise FileNotFoundError(f"No ZIP files found in: {folder_path}")
 
-    print(f"Found {len(zip_files)} ZIP file(s) in {folder_path}")
+    logger.debug("Found %d ZIP file(s) in %s", len(zip_files), folder_path)
 
     dfs = []
     total_rows_read = 0
@@ -340,16 +407,20 @@ def get_1y_dataframe(
         except (zipfile.BadZipFile, EOFError):
             raise
         except Exception as e:
-            print(f"Error reading {zip_file}: {e}")
+            logger.warning("Error reading %s: %s", zip_file, e)
             continue
 
     if not dfs:
         if ticker_filter:
-            return pl.DataFrame()
+            # No matching rows: return a 0-row frame of the correct raw width so
+            # the cleaning pipeline still yields a fully-typed empty result.
+            return pl.DataFrame(
+                schema={f"column_{i + 1}": pl.String for i in range(_raw_width(kind, year))}
+            )
         raise ValueError("No data was successfully read")
 
     result = pl.concat(dfs, how="vertical")
-    print(f"Total rows read: {len(result)}")
+    logger.debug("Total rows read: %d", len(result))
 
     return result
 
@@ -483,13 +554,13 @@ def create_df(
     """
     if auto_detect:
         data_type, year = detect_data_type_and_year(folder_path)
-        print(f"Auto-detected: {data_type}, Year: {year}")
+        logger.debug("Auto-detected: %s, Year: %s", data_type, year)
     else:
         if data_type is None or year is None:
             raise ValueError(
                 "When auto_detect=False, data_type and year must be explicitly provided"
             )
-        print(f"Manual: {data_type}, Year: {year}")
+        logger.debug("Manual: %s, Year: %s", data_type, year)
 
     df_raw = get_1y_dataframe(
         folder_path,
@@ -498,10 +569,6 @@ def create_df(
         rows,
         ticker_filter=ticker_filter if data_type == "individual_stock" else None,
     )
-
-    if df_raw.is_empty():
-        print("Data successfully created")
-        return df_raw
 
     df_with_columns = set_columns(df_raw, data_type, language)
 
@@ -533,7 +600,7 @@ def create_df(
         else:
             df_final = df_cleaned
 
-    print("Data successfully created")
+    logger.debug("Data successfully created")
     return df_final
 
 
@@ -567,8 +634,8 @@ def export_to_csv(
         output_path = f"{data_type}_{year}{lang_suffix}_cleaned.csv"
 
     df.write_csv(output_path)
-    print(f"Data exported to: {output_path}")
-    print(f"Shape: {df.shape}")
+    logger.info("Data exported to: %s", output_path)
+    logger.debug("Shape: %s", df.shape)
 
     return output_path
 
@@ -654,7 +721,7 @@ def _resolve_source_zips(source: str, data_type: str, date: Optional[str]) -> Li
             raise ValueError(f"read_ticks: source file must be a .zip, got {source!r}")
         return [p]
     if p.is_dir():
-        direct = sorted(p.glob("*.zip"))
+        direct = sorted(p.glob("*.zip"), key=_zip_sort_key)
         if direct:  # flat directory of ZIPs; narrow by date when given
             prefixes = _date_prefixes(date)
             if prefixes is None:
@@ -798,6 +865,7 @@ def read_ticks(
 
     parts: List[pl.DataFrame] = []
     total = 0
+    schema_frame: Optional[pl.DataFrame] = None
     for zip_path in zips:
         df = None
         try:
@@ -810,18 +878,11 @@ def read_ticks(
                 year=year,
                 ticker_filter=cdf_filter,
             )
-            if df.is_empty():
-                continue
-
             if norm_filter is not None and data_type != "individual_stock":
                 df = _filter_codes(df, data_type, norm_filter)
-                if df.is_empty():
-                    continue
 
             if start_time is not None or end_time is not None:
                 df = _filter_time_window(df, start_time, end_time)
-                if df.is_empty():
-                    continue
 
             if columns:
                 missing = [c for c in columns if c not in df.columns]
@@ -831,7 +892,11 @@ def read_ticks(
                     )
                 df = df.select(columns)
 
-            if not df.is_empty():
+            # Capture the typed schema from the first part so a no-match read
+            # returns an empty-but-typed frame, not a schemaless (0, 0).
+            if schema_frame is None:
+                schema_frame = df.clear()
+            if df.height:
                 parts.append(df)
                 total += df.height
         finally:
@@ -842,10 +907,18 @@ def read_ticks(
         if rows is not None and total >= rows:
             break
 
-    if not parts:
-        return pl.DataFrame()
+    if parts:
+        result = pl.concat(parts, how="vertical")
+    elif schema_frame is not None:
+        result = schema_frame
+    else:
+        result = pl.DataFrame()
 
-    result = pl.concat(parts, how="vertical")
     if rows is not None and result.height > rows:
+        logger.warning(
+            "read_ticks: row cap (%d) reached; result truncated. "
+            "Build a Parquet store (ingest_*) and use query_ticks for full coverage.",
+            rows,
+        )
         result = result.head(rows)
     return result
