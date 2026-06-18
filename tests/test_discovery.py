@@ -36,3 +36,23 @@ def test_read_ticks_structured_root_nested(tmp_path):
     _make_zip(tmp_path / "個別株式2024" / "TICST120" / "202402" / "HTICST120.20240201.1.zip", "20240201")
     df = tse_tick.read_ticks(str(tmp_path), ticker_filter={"7203"}, date="20240201")
     assert df.height == 4
+
+
+def test_yearmonth_under_root_uses_fast_path(tmp_path, monkeypatch):
+    # input_root points straight at the type dir, so {yyyymm}/ sits directly under
+    # it (the report's G:\NEEDS\個別株式2023\TICST120 usage). This must hit the
+    # fast path, not the full recursive tree walk.
+    _make_zip(tmp_path / "202305" / "HTICST120.20230502.1.zip", "20230502")
+    import tse_tick.enhanced as enh
+
+    calls = {"n": 0}
+    orig = enh._discover_zips_recursive
+
+    def spy(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    monkeypatch.setattr(enh, "_discover_zips_recursive", spy)
+    found = enh.discover_zips(str(tmp_path), "individual_stock", [2023], months=[5], dates=["20230502"])
+    assert len(found) == 1
+    assert calls["n"] == 0     # fast path handled it; no recursive walk

@@ -8,6 +8,7 @@ import io
 import logging
 import sys
 
+import polars as pl
 import pytest
 
 import tse_tick
@@ -56,3 +57,27 @@ def test_diagnostics_available_via_logging(cjk_zip, caplog):
     with caplog.at_level(logging.DEBUG, logger="tse_tick.enhanced"):
         tse_tick.create_df(str(cjk_zip), auto_detect=False, data_type="individual_stock", year=2024)
     assert any("ZIP file" in r.getMessage() for r in caplog.records)
+
+
+# --- print(df) on Windows: cp1252 vs Polars box-drawing chars (BUG-2) ---
+
+def test_display_writes_utf8_under_cp1252_stdout(monkeypatch):
+    """tse_tick.display(df) renders to UTF-8 regardless of console encoding."""
+    out = _cp1252_stdout(monkeypatch)
+    df = pl.DataFrame({"Exchange Code": ["11", "11"], "Execution Price": [2100.0, 2101.0]})
+    tse_tick.display(df)                       # must not raise under a strict cp1252 stream
+    out.flush()
+    written = out.buffer.getvalue()
+    assert written                             # something was emitted
+    assert "Exchange Code" in written.decode("utf-8")   # and it is valid UTF-8
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cp1252 console auto-fix is Windows-only")
+def test_print_df_safe_on_windows_cp1252(monkeypatch):
+    """On Windows, importing tse_tick switches Polars to ASCII tables so a bare
+    print(df) to a legacy cp1252 console no longer raises UnicodeEncodeError."""
+    out = _cp1252_stdout(monkeypatch)
+    df = pl.DataFrame({"Exchange Code": ["11"], "Execution Price": [2100.0]})
+    print(df)                                  # the naive inspection that used to crash
+    out.flush()
+    assert out.buffer.getvalue()               # rendered without raising

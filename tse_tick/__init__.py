@@ -10,13 +10,60 @@ Developed at Keio University, Nakatsuma Seminar.
 """
 
 # tse_tick/__init__.py
+import os
+import sys
+
 import polars as pl
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __author__ = "Kazumi Li"
 __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
 __copyright__ = "Copyright 2025-2026"
+
+
+def _configure_windows_console() -> None:
+    """Make ``print(df)`` safe on a legacy Windows console.
+
+    Polars renders DataFrames with Unicode box-drawing characters that the
+    default Windows console codepage (cp1252) cannot encode, so a bare
+    ``print(df)`` raises ``UnicodeEncodeError``. Switching Polars to ASCII table
+    borders keeps interactive inspection working out of the box. This is a no-op
+    off Windows; opt out by setting ``TSE_TICK_ASCII_TABLES=0``.
+    """
+    if sys.platform != "win32":
+        return
+    if os.environ.get("TSE_TICK_ASCII_TABLES", "1") == "0":
+        return
+    try:
+        pl.Config.set_ascii_tables(True)
+    except Exception:  # a cosmetic tweak must never break import
+        pass
+
+
+_configure_windows_console()
+
+
+def display(df, *, file=None) -> None:
+    """Print a Polars DataFrame as UTF-8 regardless of the console encoding.
+
+    A cross-platform alternative to ``print(df)`` that never raises
+    ``UnicodeEncodeError`` on a legacy Windows console: it writes the rendered
+    table to the stream's binary buffer as UTF-8, bypassing the console codec.
+
+    Args:
+        df: A Polars DataFrame (anything with a ``__str__`` works).
+        file: Target text stream; defaults to ``sys.stdout``.
+    """
+    stream = sys.stdout if file is None else file
+    text = str(df) + "\n"
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        buffer.write(text.encode("utf-8", errors="replace"))
+        buffer.flush()
+    else:
+        stream.write(text)
+
 
 from .enhanced import create_df, export_to_csv, discover_zips, parse_period, read_ticks
 
@@ -82,6 +129,7 @@ __all__ = [
     "create_df",
     "read_ticks",
     "export_to_csv",
+    "display",
     "discover_zips",
     "parse_period",
     "get_schema_individual_stock_95",
@@ -157,6 +205,7 @@ def get_info():
     >>> df = tse_tick.read_ticks("DATA_ROOT", ticker_filter={{"7203"}},
     ...                          date="20240201", start_time="09:00:00",
     ...                          end_time="11:30:00")
+    >>> tse_tick.display(df)   # UTF-8 print (Windows-safe alternative to print(df))
 
     # Two-stage - ingest once into a Parquet store, then query repeatedly:
     >>> from tse_tick import DataType

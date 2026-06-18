@@ -366,19 +366,16 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.5.0
+## What's New in 0.6.0
 
-`tse_tick` 0.5.0 — `pip install -U tse-tick`. Backward-compatible; the public API is unchanged.
+`tse_tick` 0.6.0 — `pip install -U tse-tick`. Backward-compatible; the public API only gains `tse_tick.display`.
 
-- **Complete multi-part-day ingest (important fix).** NEEDS splits each trading day across several ZIP parts; the CLI `ingest` path previously kept only the first part of each day (so e.g. Toyota 7203 went missing). Ingest now reads **all parts of a day**, concatenates them, and writes each ticker once.
-- **New `tse-tick export` CLI verb** — read raw ZIPs and write one ticker over a date range straight to CSV or Parquet (`--tickers` / `--period` / `--output`), no Parquet store and no Python required.
-- **Robust auto-location** — point `--input-root` / `read_ticks` / `export` at *any* folder that contains the data (e.g. `G:\NEEDS`); files are found by type + date regardless of nesting.
-- Smaller fixes: `--parallel` is flagged as `--flat`-only, CLI progress logs to stdout (no red `NativeCommandError` on PowerShell), and the README query example notes the `[query]` (DuckDB) extra.
+- **`print(df)` no longer crashes on Windows.** Polars draws tables with Unicode box-drawing characters a legacy cp1252 console can't encode; importing `tse_tick` now switches Polars to ASCII borders on Windows (opt out with `TSE_TICK_ASCII_TABLES=0`). A cross-platform `tse_tick.display(df)` also prints any DataFrame as UTF-8.
+- **Missing-date reads are no longer silent.** `read_ticks` for a date with no ZIPs (e.g. a market holiday like Golden Week) now logs a warning and returns an empty *but fully-typed* frame — the same schema a no-match read returns, so empty results are consistent however they arise.
+- **Faster structured-root discovery.** `discover_zips` gained a `{yearmonth}/`-directly-under-root fast path (e.g. pointing at `…\TICST120`), so the common layout resolves without a full recursive tree walk; the recursive fallback still handles deeper nested trees.
+- Doc clarification: a single numbered ZIP holds only part of a day — pass the day's directory (not a lone `…N.zip`) for complete ticker coverage.
 
-> **Upgrading a store?** If you ingested multi-part days with ≤ 0.4.0, **re-ingest** — those runs were missing parts.
-
-Earlier highlights (0.4.0): editable/overridable translation tables, quiet `logging`, nested-layout
-discovery, consistent `Float64` price/quote dtypes, and empty-but-typed reads.
+Earlier highlights (0.5.0): complete multi-part-day ingest (the Toyota-7203 fix), the `tse-tick export` CLI verb, and robust auto-location. **Upgrading a store ingested with ≤ 0.4.0? Re-ingest** — those runs were missing parts. (0.4.0): overridable translation tables, quiet `logging`, nested-layout discovery, `Float64` dtypes, empty-but-typed reads.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
@@ -389,13 +386,22 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
 - **Quiet by default.** `create_df`, `read_ticks`, and the `ingest_*` functions emit diagnostics via
   `logging`, not `print`, so they never write to stdout (or crash on non-ASCII paths) unless you opt
   in with `logging.basicConfig(level=logging.INFO)`. The `tse-tick` CLI still prints progress.
+- **Windows-friendly `print`.** On Windows, importing `tse_tick` switches Polars to ASCII table borders
+  so a bare `print(df)` doesn't raise `UnicodeEncodeError` on a cp1252 console (opt out with
+  `TSE_TICK_ASCII_TABLES=0`); `tse_tick.display(df)` prints any DataFrame as UTF-8 on any platform.
 - **Flexible discovery.** Structured-root `read_ticks` / `discover_zips` find ZIPs under the documented
-  `{year}/{yearmonth}/` layout and, as a fallback, recursively under nested delivery trees such as
+  `{year}/{yearmonth}/` layout, a `{yearmonth}/` folder directly under the root (e.g. a `…/TICST120`
+  type folder), and — as a fallback — recursively under nested delivery trees such as
   `個別株式{year}/TICST120/{yyyymm}/`.
+- **One numbered ZIP is part of a day.** NEEDS splits each day across parts by ascending code, so
+  filtering a lone `HTICST120.<date>.N.zip` by ticker can return 0 rows (Toyota 7203 is in a later
+  part) — pass the day's directory or a structured root for complete coverage.
 - **Numeric dtypes.** Price/quote columns (`Execution Price`, `Sell Quote 1 Best`, …) are `Float64`.
   (Parquet stores ingested before this change stored them as `String` — re-ingest to refresh.)
-- **Empty results keep their schema.** A no-match read returns an empty *but fully-typed* DataFrame
-  (all columns present), so chained access like `df["Exchange Code"]` won't raise.
+- **Empty results keep their schema.** A read that matches nothing — **including a date with no ZIPs**
+  (e.g. a market holiday) — returns an empty *but fully-typed* DataFrame (all columns present), so
+  chained access like `df["Exchange Code"]` won't raise. The no-ZIPs case also logs a warning, so a
+  holiday isn't silently mistaken for missing data.
 - **Ingestion entry points** are the functions `ingest_period`, `ingest_single_zip`,
   `ingest_year_from_root`, … — `tse_tick.ingest` itself is the submodule.
 
@@ -425,7 +431,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **237 tests**. Without a local NEEDS store, **189 pass** and **48 skip**; with a complete NEEDS store, **all 237 pass**. Stage-1
+The suite collects **243 tests**. Without a local NEEDS store, **195 pass** and **48 skip**; with a complete NEEDS store, **all 243 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by

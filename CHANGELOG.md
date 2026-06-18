@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-18
+
+Closes the gaps a third real-data run surfaced: missing-date reads now warn and keep their schema,
+`print(df)` no longer crashes on a Windows console, and structured-root discovery has a real fast path.
+
+### Added
+- **`tse_tick.display(df)`** — print a DataFrame as UTF-8 regardless of console encoding; a
+  cross-platform alternative to `print(df)` that never raises `UnicodeEncodeError`.
+- On **Windows**, importing `tse_tick` now switches Polars to ASCII table borders so a bare
+  `print(df)` works out of the box (legacy cp1252 consoles cannot encode Polars' Unicode box-drawing
+  characters). No effect off Windows; opt out with `TSE_TICK_ASCII_TABLES=0`.
+
+### Fixed
+- **Silent empty result for a date with no ZIPs** (e.g. an exchange holiday such as Golden Week):
+  `read_ticks` returned a schemaless `(0, 0)` frame with no explanation. It now logs a warning
+  ("no ZIP files found … verify these are trading days") and returns a **typed empty** frame with the
+  full column set — the same schema a no-match read returns, so `df["Exchange Code"]` and `df.schema`
+  behave identically however a read comes back empty.
+
+### Changed
+- **`discover_zips` gained a `{yearmonth}/`-directly-under-root fast path** alongside the documented
+  `{year}/{yearmonth}/` one, so pointing at a `…/TICST120` type folder (the common case) resolves
+  without a full recursive tree walk. The recursive fallback still covers deeper nested deliveries, and
+  the docstring now describes the layouts actually supported.
+
+### Documentation
+- Noted that a **single numbered ZIP holds only part of a day** (NEEDS splits each day across parts by
+  ascending code; Toyota 7203 sits in a later part), so filtering a lone part can yield 0 rows — pass
+  the day's directory or a structured root for complete coverage (`read_ticks` / `create_df` docstrings
+  and README).
+- README: the Windows `print(df)` / `tse_tick.display` note and the missing-date warning behaviour.
+
 ## [0.5.0] - 2026-06-18
 
 Complete multi-part-day ingest (fixes the silent CLI data loss), a new `tse-tick export` CLI verb,
