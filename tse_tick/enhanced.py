@@ -42,6 +42,17 @@ def _warn_no_data(message: str) -> None:
     warnings.warn(message, NoDataWarning, stacklevel=3)
 
 
+class TruncationWarning(UserWarning):
+    """Warned when :func:`read_ticks` hits its ``rows`` cap and truncates output.
+
+    A ``UserWarning`` subclass so it surfaces through the same ``warnings``
+    channel as :class:`NoDataWarning` (capturable with
+    ``warnings.catch_warnings()``, silenceable / escalatable by category) rather
+    than via ``logging`` — hitting the cap means "build a Parquet store and use
+    :func:`tse_tick.query_ticks` instead".
+    """
+
+
 _MAX_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
 _MAX_ZIP_ENTRIES = 5
 
@@ -970,9 +981,10 @@ def read_ticks(
         start_time: Inclusive lower bound on time-of-day (``"HH:MM:SS"``).
         end_time: Inclusive upper bound on time-of-day (``"HH:MM:SS"``).
         columns: Column projection; ``None`` selects all columns.
-        rows: Cap on returned rows (default 10,000,000). The cap **silently
-            truncates** — hitting it is the signal to build a store and use
-            :func:`tse_tick.query_ticks` instead.
+        rows: Cap on returned rows (default 10,000,000). On hitting the cap the
+            result is truncated **and a** :class:`TruncationWarning` **is
+            emitted** (capturable via ``warnings``) — the signal to build a store
+            and use :func:`tse_tick.query_ticks` instead.
         language: Output column-name language, ``"en"`` or ``"jp"``.
 
     Returns:
@@ -1113,10 +1125,11 @@ def read_ticks(
         )
 
     if rows is not None and result.height > rows:
-        logger.warning(
-            "read_ticks: row cap (%d) reached; result truncated. "
+        warnings.warn(
+            f"read_ticks: row cap ({rows}) reached; result truncated. "
             "Build a Parquet store (ingest_*) and use query_ticks for full coverage.",
-            rows,
+            TruncationWarning,
+            stacklevel=2,
         )
         result = result.head(rows)
     return result

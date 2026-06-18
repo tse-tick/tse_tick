@@ -45,11 +45,15 @@ def test_write_partitioned_parquet_individual_stock_layout(tmp_path):
 
 def test_write_partitioned_parquet_stock_summary_layout(tmp_path):
     """
-    For data_type='stock_summary', partition directories should follow
-    the pattern: output_dir/stock_summary/date=YYYYMMDD/ticker=NNNN.parquet
+    For data_type='stock_summary' (a daily-aggregate type) the store partitions
+    by date only — one file per date with the code kept as a column — to avoid
+    the tens-of-thousands-of-tiny-files fan-out a per-(date, ticker) layout caused.
     """
     write_partitioned_parquet(_mk(date="20230704", code="6758"), str(tmp_path), "stock_summary")
-    assert (tmp_path / "stock_summary" / "date=20230704" / "ticker=6758.parquet").exists()
+    date_dir = tmp_path / "stock_summary" / "date=20230704"
+    assert (date_dir / "20230704.parquet").exists()
+    assert not list(date_dir.glob("ticker=*.parquet"))          # no per-ticker fan-out
+    assert "Stock Code" in pl.read_parquet(date_dir / "20230704.parquet").columns
 
 
 def test_write_partitioned_parquet_indices_layout(tmp_path):
@@ -67,13 +71,16 @@ def test_write_partitioned_parquet_indices_layout(tmp_path):
 
 def test_write_partitioned_parquet_indices_summary_layout(tmp_path):
     """
-    For data_type='indices_summary', partition layout uses date= then the
-    index-code-valued ticker= filename (same scheme as the indices data type).
+    For data_type='indices_summary' (a daily-aggregate type) the store likewise
+    partitions by date only (one file per date, Index Code kept as a column).
     """
     write_partitioned_parquet(
         _mk(date="20230704", code="113", code_col="Index Code"), str(tmp_path), "indices_summary"
     )
-    assert (tmp_path / "indices_summary" / "date=20230704" / "ticker=113.parquet").exists()
+    date_dir = tmp_path / "indices_summary" / "date=20230704"
+    assert (date_dir / "20230704.parquet").exists()
+    assert not list(date_dir.glob("ticker=*.parquet"))
+    assert "Index Code" in pl.read_parquet(date_dir / "20230704.parquet").columns
 
 
 def test_write_partitioned_parquet_custom_partition_cols(tmp_path):
