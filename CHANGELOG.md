@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-19
+
 Fixes from a seventh real-data run: a Major store-build scalability defect for the summary types, plus
 warning/discovery/time-format papercuts. Read paths were already correct on all four types (the 2016
 legacy `…010` era probe did not reproduce).
