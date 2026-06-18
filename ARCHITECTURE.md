@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.8.0 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.9.0 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
@@ -21,7 +21,7 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.8.0)
+├── CHANGELOG.md                     # version history (current: 0.9.0)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
@@ -49,7 +49,7 @@ tse_tick/                          # Project root
 │   │   └── translations.json        # translate() mapping tables (override: TSE_TICK_TRANSLATIONS)
 │   └── py.typed                     # PEP 561 marker
 │
-├── tests/                           # Test suite (pytest, 277 tests; 229 pass / 48 skip w/o data, 277/0 with a NEEDS store)
+├── tests/                           # Test suite (pytest, 282 tests; 234 pass / 48 skip w/o data, 282/0 with a NEEDS store)
 │   ├── __init__.py
 │   ├── conftest.py                  # Session-scoped synthetic Parquet fixtures (stock_store, indices_store, events_df)
 │   ├── synthetic_data.py            # Generates obviously-fake NEEDS-format ZIPs feeding those fixtures
@@ -195,6 +195,15 @@ tse_tick/                          # Project root
 | Discovery fast path | `discover_zips` adds a `{yearmonth}/`-directly-under-root fast path (e.g. `…/TICST120`) before the recursive fallback; docstring corrected to match |
 | Docs | A single numbered ZIP holds only part of a day (filtering a lone part → 0 rows); pass the directory/root |
 | Tests | Suite **243** (`+6`: no-ZIPs empty+warn, `display`/Windows print, discovery fast-path) |
+
+### v0.9.0 — real-data defect fixes: numeric stock_summary, time filter keeps quote rows (2026-06-18)
+
+| Change | Detail |
+|--------|--------|
+| stock_summary dtypes | `clean_data` casts all stock_summary measures (OHLC, VWAP, volumes, amounts, counts) to `Float64` (were `String`, so `.mean()` returned null); id/code + `HHMMSS` time columns stay string. **Re-ingest stock_summary stores** |
+| Time-filter fallback | `individual_stock` quote-only rows (blank `Execution Time`, real `Update Time`) are retained in a time window via an `Update Time` fallback in `read_ticks` (`_filter_time_window`) and `query_ticks` (SQL `WHERE`/`ORDER BY`), individual_stock-only; the filter was dropping ~94% of a liquid day |
+| Docs | `read_ticks` notes typical one-shot timing (opens every ZIP part; prefer `ingest_*` + `query_ticks`) |
+| Tests | Suite **282** (`+5`: `test_run6_fixes`; + `stock_summary_csv` / quote-row synthetic generators) |
 
 ### v0.8.0 — cross-type consistency & DX polish: capturable no-data warning, fixed-width index time, string ticker codes, UTF-8 Windows stdout (2026-06-18)
 
@@ -433,7 +442,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Tool | Config |
 |------|--------|
-| **Build** | setuptools>=77 + wheel; static `version = "0.8.0"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
+| **Build** | setuptools>=77 + wheel; static `version = "0.9.0"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
 | **CLI** | `tse-tick = "tse_tick.cli:main"` |
 | **Extras** | `query` (duckdb), `test` (pandas/pytest/pytest-cov), `dev` (test + black/flake8/mypy/jupyter), `docs` |
 | **Black** | line-length=100, target Python 3.9–3.12 |
@@ -466,8 +475,8 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**277 tests.** Without proprietary data (the CI profile): **229 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 277 pass**.
+**282 tests.** Without proprietary data (the CI profile): **234 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 282 pass**.
 
 | Area | Coverage |
 |------|----------|
