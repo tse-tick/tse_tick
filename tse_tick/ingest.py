@@ -9,7 +9,7 @@ from typing import Optional
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 
@@ -156,6 +156,69 @@ def ingest_year(
     return results
 
 
+def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, language, ticker_filter):
+    """Read every ZIP part of one date, concat, and write each ticker file once.
+
+    This is the multi-part-per-day unit: NEEDS splits a trading day across parts
+    by ticker range (plus a closing tail), so all parts must be read and
+    concatenated before writing — otherwise later parts get skipped (resume) or
+    overwrite earlier ones.
+    """
+    parts: list = []
+    for zp in zip_paths:
+        try:
+            df = create_df(
+                str(zp), language=language, auto_detect=False,
+                data_type=data_type, year=year, ticker_filter=ticker_filter,
+            )
+        except (zipfile.BadZipFile, EOFError) as exc:
+            logger.error("Corrupt zip %s: %s", Path(zp).name, exc)
+            continue
+        except Exception as exc:
+            logger.error("Error reading %s: %s", Path(zp).name, exc)
+            continue
+        if not df.is_empty():
+            parts.append(df)
+        del df
+    if not parts:
+        gc.collect()
+        return {"date": date_str, "parts": len(zip_paths), "rows": 0, "output_path": None}
+    combined = pl.concat(parts, how="vertical")
+    del parts
+    gc.collect()
+    rows = len(combined)
+    out_path = write_partitioned_parquet(combined, output_dir, data_type)
+    del combined
+    gc.collect()
+    return {"date": date_str, "parts": len(zip_paths), "rows": rows, "output_path": out_path}
+
+
+def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter):
+    """Group ZIP parts by date and ingest each date as a unit (all parts → write once).
+
+    Resume is keyed per-date (a date is written atomically), so later parts of a
+    date are never skipped or overwritten — fixing the multi-part data loss.
+    """
+    output_root_path = Path(output_dir) / data_type
+    groups: dict = {}
+    for zp in zip_paths:
+        tok = _zip_date_token(Path(zp).name)
+        if tok is None:
+            continue
+        groups.setdefault(tok, []).append(zp)
+
+    results: list[dict] = []
+    for date_str, parts in groups.items():
+        if resume and output_root_path.exists():
+            date_dir = output_root_path / f"date={date_str}"
+            if date_dir.exists() and any(date_dir.glob("ticker=*.parquet")):
+                continue
+        meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language, ticker_filter)
+        results.append(meta)
+        logger.info("  %s (%d parts) -> %s rows", date_str, meta["parts"], meta["rows"])
+    return results
+
+
 def ingest_year_from_root(
     input_root: str,
     output_dir: str,
@@ -172,35 +235,7 @@ def ingest_year_from_root(
         )
 
     zip_paths = discover_zips(input_root, data_type, [year])
-    results: list[dict] = []
-
-    output_root_path = Path(output_dir) / data_type
-
-    for zip_path in zip_paths:
-        zip_basename = zip_path.name
-        date_str = None
-        for part in zip_basename.split("."):
-            if len(part) == 8 and part.isdigit() and part.startswith("20"):
-                date_str = part
-                break
-
-        if date_str and resume and output_root_path.exists():
-            expected_ticker_files = list(
-                (output_root_path / f"date={date_str}").glob("ticker=*.parquet")
-            ) if (output_root_path / f"date={date_str}").exists() else []
-            if expected_ticker_files:
-                continue
-
-        try:
-            meta = ingest_single_zip(
-                str(zip_path), str(output_dir), data_type=data_type, year=year, language=language, ticker_filter=ticker_filter
-            )
-        except Exception as exc:
-            meta = {"zip_path": str(zip_path), "error": str(exc)}
-        results.append(meta)
-        logger.info("  %s -> %s rows", zip_basename, meta.get("rows", "error"))
-
-    return results
+    return _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter)
 
 
 def ingest_period(
@@ -289,35 +324,7 @@ def _process_zips(
     resume: bool = True,
     ticker_filter: Optional[set] = None,
 ) -> list[dict]:
-    results: list[dict] = []
-    output_root_path = Path(output_dir) / data_type
-
-    for zip_path in zip_paths:
-        zip_basename = Path(zip_path).name
-        date_str = None
-        for part in zip_basename.split("."):
-            if len(part) == 8 and part.isdigit() and part.startswith("20"):
-                date_str = part
-                break
-
-        if date_str and resume and output_root_path.exists():
-            date_dir = output_root_path / f"date={date_str}"
-            expected_ticker_files = (
-                list(date_dir.glob("ticker=*.parquet")) if date_dir.exists() else []
-            )
-            if expected_ticker_files:
-                continue
-
-        try:
-            meta = ingest_single_zip(
-                str(zip_path), str(output_dir), data_type=data_type, year=year, language=language, ticker_filter=ticker_filter
-            )
-        except Exception as exc:
-            meta = {"zip_path": str(zip_path), "error": str(exc)}
-        results.append(meta)
-        logger.info("  %s -> %s rows", zip_basename, meta.get("rows", "error"))
-
-    return results
+    return _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter)
 
 
 def ingest_event_windows_period(
