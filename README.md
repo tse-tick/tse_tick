@@ -366,17 +366,17 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.7.0
+## What's New in 0.8.0
 
-`tse_tick` 0.7.0 — `pip install -U tse-tick`. The first release validated across **all four** NEEDS data types.
+`tse_tick` 0.8.0 — `pip install -U tse-tick`. Consistency & developer-experience polish from a fifth real-data run that found **no crashes and no wrong results** across all four data types.
 
-- **The store path works for the summary types.** `query_ticks` no longer crashes on `stock_summary` / `indices_summary` (it hard-coded an `ORDER BY "Execution Time"` those daily aggregates don't have).
-- **`ticker_filter` is honored everywhere.** It now prunes on **ingest** for the non-stock types (was silently ignored — the store kept every code) and under **`language="jp"`** for `read_ticks` (was returning the whole month). Intraday `start_time`/`end_time` filtering also works under `jp`.
-- **The 2016 index era is reachable.** Reading 2016 indices via the normal path no longer crashes and now discovers the legacy `…010` files; 2016's 4-digit `HHMM` timestamps filter correctly (were silently dropped).
-- **`Index Code` is the raw numeric code for both index types** (was: `indices` decoded to names like "Nikkei 225"), so the value matches `ticker_filter` and the partition key, is language-independent, and joins across the two types. `ticker_filter` still accepts a display name. **Re-ingest index stores** to refresh the column.
-- **Smaller fixes:** monthly types prune to the requested day(s) (a single-day request no longer returns the whole month); `parse_period`/`ingest_period` accept a bare `YYYYMM`/`YYYYMMDD`; `get_info()` returns its banner string; `os`/`sys` no longer leak into the namespace; `HTICIS*` files auto-detect as `indices_summary`.
+- **"No data" is never silent — and is now capturable.** Every zero-row `read_ticks` result (a holiday, an unknown code, an over-tight filter) emits a `tse_tick.NoDataWarning` (a `UserWarning`) you can trap with `warnings.catch_warnings()` or silence by category — uniformly across all four types (was: only `individual_stock`'s no-ZIPs path, via uncapturable logging).
+- **`Execution Time` is a fixed-width 6-char `HHMMSS` for index ticks across eras** (2016 `HHMM` → `HHMMSS`), so raw string/number math and cross-year comparison on the column behave alike.
+- **`get_available_tickers()` returns string codes** ready to pass straight into `read_ticks(ticker_filter=...)`, and preserves modern alphanumeric codes (e.g. `"130A"`) the old `int()` parse silently dropped. *(Return-type change: `list[int]` → `list[str]`.)*
+- **A naive `print(df)` no longer crashes on a Windows console.** Importing `tse_tick` now also reconfigures `stdout`/`stderr` to UTF-8 (Windows-only, opt-out `TSE_TICK_ASCII_TABLES=0`), fixing the content glyphs (`datetime[μs]`, `≤`, `—`) that ASCII borders alone didn't.
+- **Docs match the code:** `parse_period`/`ingest_period` document their single `YYYYMM`/`YYYYMMDD` forms, `ingest_directory` gained a docstring, the `int` ticker tolerance is noted, and the one-extra-`date`-column difference between `read_ticks` and `query_ticks` is documented.
 
-Earlier highlights (0.6.0): Windows-safe `print(df)` (ASCII tables + `tse_tick.display`), missing-date warnings + typed-empty reads, faster discovery. (0.5.0): multi-part-day ingest (the Toyota-7203 fix), `tse-tick export`, robust auto-location.
+Earlier highlights (0.7.0): all-four-types correctness — summary `query_ticks`, jp/ingest `ticker_filter`, the 2016 index era, raw `Index Code`. (0.6.0): Windows-safe `print(df)` (ASCII tables + `tse_tick.display`), missing-date warnings + typed-empty reads. (0.5.0): multi-part-day ingest (the Toyota-7203 fix), `tse-tick export`.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
@@ -444,7 +444,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **257 tests**. Without a local NEEDS store, **209 pass** and **48 skip**; with a complete NEEDS store, **all 257 pass**. Stage-1
+The suite collects **277 tests**. Without a local NEEDS store, **229 pass** and **48 skip**; with a complete NEEDS store, **all 277 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
