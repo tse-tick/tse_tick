@@ -67,6 +67,11 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print("Error: --filter-csv is only supported with --data-type individual_stock", file=sys.stderr)
         sys.exit(1)
 
+    if args.parallel and args.parallel > 1 and not args.flat:
+        logger.warning(
+            "--parallel applies only to --flat ingest; the --period / --year path runs sequentially"
+        )
+
     if args.period is not None:
         mode_str = "full"
         if args.filter_csv:
@@ -142,6 +147,32 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             success = sum(1 for r in results if "error" not in r)
             failed = sum(1 for r in results if "error" in r)
             print(f"Year {year}: {success} succeeded, {failed} failed")
+
+
+def cmd_export(args: argparse.Namespace) -> None:
+    import tse_tick
+
+    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
+    if args.data_type not in valid_types:
+        print(f"Error: --data-type must be one of {sorted(valid_types)}", file=sys.stderr)
+        sys.exit(1)
+
+    ticker_filter = _parse_tickers(args.tickers) if args.tickers else None
+    print(f"Reading {args.data_type} from {args.input_root} (this scans raw ZIPs)...")
+    df = tse_tick.read_ticks(
+        args.input_root,
+        data_type=args.data_type,
+        ticker_filter=ticker_filter,
+        date=args.period,
+        start_time=args.start_time,
+        end_time=args.end_time,
+        language=args.language,
+    )
+    if args.output.lower().endswith(".parquet"):
+        df.write_parquet(args.output)
+    else:
+        df.write_csv(args.output)
+    print(f"Wrote {df.height} rows x {df.width} cols -> {args.output}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -240,6 +271,47 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Window in minutes around each event (default: 120). Only used with --filter-csv.",
     )
 
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Read raw ZIPs and export a ticker/time slice to CSV or Parquet (no store needed)",
+    )
+    export_parser.add_argument(
+        "--data-type", required=True,
+        choices=["individual_stock", "stock_summary", "indices", "indices_summary"],
+        help="Type of NEEDS data to read",
+    )
+    export_parser.add_argument(
+        "--input-root", required=True,
+        help="Folder containing the NEEDS ZIPs. Any nesting works — files are located by type + date "
+             "(e.g. point at G:/NEEDS even for 個別株式{year}/TICST120/{yyyymm}/).",
+    )
+    export_parser.add_argument(
+        "--output", required=True,
+        help="Output file path; format is chosen by extension (.csv or .parquet).",
+    )
+    export_parser.add_argument(
+        "--tickers", default=None,
+        help="Comma-separated codes (or @file.txt) to keep; omit for all tickers.",
+    )
+    export_parser.add_argument(
+        "--period", default=None,
+        help="YYYYMMDD-YYYYMMDD day range, YYYYMM month, YYYY year, or a single YYYYMMDD.",
+    )
+    export_parser.add_argument(
+        "--start-time", default=None, help="HH:MM:SS lower bound (tick types only)",
+    )
+    export_parser.add_argument(
+        "--end-time", default=None, help="HH:MM:SS upper bound (tick types only)",
+    )
+    export_parser.add_argument(
+        "--language", default="en", choices=["en", "jp"],
+        help="Column name language (default: en)",
+    )
+    export_parser.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity level",
+    )
+
     return parser
 
 
@@ -251,14 +323,22 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level, logging.INFO),
-        format="%(asctime)s  %(levelname)-8s  %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    # Route CLI progress to stdout (not stderr) so it doesn't surface as red
+    # NativeCommandError lines under PowerShell.
+    level = getattr(logging, getattr(args, "log_level", "INFO"), logging.INFO)
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s", "%Y-%m-%d %H:%M:%S")
     )
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(level)
 
     if args.command == "ingest":
         cmd_ingest(args)
+    elif args.command == "export":
+        cmd_export(args)
     else:
         parser.print_help()
         sys.exit(1)
