@@ -169,14 +169,14 @@ def test_get_available_dates_missing_store_raises(tmp_path):
         get_available_dates(str(tmp_path))
 
 
-def test_get_available_tickers_returns_sorted_integers(stock_store):
+def test_get_available_tickers_returns_sorted_string_codes(stock_store):
     """
-    get_available_tickers should return a sorted list of int ticker codes
-    from the ticker= partition files in the store.
+    get_available_tickers should return a sorted list of string ticker codes
+    from the ticker= partition files, ready to feed straight into ticker_filter.
     """
     tickers = get_available_tickers(stock_store)
-    assert tickers == [6758, 7203, 9984]
-    assert all(isinstance(t, int) for t in tickers)
+    assert tickers == ["6758", "7203", "9984"]
+    assert all(isinstance(t, str) for t in tickers)
 
 
 def test_get_available_tickers_filters_by_date(stock_store):
@@ -184,4 +184,4 @@ def test_get_available_tickers_filters_by_date(stock_store):
     Passing date='20230704' should return tickers that have a partition file
     under date=20230704 (all three are present on both synthetic dates).
     """
-    assert get_available_tickers(stock_store, date="20230704") == [6758, 7203, 9984]
+    assert get_available_tickers(stock_store, date="20230704") == ["6758", "7203", "9984"]

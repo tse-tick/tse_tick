@@ -111,6 +111,19 @@ def parse_line(line: bytes, kind="indices_summary"):
     return rec
 
 
+def _exec_time_6char(col: str = "Execution Time") -> pl.Expr:
+    """Normalize an Execution Time string to a fixed-width 6-char ``HHMMSS``.
+
+    2016 index ticks store ``HHMM`` (4 chars, no seconds) while 2017+ store
+    ``HHMMSS`` (6); pad-then-slice yields a single era-independent width so the
+    raw column parses/compares consistently across years (and between tick
+    types). Defensive against an already colon-formatted value too.
+    """
+    return (
+        pl.col(col).cast(pl.String).str.replace_all(":", "") + pl.lit("000000")
+    ).str.slice(0, 6)
+
+
 def clean_data(df, kind="individual_stock", language="en"):
     if language == "en":
         language = "name"
@@ -185,7 +198,7 @@ def clean_data(df, kind="individual_stock", language="en"):
 
     elif (kind == "indices") and df_cleaned.height and (df_cleaned["Data Date"][0].year == 2016):
         df_cleaned = df_cleaned.with_columns(
-            pl.col("Execution Time").str.slice(0, 6).alias("Execution Time")
+            _exec_time_6char().alias("Execution Time")  # 2016 HHMM -> HHMMSS
         )
 
     elif (kind == "stock_summary") or (kind == "indices_summary"):
@@ -196,7 +209,7 @@ def clean_data(df, kind="individual_stock", language="en"):
             )
 
     elif kind == "indices":
-        exprs = [pl.col("Execution Time").str.slice(0, 6).alias("Execution Time")]
+        exprs = [_exec_time_6char().alias("Execution Time")]  # era-independent HHMMSS
         if "Update Time" in df_cleaned.columns:  # 2016 (15-field) indices have none
             exprs.append(pl.col("Update Time").str.slice(0, 12).alias("Update Time"))
         df_cleaned = df_cleaned.with_columns(exprs)

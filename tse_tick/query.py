@@ -90,7 +90,10 @@ def query_ticks(
 
     Returns:
         A Polars DataFrame ordered by ``Data Date`` then ``Execution Time``
-        (empty if no file matches the requested ``ticker``).
+        (empty if no file matches the requested ``ticker``). It includes an extra
+        ``date`` partition column (``i64`` ``YYYYMMDD``) that Hive partitioning
+        derives from the ``date=`` directory, so this store path returns one more
+        column than the one-shot :func:`tse_tick.read_ticks`.
 
     Example:
         >>> df = query_ticks(store, data_type=DataType.INDIVIDUAL_STOCK,
@@ -241,7 +244,7 @@ def get_available_tickers(
     data_dir: str,
     data_type: str = "individual_stock",
     date: Optional[str] = None,
-) -> list[int]:
+) -> list[str]:
     """List the ticker/index codes present in a Parquet store.
 
     Args:
@@ -250,11 +253,16 @@ def get_available_tickers(
         date: Restrict to a single ``"YYYYMMDD"`` day; ``None`` scans all days.
 
     Returns:
-        Sorted integer codes (parsed from the ``ticker=NNNN.parquet`` filenames).
+        Sorted **string** codes parsed from the ``ticker=CODE.parquet`` filenames
+        (e.g. ``["6758", "7203", "9984"]``) — ready to pass straight to
+        ``read_ticks(ticker_filter=...)`` with no conversion. Strings (not ints)
+        so modern alphanumeric codes (e.g. ``"130A"``) are preserved instead of
+        silently dropped; pure-digit codes sort numerically, ahead of any
+        alphanumeric ones.
     """
     type_dir = _resolve_type_dir(data_dir, data_type)
 
-    tickers: set[int] = set()
+    tickers: set[str] = set()
 
     date_dirs = (
         [type_dir / f"date={date}"]
@@ -262,14 +270,17 @@ def get_available_tickers(
         else [d for d in type_dir.iterdir() if d.is_dir() and d.name.startswith("date=")]
     )
 
+    prefix = "ticker="
     for date_dir in date_dirs:
         if not date_dir.exists():
             continue
         for fpath in date_dir.iterdir():
-            if fpath.suffix == ".parquet" and fpath.stem.startswith("ticker="):
-                try:
-                    tickers.add(int(fpath.stem[7:]))
-                except ValueError:
-                    pass
+            if fpath.suffix == ".parquet" and fpath.stem.startswith(prefix):
+                tickers.add(fpath.stem[len(prefix):])
 
-    return sorted(tickers)
+    def _sort_key(code: str):
+        # Pure-digit codes sort numerically ("9984" < "10000"); alphanumeric
+        # codes sort lexically, after all the numeric ones.
+        return (0, int(code)) if code.isdigit() else (1, code)
+
+    return sorted(tickers, key=_sort_key)

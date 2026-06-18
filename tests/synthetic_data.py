@@ -139,6 +139,41 @@ def indices_csv(date: str, codes: list[str], rows_per_code: int = 16) -> bytes:
     return ("\n".join(lines) + "\n").encode("ascii")
 
 
+def indices_2016_csv(date: str, codes: list[str], times: list[str] | None = None) -> bytes:
+    """Build a headerless TICIT010 (2016, 15-field) index record as raw bytes.
+
+    Unlike the 2017+ quoted CSV, 2016 index records are **fixed-width** (parsed
+    positionally by :func:`tse_tick.core.parse_line`) and store ``Execution Time``
+    as 4-char ``HHMM`` with no seconds — the era quirk behind the width
+    normalization. Each line is exactly 69 characters; numeric fields are
+    zero-padded (so the integer/float casts succeed) and categorical fields are
+    space-padded (so a strip yields the single-char code).
+    """
+    times = times or ["0900", "1030", "1515"]
+    lines: list[str] = []
+    for code in codes:
+        for hhmm in times:
+            line = (
+                "2100"               # Record Type (4)   -> "Indices - Execution"
+                + date               # Data Date (8)
+                + "0"                # Identification Flag (1)
+                + "11"               # Exchange Code (2)  -> TSE
+                + "10"               # Security Type (2)  -> Cash Index
+                + "1"                # Session (1)
+                + code.rjust(12)     # Index Code (12)
+                + hhmm               # Execution Time (4) HHMM — no seconds
+                + "01"               # Record Type (Executions/Quotes) (2)
+                + "0001"             # Management Number (4)
+                + "001688500"        # Index Value (9)    -> 16885.00 after *0.01
+                + "0".rjust(3)       # Execution Type (3) -> "Other"
+                + "0".rjust(3)       # Ayumi Flag (3)     -> "Regular"
+                + "0".zfill(11)      # Volume (11)
+                + "0".rjust(3)       # Volume Flag (3)    -> "Final"
+            )
+            lines.append(line)
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
 def write_zip(zip_path: Path, member_name: str, payload: bytes) -> Path:
     """Write ``payload`` as a single CSV member inside a ZIP, NEEDS-style."""
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:

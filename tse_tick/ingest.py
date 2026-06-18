@@ -82,6 +82,27 @@ def ingest_directory(
     progress: bool = True,
     ticker_filter: Optional[set] = None,
 ) -> list[dict]:
+    """Ingest every ``.zip`` in a single flat directory into the Parquet store.
+
+    Cleans each ZIP with :func:`tse_tick.create_df` and writes per-ticker Parquet
+    files via :func:`ingest_single_zip`. Globs ``*.zip`` **directly** under
+    ``input_dir`` (non-recursive); for a structured ``{year}/{yearmonth}/`` NEEDS
+    root use :func:`ingest_period` / :func:`ingest_year_from_root` instead.
+
+    Args:
+        input_dir: Directory containing the NEEDS ``.zip`` files.
+        output_dir: Store root to write under.
+        data_type: NEEDS type; auto-detected per ZIP from the path when ``None``.
+        language: Output column-name language (``"en"`` / ``"jp"``).
+        max_workers: Parallel worker processes (capped at 8); ``1`` is serial.
+        progress: Log a per-ZIP progress line.
+        ticker_filter: Optional ``set`` of string stock codes
+            (``individual_stock`` only).
+
+    Returns:
+        One result dict per ZIP (see :func:`ingest_single_zip`); a failed ZIP
+        contributes ``{"zip_path": ..., "error": ...}`` instead.
+    """
     if max_workers > _MAX_WORKERS:
         logger.warning("max_workers=%d exceeds cap of %d, limiting to %d", max_workers, _MAX_WORKERS, _MAX_WORKERS)
         max_workers = _MAX_WORKERS
@@ -261,7 +282,9 @@ def ingest_period(
     Args:
         input_root: Root of the ``{year}/{yearmonth}/`` NEEDS hierarchy.
         output_dir: Store root to write under.
-        period: ``"YYYY"``, ``"YYYYMM-YYYYMM"`` or ``"YYYYMMDD-YYYYMMDD"``.
+        period: ``"YYYY"``, a single ``"YYYYMM"`` or ``"YYYYMMDD"``, or a
+            ``"YYYYMM-YYYYMM"`` / ``"YYYYMMDD-YYYYMMDD"`` range (the same forms
+            :func:`tse_tick.parse_period` accepts).
         data_type: NEEDS type to ingest.
         language: Output column-name language (``"en"`` / ``"jp"``).
         resume: Skip dates whose Parquet output already exists (default ``True``).
