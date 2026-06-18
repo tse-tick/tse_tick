@@ -2,9 +2,12 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-18
+
 Fixes from a fourth real-data run that exercised **all four** NEEDS data types (the prior runs were
 individual_stock-centric): the store→`query_ticks` path for summaries, ticker/time filtering for the
-non-stock types and under `language="jp"`, and the 2016 index era.
+non-stock types and under `language="jp"`, the 2016 index era, and a unified raw-code `Index Code`
+across both index types.
 
 ### Fixed
 - **`query_ticks` crashed for both summary types** (`stock_summary`, `indices_summary`): a hard-coded

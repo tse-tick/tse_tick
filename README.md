@@ -366,16 +366,17 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.6.0
+## What's New in 0.7.0
 
-`tse_tick` 0.6.0 — `pip install -U tse-tick`. Backward-compatible; the public API only gains `tse_tick.display`.
+`tse_tick` 0.7.0 — `pip install -U tse-tick`. The first release validated across **all four** NEEDS data types.
 
-- **`print(df)` no longer crashes on Windows.** Polars draws tables with Unicode box-drawing characters a legacy cp1252 console can't encode; importing `tse_tick` now switches Polars to ASCII borders on Windows (opt out with `TSE_TICK_ASCII_TABLES=0`). A cross-platform `tse_tick.display(df)` also prints any DataFrame as UTF-8.
-- **Missing-date reads are no longer silent.** `read_ticks` for a date with no ZIPs (e.g. a market holiday like Golden Week) now logs a warning and returns an empty *but fully-typed* frame — the same schema a no-match read returns, so empty results are consistent however they arise.
-- **Faster structured-root discovery.** `discover_zips` gained a `{yearmonth}/`-directly-under-root fast path (e.g. pointing at `…\TICST120`), so the common layout resolves without a full recursive tree walk; the recursive fallback still handles deeper nested trees.
-- Doc clarification: a single numbered ZIP holds only part of a day — pass the day's directory (not a lone `…N.zip`) for complete ticker coverage.
+- **The store path works for the summary types.** `query_ticks` no longer crashes on `stock_summary` / `indices_summary` (it hard-coded an `ORDER BY "Execution Time"` those daily aggregates don't have).
+- **`ticker_filter` is honored everywhere.** It now prunes on **ingest** for the non-stock types (was silently ignored — the store kept every code) and under **`language="jp"`** for `read_ticks` (was returning the whole month). Intraday `start_time`/`end_time` filtering also works under `jp`.
+- **The 2016 index era is reachable.** Reading 2016 indices via the normal path no longer crashes and now discovers the legacy `…010` files; 2016's 4-digit `HHMM` timestamps filter correctly (were silently dropped).
+- **`Index Code` is the raw numeric code for both index types** (was: `indices` decoded to names like "Nikkei 225"), so the value matches `ticker_filter` and the partition key, is language-independent, and joins across the two types. `ticker_filter` still accepts a display name. **Re-ingest index stores** to refresh the column.
+- **Smaller fixes:** monthly types prune to the requested day(s) (a single-day request no longer returns the whole month); `parse_period`/`ingest_period` accept a bare `YYYYMM`/`YYYYMMDD`; `get_info()` returns its banner string; `os`/`sys` no longer leak into the namespace; `HTICIS*` files auto-detect as `indices_summary`.
 
-Earlier highlights (0.5.0): complete multi-part-day ingest (the Toyota-7203 fix), the `tse-tick export` CLI verb, and robust auto-location. **Upgrading a store ingested with ≤ 0.4.0? Re-ingest** — those runs were missing parts. (0.4.0): overridable translation tables, quiet `logging`, nested-layout discovery, `Float64` dtypes, empty-but-typed reads.
+Earlier highlights (0.6.0): Windows-safe `print(df)` (ASCII tables + `tse_tick.display`), missing-date warnings + typed-empty reads, faster discovery. (0.5.0): multi-part-day ingest (the Toyota-7203 fix), `tse-tick export`, robust auto-location.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
@@ -398,6 +399,10 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
   part) — pass the day's directory or a structured root for complete coverage.
 - **Numeric dtypes.** Price/quote columns (`Execution Price`, `Sell Quote 1 Best`, …) are `Float64`.
   (Parquet stores ingested before this change stored them as `String` — re-ingest to refresh.)
+- **Index codes are raw codes.** `indices` and `indices_summary` both return `Index Code` as the raw
+  numeric code (e.g. `"101"`), matching what you pass to `ticker_filter` and the `ticker=` partition;
+  `ticker_filter` also accepts the display name (`"Nikkei 225"`). (Stores written before 0.7.0 held
+  decoded names for `indices` — re-ingest to refresh.)
 - **Empty results keep their schema.** A read that matches nothing — **including a date with no ZIPs**
   (e.g. a market holiday) — returns an empty *but fully-typed* DataFrame (all columns present), so
   chained access like `df["Exchange Code"]` won't raise. The no-ZIPs case also logs a warning, so a
@@ -431,7 +436,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **243 tests**. Without a local NEEDS store, **195 pass** and **48 skip**; with a complete NEEDS store, **all 243 pass**. Stage-1
+The suite collects **257 tests**. Without a local NEEDS store, **209 pass** and **48 skip**; with a complete NEEDS store, **all 257 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
