@@ -148,3 +148,26 @@ def test_summary_time_filter_raises():
 def test_unknown_data_type_raises(single_stock_zip):
     with pytest.raises(ValueError):
         read_ticks(str(single_stock_zip), data_type="not_a_type")
+
+
+def test_zip_parts_sorted_chronologically(tmp_path):
+    # parts .1, .2, .10 must resolve in numeric (time) order, not lexical 1,10,2
+    from tse_tick.enhanced import _resolve_source_zips
+    for n in (10, 1, 2):
+        zp = tmp_path / f"HTICST120.20240104.{n}.zip"
+        write_zip(zp, f"HTICST120.20240104.{n}.csv",
+                  individual_stock_csv("20240104", ["7203"], rows_per_ticker=2, base_prices={"7203": 2100}))
+    resolved = _resolve_source_zips(str(tmp_path), "individual_stock", "20240104")
+    nums = [int(p.name.split(".")[2]) for p in resolved]
+    assert nums == [1, 2, 10]
+
+
+def test_read_ticks_warns_on_row_cap(tmp_path, caplog):
+    import logging
+    zp = tmp_path / "HTICST120.20240104.1.zip"
+    write_zip(zp, "HTICST120.20240104.1.csv",
+              individual_stock_csv("20240104", ["7203"], rows_per_ticker=10, base_prices={"7203": 2100}))
+    with caplog.at_level(logging.WARNING, logger="tse_tick.enhanced"):
+        df = read_ticks(str(zp), ticker_filter={"7203"}, rows=3)
+    assert df.height == 3
+    assert any("row cap" in r.getMessage() for r in caplog.records)

@@ -167,6 +167,23 @@ def _zip_date_token(name: str) -> Optional[str]:
     return None
 
 
+def _zip_sort_key(path) -> Tuple[str, int]:
+    """Chronological natural sort key: (date token, part number) from the filename.
+
+    Sorts ``…20240104.1.zip``, ``…20240104.2.zip``, ``…20240104.10.zip`` in numeric
+    order rather than lexical (1, 10, 2, …).
+    """
+    parts = Path(path).name.split(".")
+    date_tok, part_num = "", 0
+    for i, p in enumerate(parts):
+        if p.isdigit() and p.startswith("20") and len(p) in (6, 8):
+            date_tok = p
+            if i + 1 < len(parts) and parts[i + 1].isdigit():
+                part_num = int(parts[i + 1])
+            break
+    return (date_tok, part_num)
+
+
 def _discover_zips_recursive(
     root: Path,
     prefix: str,
@@ -249,7 +266,7 @@ def discover_zips(
     if not all_zips:
         all_zips = _discover_zips_recursive(root, prefix, years, months, dates)
 
-    return all_zips
+    return sorted(all_zips, key=_zip_sort_key)
 
 
 def _raw_width(kind: str, year: int) -> int:
@@ -276,7 +293,7 @@ def get_1y_dataframe(
     if path.is_file() and path.suffix.lower() == ".zip":
         zip_files = [path]
     elif path.is_dir():
-        zip_files = sorted(list(path.glob("*.zip")))
+        zip_files = sorted(path.glob("*.zip"), key=_zip_sort_key)
     else:
         raise ValueError(
             f"Path must be either a directory containing ZIP files or a ZIP file: {folder_path}"
@@ -704,7 +721,7 @@ def _resolve_source_zips(source: str, data_type: str, date: Optional[str]) -> Li
             raise ValueError(f"read_ticks: source file must be a .zip, got {source!r}")
         return [p]
     if p.is_dir():
-        direct = sorted(p.glob("*.zip"))
+        direct = sorted(p.glob("*.zip"), key=_zip_sort_key)
         if direct:  # flat directory of ZIPs; narrow by date when given
             prefixes = _date_prefixes(date)
             if prefixes is None:
@@ -898,5 +915,10 @@ def read_ticks(
         result = pl.DataFrame()
 
     if rows is not None and result.height > rows:
+        logger.warning(
+            "read_ticks: row cap (%d) reached; result truncated. "
+            "Build a Parquet store (ingest_*) and use query_ticks for full coverage.",
+            rows,
+        )
         result = result.head(rows)
     return result
