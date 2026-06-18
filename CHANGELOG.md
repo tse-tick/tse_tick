@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-18
+
+Complete multi-part-day ingest (fixes the silent CLI data loss), a new `tse-tick export` CLI verb,
+and robust data auto-location — from a second clean-room run.
+
 ### Added
 - **`tse-tick export` CLI verb** — read raw ZIPs and write a ticker/time slice straight to CSV or
   Parquet (`--tickers` / `--period` / `--start-time` / `--end-time` / `--output`), no Parquet store
