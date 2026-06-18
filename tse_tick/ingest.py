@@ -9,7 +9,7 @@ from typing import Optional
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 
@@ -177,6 +177,10 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
         except Exception as exc:
             logger.error("Error reading %s: %s", Path(zp).name, exc)
             continue
+        # create_df's ticker_filter only drives the individual_stock raw-byte fast
+        # path; for the other types prune here so ingest honors ticker_filter too.
+        if ticker_filter and data_type != "individual_stock":
+            df = _filter_codes(df, data_type, {str(t).strip() for t in ticker_filter})
         if not df.is_empty():
             parts.append(df)
         del df

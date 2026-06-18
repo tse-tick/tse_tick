@@ -157,11 +157,19 @@ def query_ticks(
 
     limit_clause = f"LIMIT {limit}" if limit is not None else ""
 
+    # Summary types are daily aggregates with no "Execution Time" column, so
+    # order only by the columns this data_type actually has (a hard-coded
+    # ORDER BY "Execution Time" makes query_ticks unusable for both summaries).
+    order_cols = ['"Data Date"']
+    if data_type in ("individual_stock", "indices"):
+        order_cols.append('"Execution Time"')
+    order_clause = "ORDER BY " + ", ".join(order_cols)
+
     sql = (
         f"SELECT {col_select} "
         f"FROM read_parquet({source}, hive_partitioning=true) "
         f"{where_clause} "
-        f'ORDER BY "Data Date", "Execution Time" '
+        f"{order_clause} "
         f"{limit_clause}"
     )
 

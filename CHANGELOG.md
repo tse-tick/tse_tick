@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+Fixes from a fourth real-data run that exercised **all four** NEEDS data types (the prior runs were
+individual_stock-centric): the store→`query_ticks` path for summaries, ticker/time filtering for the
+non-stock types and under `language="jp"`, and the 2016 index era.
+
+### Fixed
+- **`query_ticks` crashed for both summary types** (`stock_summary`, `indices_summary`): a hard-coded
+  `ORDER BY "Execution Time"` referenced a column those daily-aggregate schemas don't have. The
+  order-by now adds `Execution Time` only for the tick types.
+- **`ingest_period(ticker_filter=…)` was silently ignored for `stock_summary` / `indices` /
+  `indices_summary`** — the store kept *every* code (large silent disk/time blow-up). Ingest now
+  prunes these types by ticker too (the filter previously only drove the `individual_stock` fast path).
+- **`read_ticks(ticker_filter=…)` was silently ignored under `language="jp"`** for the
+  non-`individual_stock` types (returned the whole month, ~19× too much). Ticker- and time-filters now
+  resolve their column in either language.
+- **`read_ticks(start_time/end_time, language="jp")` always raised** ("require an 'Execution Time'
+  column") because the column had been renamed to Japanese — fixed by the same language-aware lookup.
+- **2016 index reads crashed on the normal path** (`ColumnNotFoundError: "Update Time"`): the
+  typed-empty-frame builder assumed the 2017+ 23-field schema. `clean_data` now guards columns absent
+  from the 2016 15-field schema, and `discover_zips` also searches the legacy `…010` index record code
+  (`HTICIT010` / `HTICIS010`), so 2016 index data is reachable via the documented workflow.
+- **2016 index time filtering silently returned empty**: 2016 `Execution Time` is `HHMM` (no seconds)
+  vs 2017+ `HHMMSS`; the shared timestamp parser now defaults missing seconds to `00`.
+- **Monthly types over-returned**: a single-day or day-range `read_ticks` request returned the whole
+  month (the ZIP is monthly). Results are now pruned to the requested day(s), consistent with the daily
+  `individual_stock` files and with `query_ticks`.
+- **`parse_period` (and `ingest_period`) rejected a bare single day/month**: now accept `YYYYMM` and
+  `YYYYMMDD`, matching the forms `read_ticks(date=…)` already takes.
+- **`create_df(auto_detect=True)` misdetected `indices_summary` files as `stock_summary`**: the filename
+  probe matched `HTICIS` (the indices_summary prefix) for stock_summary. `HTICIS*` files now correctly
+  auto-detect as `indices_summary`.
+
+### Changed
+- **`Index Code` is now the raw numeric code for both index types.** `indices` previously decoded it to
+  a display name (e.g. "Nikkei 225") while `indices_summary` already showed the code. The in-file value
+  now equals the `ticker_filter` input and the partition filename (`ticker=101`), is language-independent,
+  and lets the two index types be joined; `ticker_filter` still accepts a display name. Codes missing
+  from the name table (e.g. 108) show as the code itself rather than "Unknown (108)". **Re-ingest index
+  stores** to refresh the column.
+- **`get_info()` now returns the banner string** (in addition to printing it) and has a docstring.
+- **Stdlib modules `os` / `sys` no longer leak** into the public `tse_tick` namespace.
+
 ## [0.6.0] - 2026-06-18
 
 Closes the gaps a third real-data run surfaced: missing-date reads now warn and keep their schema,

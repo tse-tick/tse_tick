@@ -14,16 +14,16 @@ def _tick_datetime_expr(
     two ``event_window`` paths. Parsing is non-strict, so malformed values become
     null rather than raising.
     """
-    time_raw = pl.col(time_col).cast(pl.String)
-    has_colon = time_raw.str.contains(":")
+    # Normalise to bare digits first ("HH:MM:SS" -> "HHMMSS"), then re-insert the
+    # colons. 2016 index ticks store "HHMM" (no seconds), so default missing
+    # seconds to "00" rather than producing an unparseable "HH:MM:" (which would
+    # silently drop every 2016 row from a time-window filter).
+    digits = pl.col(time_col).cast(pl.String).str.replace_all(":", "")
+    seconds = digits.str.slice(4, 2)
     time_str = (
-        pl.when(has_colon)
-        .then(time_raw)
-        .otherwise(
-            time_raw.str.slice(0, 2) + ":"
-            + time_raw.str.slice(2, 2) + ":"
-            + time_raw.str.slice(4, 2)
-        )
+        digits.str.slice(0, 2) + ":"
+        + digits.str.slice(2, 2) + ":"
+        + pl.when(seconds.str.len_chars() == 2).then(seconds).otherwise(pl.lit("00"))
     )
     date_part = pl.col(date_col).cast(pl.Date).cast(pl.String)
     return (date_part + pl.lit(" ") + time_str).str.to_datetime(
@@ -196,10 +196,10 @@ def clean_data(df, kind="individual_stock", language="en"):
             )
 
     elif kind == "indices":
-        df_cleaned = df_cleaned.with_columns(
-            pl.col("Execution Time").str.slice(0, 6).alias("Execution Time"),
-            pl.col("Update Time").str.slice(0, 12).alias("Update Time"),
-        )
+        exprs = [pl.col("Execution Time").str.slice(0, 6).alias("Execution Time")]
+        if "Update Time" in df_cleaned.columns:  # 2016 (15-field) indices have none
+            exprs.append(pl.col("Update Time").str.slice(0, 12).alias("Update Time"))
+        df_cleaned = df_cleaned.with_columns(exprs)
 
     string_cols = [c for c, d in zip(df_cleaned.columns, df_cleaned.dtypes) if d == pl.String]
     for col in string_cols:
@@ -217,6 +217,12 @@ def clean_data(df, kind="individual_stock", language="en"):
     skip_exact = {
         "Data Date", "Management Number", "Identification Flag", "Index Value",
         "Record Type (Executions/Quotes)",
+        # Keep Index Code as the raw numeric code (e.g. "101") for both index
+        # types: it then equals the ticker_filter input and the partition
+        # filename (ticker=101), is language-independent, lets the two index
+        # types be joined, and avoids an "Unknown (NNN)" string for codes not in
+        # the name table (e.g. 108).
+        "Index Code",
     }
 
     for col in col_names:

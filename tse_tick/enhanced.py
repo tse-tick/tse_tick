@@ -106,10 +106,16 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
     else:
         if len(period_str) == 4 and period_str.isdigit():
             return {"granularity": "year", "years": [int(period_str)]}
+        elif len(period_str) == 6 and period_str.isdigit():
+            y, m = int(period_str[:4]), int(period_str[4:6])
+            return {"granularity": "month", "years": [y], "months_by_year": {y: [m]}}
+        elif len(period_str) == 8 and period_str.isdigit():
+            return {"granularity": "date", "years": [int(period_str[:4])], "dates": [period_str]}
         else:
             raise ValueError(
                 f"Invalid period: {period_str!r}. "
-                f"Expected YYYY, YYYYMM-YYYYMM, or YYYYMMDD-YYYYMMDD"
+                f"Expected YYYY, a single YYYYMM or YYYYMMDD, or a "
+                f"YYYYMM-YYYYMM / YYYYMMDD-YYYYMMDD range"
             )
 
 
@@ -143,7 +149,7 @@ def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
                 sample_file = files[0].name.upper()
                 if "TICST" in sample_file:
                     data_type = "individual_stock"
-                elif "HTICIS" in sample_file or "TICSS" in sample_file:
+                elif "TICSS" in sample_file:
                     data_type = "stock_summary"
                 elif "TICIT" in sample_file:
                     data_type = "indices"
@@ -186,29 +192,31 @@ def _zip_sort_key(path) -> Tuple[str, int]:
 
 def _discover_zips_recursive(
     root: Path,
-    prefix: str,
+    prefixes: Union[str, List[str]],
     years: List[int],
     months: Optional[List[int]],
     dates: Optional[List[str]],
 ) -> List[Path]:
     """Fallback discovery: recursively find ``<PREFIX>.*.zip`` anywhere under
     ``root`` (robust to nested delivery trees such as
-    ``個別株式{year}/TICST120/{yyyymm}/``), filtered by the requested
-    year/month/date tokens parsed from each filename.
+    ``個別株式{year}/TICST120/{yyyymm}/`` and the 2016 ``…010`` index code),
+    filtered by the requested year/month/date tokens parsed from each filename.
     """
+    if isinstance(prefixes, str):  # tolerate a single prefix
+        prefixes = [prefixes]
     year_set = {str(y) for y in years}
     month_set = {f"{m:02d}" for m in (months if months is not None else range(1, 13))}
     date_set = set(dates) if dates else None
-    pattern = str(root / "**" / f"{prefix}.*.zip")
     out: List[Path] = []
-    for p in glob.glob(pattern, recursive=True):
-        tok = _zip_date_token(Path(p).name)
-        if tok is None or tok[:4] not in year_set or tok[4:6] not in month_set:
-            continue
-        # Daily files must match a requested date; monthly files match by month.
-        if date_set is not None and len(tok) == 8 and tok not in date_set:
-            continue
-        out.append(Path(p))
+    for prefix in prefixes:
+        for p in glob.glob(str(root / "**" / f"{prefix}.*.zip"), recursive=True):
+            tok = _zip_date_token(Path(p).name)
+            if tok is None or tok[:4] not in year_set or tok[4:6] not in month_set:
+                continue
+            # Daily files must match a requested date; monthly files match by month.
+            if date_set is not None and len(tok) == 8 and tok not in date_set:
+                continue
+            out.append(Path(p))
     return sorted(out)
 
 
@@ -243,6 +251,11 @@ def discover_zips(
         raise ValueError(
             f"Unknown data_type {data_type!r}. Must be one of {list(_CODE_TYPE_MAP.keys())}"
         )
+    # Index types changed record code across eras: 2017+ uses …110, 2016 uses
+    # …010 (HTICIT010 / HTICIS010). Search both so 2016 index data is reachable.
+    prefixes = [prefix]
+    if data_type in ("indices", "indices_summary"):
+        prefixes.append(prefix[:-3] + "010")
 
     if months is None:
         months = list(range(1, 13))
@@ -260,14 +273,15 @@ def discover_zips(
             targets = [d for d in dates if d[:6] == month_str] if dates is not None else [None]
             for sub in subdirs:
                 for date_str in targets:
-                    fname = f"{prefix}.{date_str}.*.zip" if date_str else f"{prefix}.*.zip"
-                    all_zips.extend(Path(p) for p in glob.glob(str(root / sub / fname)))
+                    for pfx in prefixes:
+                        fname = f"{pfx}.{date_str}.*.zip" if date_str else f"{pfx}.*.zip"
+                        all_zips.extend(Path(p) for p in glob.glob(str(root / sub / fname)))
 
     # The fast paths cover the common deliveries; if none matched, fall back to a
     # full recursive search so deeper nested trees still work
     # (e.g. 個別株式{year}/TICST120/{yyyymm}/).
     if not all_zips:
-        all_zips = _discover_zips_recursive(root, prefix, years, months, dates)
+        all_zips = _discover_zips_recursive(root, prefixes, years, months, dates)
 
     # Dedupe (a file can match more than one fast-path subdir) and natural-sort.
     seen: set = set()
@@ -724,6 +738,26 @@ def _date_prefixes(date: Optional[str]) -> Optional[List[str]]:
     return list(parsed["dates"])
 
 
+def _requested_days(date: Optional[str]) -> Optional[set]:
+    """The exact ``YYYYMMDD`` days a date request resolves to, or ``None`` when
+    the request is month/year-level (no per-day pruning intended).
+
+    Monthly NEEDS ZIPs (the summary and index types) hold a whole month, so a
+    single-day or day-range request must prune the result to those days —
+    otherwise the caller silently gets the whole month, inconsistent with the
+    daily ``individual_stock`` files and with ``query_ticks`` (both day-scoped).
+    """
+    if date is None:
+        return None
+    token = str(date).strip()
+    if "-" not in token and token.isdigit() and len(token) == 8:
+        return {token}
+    parsed = parse_period(token)
+    if parsed.get("granularity") == "date":
+        return set(parsed["dates"])
+    return None
+
+
 def _discover_root_zips(input_root: str, data_type: str, date: Optional[str]) -> List[Path]:
     """Discover ZIPs under a structured ``{year}/{yearmonth}/`` NEEDS root."""
     if date is None:
@@ -784,14 +818,31 @@ def _parse_hms(value: str) -> datetime.time:
         raise ValueError(f"Invalid time format (expected HH:MM:SS): {value!r}") from exc
 
 
+def _resolve_col(df: pl.DataFrame, en_name: str) -> Optional[str]:
+    """Return the column matching an English concept, honoring jp output.
+
+    ``read_ticks(language="jp")`` renames columns to Japanese, so ticker- and
+    time-filters keyed on the English name must also accept the Japanese
+    equivalent (otherwise the filter silently finds no column and is skipped).
+    """
+    if en_name in df.columns:
+        return en_name
+    jp_name = get_japanese_column_mapping().get(en_name)  # mapping is {en: jp}
+    if jp_name is not None and jp_name in df.columns:
+        return jp_name
+    return None
+
+
 def _filter_time_window(
     df: pl.DataFrame, start_time: Optional[str], end_time: Optional[str]
 ) -> pl.DataFrame:
-    if "Execution Time" not in df.columns:
+    time_col = _resolve_col(df, "Execution Time")
+    if time_col is None:
         raise ValueError(
             "read_ticks: start_time/end_time require an 'Execution Time' column"
         )
-    time_of_day = _tick_datetime_expr().dt.time()
+    date_col = _resolve_col(df, "Data Date") or "Data Date"
+    time_of_day = _tick_datetime_expr(date_col, time_col).dt.time()
     expr = None
     if start_time is not None:
         cond = time_of_day >= pl.lit(_parse_hms(start_time))
@@ -803,23 +854,33 @@ def _filter_time_window(
 
 
 def _filter_codes(df: pl.DataFrame, data_type: str, wanted: set) -> pl.DataFrame:
-    """Post-parse ticker filter for the non-individual_stock types."""
+    """Post-parse ticker filter for the non-individual_stock types (en or jp)."""
     if data_type == "stock_summary":
-        if "Stock Code" not in df.columns:
+        col = _resolve_col(df, "Stock Code")
+        if col is None:
             return df
-        codes = pl.col("Stock Code").cast(pl.String).str.strip_chars().str.slice(0, 4)
+        codes = pl.col(col).cast(pl.String).str.strip_chars().str.slice(0, 4)
         return df.filter(codes.is_in(list(wanted)))
     # indices / indices_summary: Index Code is categorically decoded to a display
-    # name (e.g. "101" -> "Nikkei 225"); accept either the raw code or the name.
-    if "Index Code" not in df.columns:
+    # name (e.g. "101" -> "Nikkei 225" / "日経平均株価"); accept the raw code or
+    # either-language name. _index_code_lookup() maps both en and jp names -> code.
+    col = _resolve_col(df, "Index Code")
+    if col is None:
         return df
     from .io.parquet import _index_code_lookup
 
+    # Index Code is now the raw code in-column, but accept a display name as
+    # input too (and still match old stores that hold names): map names->code
+    # and code->name(s) so wanted matches whichever form the column holds.
+    lookup = _index_code_lookup()  # display name (en+jp) -> raw code
     expanded = set(wanted)
-    for display, code in _index_code_lookup().items():  # display -> raw code
-        if code in wanted:
+    for w in list(wanted):
+        if w in lookup:
+            expanded.add(lookup[w])
+    for display, code in lookup.items():
+        if code in expanded:
             expanded.add(display)
-    disp = pl.col("Index Code").cast(pl.String).str.strip_chars()
+    disp = pl.col(col).cast(pl.String).str.strip_chars()
     return df.filter(disp.is_in(list(expanded)))
 
 
@@ -970,6 +1031,15 @@ def read_ticks(
         result = schema_frame
     else:
         result = _empty_typed_frame(data_type, language, _year_hint_from_date(date))
+
+    # Monthly ZIPs hold a whole month; prune to the requested day(s) so a
+    # single-day/day-range request doesn't silently return the entire month.
+    days = _requested_days(date)
+    if days is not None and result.height:
+        date_col = _resolve_col(result, "Data Date")
+        if date_col is not None:
+            dd = pl.col(date_col).cast(pl.Date).cast(pl.String).str.replace_all("-", "")
+            result = result.filter(dd.is_in(list(days)))
 
     if rows is not None and result.height > rows:
         logger.warning(
