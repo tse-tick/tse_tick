@@ -49,7 +49,7 @@ tse_tick/                          # Project root
 │   │   └── translations.json        # translate() mapping tables (override: TSE_TICK_TRANSLATIONS)
 │   └── py.typed                     # PEP 561 marker
 │
-├── tests/                           # Test suite (pytest, 215 tests; 167 pass / 48 skip w/o data, 215/0 with a NEEDS store)
+├── tests/                           # Test suite (pytest, 227 tests; 179 pass / 48 skip w/o data, 227/0 with a NEEDS store)
 │   ├── __init__.py
 │   ├── conftest.py                  # Session-scoped synthetic Parquet fixtures (stock_store, indices_store, events_df)
 │   ├── synthetic_data.py            # Generates obviously-fake NEEDS-format ZIPs feeding those fixtures
@@ -411,15 +411,16 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**215 tests.** Without proprietary data (the CI profile): **167 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 215 pass**.
+**227 tests.** Without proprietary data (the CI profile): **179 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 227 pass**.
 
 | Area | Coverage |
 |------|----------|
 | Stage-1 (ingest) | `test_ingest` (16), `test_parquet` (12), `test_parquet_io` (14) — synthetic + real-ZIP cases |
 | Stage-2 (query / features / event-window from Parquet) | `test_query` (15), `test_features` (20), `test_event_window` (22) — run against a **synthetic Hive-Parquet store** built by the real ingest pipeline (`conftest.py` + `synthetic_data.py`), so they need no proprietary data |
 | CLI | `test_cli` (13) — end-to-end on synthetic data |
-| Additive API | `test_api_additions` (13), `test_read_ticks` (14), `test_translate_data` (7) — `translate` / enums / `query_ticks` str-int ticker, the one-shot `read_ticks`, and the file-driven translation tables + `TSE_TICK_TRANSLATIONS` override, all on synthetic data |
+| Additive API | `test_api_additions` (13), `test_read_ticks` (16), `test_translate_data` (7) — `translate` / enums / `query_ticks` str-int ticker, the one-shot `read_ticks`, and the file-driven translation tables + `TSE_TICK_TRANSLATIONS` override, all on synthetic data |
+| Clean-room fixes | `test_quiet_and_unicode` (3), `test_discovery` (3), `test_dtypes` (1), `test_empty_schema` (3) — logging/no-crash on CJK paths, nested-layout discovery, Float64 dtypes, empty-but-typed frames |
 | Paper examples | `test_paper_examples` (5) — locks the technical paper's API listings |
 | Real data | `test_real_data` (64) + real-ZIP cases in `test_ingest` — all 4 types across the 2016 fixed-width and 2017+ CSV eras; **gated on local NEEDS files** (these are the 48 no-data skips) |
 

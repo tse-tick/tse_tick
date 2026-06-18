@@ -8,6 +8,28 @@
   Python dicts, so contributors can amend them with no code change. Power users can merge their own
   entries by pointing the optional `TSE_TICK_TRANSLATIONS` env var at a JSON file of the same shape.
   The public API (`translate` / `mapping` / `SUPPORTED_SOURCES`) and default behaviour are unchanged.
+- Documented that ingestion uses the `ingest_period` / `ingest_single_zip` / `ingest_year_from_root` …
+  functions; the bare `tse_tick.ingest` is the submodule (so `inspect.signature(tse_tick.ingest)` is
+  not meaningful).
+
+### Fixed
+- **`UnicodeEncodeError` crash on non-ASCII paths** (Windows): library functions printed raw paths
+  (e.g. `個別株式…`), which aborted `create_df`/`read_ticks` on a legacy-codepage console. All library
+  diagnostics now go through `logging` (silent by default; the CLI still shows them), so they can no
+  longer crash callers or spam stdout.
+- **`discover_zips` couldn't see the real NEEDS delivery tree** (`個別株式{year}/TICST120/{yyyymm}/`):
+  it now falls back to a recursive search when the documented `{year}/{yearmonth}/` layout matches
+  nothing, so structured-root `read_ticks` works against the real data.
+- **Inconsistent price/quote dtypes**: `Execution Price` and most quote levels came back as `str`
+  while `Buy Quote 1 Best` was `Float64`. `clean_data` now casts all price/quote columns to `Float64`.
+  *Store note:* newly-ingested Parquet stores hold these columns as `Float64` (were `String`);
+  re-ingest to refresh older stores.
+- **Empty reads lost their schema**: a no-match `read_ticks` / `create_df` / `query_ticks` returned a
+  `(0, 0)` frame, so `df["Exchange Code"]` raised `ColumnNotFoundError`. They now return an
+  empty-but-typed frame with the full column set.
+- **`read_ticks` row-cap truncation was non-chronological and silent**: daily parts are now sorted
+  naturally by `(date, part-number)` so truncation is chronological, and hitting the `rows` cap logs a
+  warning.
 
 ## [0.3.0] - 2026-06-16
 
