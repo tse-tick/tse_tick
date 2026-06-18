@@ -167,6 +167,8 @@ def get_info():
     CLI Usage:
     >>> tse-tick ingest --data-type individual_stock --period 2024 \\
                 --input-root /path/to/data --output-root /path/to/store
+    >>> tse-tick export --data-type individual_stock --tickers 7203 \\
+                --period 20240201-20240205 --input-root /path/to/data --output toyota.csv
 
     For more information, visit:
     https://github.com/tse-tick/tse_tick

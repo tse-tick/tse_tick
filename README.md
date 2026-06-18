@@ -116,7 +116,25 @@ tse-tick ingest \
     --window 120
 ```
 
+### CLI — export one ticker to CSV or Parquet (no store)
+
+For a quick slice straight from the raw ZIPs — ideal if you don't write Python. Reads **every part**
+of each day, so the result is complete:
+
+```bash
+tse-tick export \
+    --data-type individual_stock \
+    --tickers 7203 \
+    --period 20240201-20240205 \
+    --input-root /path/to/TSE_DATA \
+    --output toyota.csv            # .csv or .parquet, chosen by extension
+```
+
 ### Query the Parquet store
+
+> **Note:** the query functions (`query_ticks`, `query_sql`, `get_available_*`) require the
+> **`[query]` extra** — `pip install "tse-tick[query]"` (DuckDB). On the core install, use the
+> DuckDB-free `read_parquet_partition(store, "individual_stock", date=..., ticker=...)` instead.
 
 ```python
 import tse_tick
@@ -161,16 +179,17 @@ features = tse_tick.compute_all_features(df)
 `tse_tick` gives you a filtered DataFrame two ways:
 
 1. **Two-stage (scale / repeated work)** — `ingest` the raw ZIPs into a Hive-partitioned Parquet store once, then `query_ticks` it repeatedly. Querying the store prunes by date/ticker and is far faster than re-reading raw files (~694× vs a pandas CSV scan; see [Performance](#performance)).
-2. **One-shot (quick, targeted exploration)** — `read_ticks(...)` reads straight from raw ZIPs to a ticker/time-filtered DataFrame with no store to build first; best for a few tickers over a bounded window.
+2. **One-shot (quick, targeted exploration)** — `read_ticks(...)` reads straight from raw ZIPs to a ticker/time-filtered DataFrame with no store to build first. It reads **every ZIP part** of each day (complete multi-part data) and accepts a **date range** (`date="20240201-20240205"`); best for one or a few tickers over a bounded window. The `tse-tick export` CLI wraps it to CSV/Parquet for non-coders.
 
 ```python
 import tse_tick
 
-# Toyota (7203) on 2024-02-01, 09:00–11:30 — straight from the raw ZIPs, no store:
+# Toyota (7203) over a date range — straight from the raw ZIPs, no store.
+# read_ticks reads EVERY part of each day, so the result is complete.
 df = tse_tick.read_ticks(
-    "/path/to/TSE_DATA",          # a single .zip, a flat folder, or a {year}/{yearmonth}/ root
+    "/path/to/TSE_DATA",          # a .zip, a flat folder, or ANY folder above the data (located by type+date)
     ticker_filter={"7203"},
-    date="20240201",
+    date="20240201-20240205",     # single day "20240201", a month "202402", a year "2024", or a range
     start_time="09:00:00",
     end_time="11:30:00",
 )
@@ -239,6 +258,12 @@ The CLI expects NEEDS data organized as delivered by Nikkei:
     201701/
     ...
 ```
+
+**Real NEEDS deliveries are often nested** — e.g. `個別株式{year}/TICST120/{yyyymm}/HTICST120.*.zip`
+(a Japanese-named year folder, then the data-type code, then the month). You don't have to match the
+strict layout above: **point `--input-root` (or `read_ticks(...)` / `tse-tick export`) at _any_ folder
+that contains the data** — files are located by **type + date**, regardless of folder names or depth.
+Tip: aim at the common parent (e.g. `G:\NEEDS`) to cover several years at once.
 
 ---
 

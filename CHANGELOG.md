@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+- **`tse-tick export` CLI verb** — read raw ZIPs and write a ticker/time slice straight to CSV or
+  Parquet (`--tickers` / `--period` / `--start-time` / `--end-time` / `--output`), no Parquet store
+  required. The no-code path to one ticker over a date range.
+
+### Fixed
+- **CLI/period ingest dropped all but the first ZIP part of each day** (silent, catastrophic). NEEDS
+  splits a trading day across multiple parts by ticker range (plus a closing tail), but resume keyed
+  on the *date*, so once part 1 wrote output every later part was skipped (e.g. Toyota 7203 absent),
+  and the per-ticker writer overwrote rather than merged (so `--no-resume` kept only the last part).
+  Ingest now groups all parts of a date, reads + concatenates them, and writes each ticker once — the
+  complete day. Resume and `--no-resume` are both correct and idempotent.
+- **`--parallel` is now flagged as `--flat`-only**: it was silently ignored on the `--period` path;
+  the CLI warns instead of implying it parallelized.
+
+### Changed
+- **CLI progress now logs to stdout** (was stderr), so a successful run no longer surfaces as red
+  `NativeCommandError` lines under PowerShell.
+
+### Documentation
+- `read_ticks` / `tse-tick export` / `--input-root` accept **any folder** that contains the data —
+  files are located by type + date regardless of nesting (`個別株式{year}/TICST120/{yyyymm}/`), so
+  pointing at a common parent (e.g. `G:\NEEDS`) works. Regression tests cover every tree level.
+- README: `read_ticks` examples show a **date range** and note it reads every part of a day; the
+  `query_ticks` example flags the `[query]` (DuckDB) extra and the DuckDB-free `read_parquet_partition`.
+
 ## [0.4.0] - 2026-06-18
 
 Optional file-driven translation overrides (`TSE_TICK_TRANSLATIONS`) plus a batch of clean-room
