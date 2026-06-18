@@ -366,15 +366,16 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.9.0
+## What's New in 0.10.0
 
-`tse_tick` 0.9.0 — `pip install -U tse-tick`. Two real-data defect fixes from a sixth run.
+`tse_tick` 0.10.0 — `pip install -U tse-tick`. A Major store-build scalability fix for the summary types, plus warning/discovery/time-format polish (a seventh real-data run; read paths were already correct).
 
-- **`stock_summary` numbers are numeric again.** Every measure column (OHLC, VWAP, volumes, amounts, counts) was returned as `String`, so `.mean()` / arithmetic silently produced `null`; they're now `Float64` like the other three types. **Re-ingest `stock_summary` stores** to refresh the dtypes.
-- **Time-filtering `individual_stock` keeps the whole order book.** Quote-only book updates (no trade) have a blank `Execution Time` but a real `Update Time`; a session window keyed only on `Execution Time` was silently dropping ~94% of a liquid day (only trade-coincident snapshots). `read_ticks` and `query_ticks` now fall back to `Update Time` for those rows, so `compute_depth`/`compute_spread`/`compute_flow_imbalance` see the full in-window book (the `Execution Time` column itself is unchanged in the output).
-- **Docs:** `read_ticks` now notes typical one-shot timing — it opens every ZIP part of each day, so use `ingest_*` + `query_ticks` for faster repeated/narrow work.
+- **Summary stores are ~160× smaller and minutes faster to build.** `stock_summary`/`indices_summary` ingest used to write one Parquet file per (date × ticker) — ~87k one-row files / 2.4 GB for a single 15 MB month. They now partition by **date only** (one file per date, the code kept as a column); `query_ticks`/`get_available_tickers` prune/read that column. Tick types are unchanged. **Re-ingest summary stores** to adopt the compact layout.
+- **The `rows` cap warns through `warnings` now.** Hitting `read_ticks(..., rows=N)` emits a capturable `tse_tick.TruncationWarning` (a `UserWarning`) — the same channel as `NoDataWarning` — instead of a `logging`/stderr message; the docstring no longer claims it "silently truncates".
+- **Friendlier store-helper errors.** `get_available_dates`/`get_available_tickers`/`query_ticks` on a raw NEEDS path now tell you to `ingest_*` first (or discover codes from raw data via the `Stock Code`/`Index Code` column).
+- **`*_summary` `*Time` columns normalize to a fixed-width 6-char `HHMMSS`** across eras (2016 `HHMM`, 2017+ `HHMMSSffffff`).
 
-Earlier highlights (0.8.0): capturable `NoDataWarning`, fixed-width index `Execution Time`, string `get_available_tickers` codes, UTF-8 Windows stdout. (0.7.0): all-four-types correctness — summary `query_ticks`, jp/ingest `ticker_filter`, the 2016 index era, raw `Index Code`. (0.6.0): Windows-safe `print(df)`, missing-date warnings + typed-empty reads.
+Earlier highlights (0.9.0): numeric `stock_summary` measures, `individual_stock` time filter keeps the full order book. (0.8.0): capturable `NoDataWarning`, fixed-width index `Execution Time`, string `get_available_tickers` codes, UTF-8 Windows stdout. (0.7.0): all-four-types correctness — summary `query_ticks`, jp/ingest `ticker_filter`, the 2016 index era, raw `Index Code`.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
@@ -455,7 +456,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **282 tests**. Without a local NEEDS store, **234 pass** and **48 skip**; with a complete NEEDS store, **all 282 pass**. Stage-1
+The suite collects **295 tests**. Without a local NEEDS store, **247 pass** and **48 skip**; with a complete NEEDS store, **all 295 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
