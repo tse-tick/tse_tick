@@ -159,6 +159,42 @@ def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
     return data_type, year
 
 
+def _zip_date_token(name: str) -> Optional[str]:
+    """The YYYYMMDD (daily) or YYYYMM (monthly) date token in a NEEDS filename."""
+    for part in name.split("."):
+        if part.isdigit() and part.startswith("20") and len(part) in (6, 8):
+            return part
+    return None
+
+
+def _discover_zips_recursive(
+    root: Path,
+    prefix: str,
+    years: List[int],
+    months: Optional[List[int]],
+    dates: Optional[List[str]],
+) -> List[Path]:
+    """Fallback discovery: recursively find ``<PREFIX>.*.zip`` anywhere under
+    ``root`` (robust to nested delivery trees such as
+    ``個別株式{year}/TICST120/{yyyymm}/``), filtered by the requested
+    year/month/date tokens parsed from each filename.
+    """
+    year_set = {str(y) for y in years}
+    month_set = {f"{m:02d}" for m in (months if months is not None else range(1, 13))}
+    date_set = set(dates) if dates else None
+    pattern = str(root / "**" / f"{prefix}.*.zip")
+    out: List[Path] = []
+    for p in glob.glob(pattern, recursive=True):
+        tok = _zip_date_token(Path(p).name)
+        if tok is None or tok[:4] not in year_set or tok[4:6] not in month_set:
+            continue
+        # Daily files must match a requested date; monthly files match by month.
+        if date_set is not None and len(tok) == 8 and tok not in date_set:
+            continue
+        out.append(Path(p))
+    return sorted(out)
+
+
 def discover_zips(
     input_root: str,
     data_type: str,
@@ -207,6 +243,11 @@ def discover_zips(
                 pattern = str(root / str(year) / month_str / f"{prefix}.*.zip")
                 matched = sorted(glob.glob(pattern))
                 all_zips.extend(Path(p) for p in matched)
+
+    # The documented layout above is the fast path; if it matched nothing, fall
+    # back to a recursive search so nested real-world trees still work.
+    if not all_zips:
+        all_zips = _discover_zips_recursive(root, prefix, years, months, dates)
 
     return all_zips
 
