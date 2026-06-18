@@ -155,3 +155,28 @@ def test_ingest_flat_end_to_end(monkeypatch, capsys, tmp_path):
     main()
     assert "Done: 1 succeeded, 0 failed" in capsys.readouterr().out
     assert (out / "individual_stock" / "date=20240201" / "ticker=7203.parquet").exists()
+
+
+def test_cli_export_csv_from_nested_tree(tmp_path, monkeypatch, capsys):
+    """`tse-tick export` reads raw ZIPs (any nesting) and writes a ticker slice to CSV."""
+    import polars as pl
+
+    month = tmp_path / "個別株式2024" / "TICST120" / "202401"
+    month.mkdir(parents=True)
+    write_zip(
+        month / "HTICST120.20240104.1.zip", "HTICST120.20240104.1.csv",
+        individual_stock_csv("20240104", ["7203", "6758"], rows_per_ticker=20,
+                             base_prices={"7203": 2100, "6758": 13000}),
+    )
+    out = tmp_path / "toyota.csv"
+    monkeypatch.setattr("sys.argv", [
+        "tse-tick", "export", "--data-type", "individual_stock",
+        "--input-root", str(tmp_path), "--tickers", "7203",
+        "--period", "20240104", "--output", str(out),
+    ])
+    main()
+    assert out.exists()
+    df = pl.read_csv(out)
+    assert set(df["Stock Code"].cast(str).str.slice(0, 4).to_list()) == {"7203"}
+    assert df.height == 20
+    assert "Wrote 20 rows" in capsys.readouterr().out
