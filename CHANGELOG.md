@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-18
+
+Optional file-driven translation overrides (`TSE_TICK_TRANSLATIONS`) plus a batch of clean-room
+reliability fixes (Windows non-ASCII paths, real-world NEEDS layouts, dtypes, empty results).
+
 ### Changed
 - **Translation tables externalized to data** (`tse_tick/data/translations.json`): the yfinance /
   Polygon / ccxt → `tse_tick` name maps now load from a shipped JSON file at import instead of inline

@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.3.0 (Beta) — live on PyPI (`pip install tse-tick`) |
+| Version | 0.4.0 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
@@ -21,7 +21,7 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.3.0)
+├── CHANGELOG.md                     # version history (current: 0.4.0)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
@@ -163,6 +163,18 @@ tse_tick/                          # Project root
 | `query_ticks(ticker=…)` | Now accepts `str` or `int` (normalized); PEP 257 docstrings added across the public API |
 | Packaging | `setuptools>=77` + `license-files` (PEP 639), `name = "tse-tick"`, Development Status **Beta** |
 | Tests | Suite grew to **208** (`test_api_additions` 13, `test_read_ticks` 14): 160 pass / 48 skip without data, all 208 pass with a NEEDS store |
+
+### v0.4.0 — file-driven translations + clean-room reliability fixes (2026-06-18)
+
+| Change | Detail |
+|--------|--------|
+| Translation override | Mapping tables load from `tse_tick/data/translations.json`; optional `TSE_TICK_TRANSLATIONS` env var merges a user file over the built-in (public API unchanged) |
+| No-crash, quiet I/O | Library diagnostics moved from `print` to `logging` — fixes `UnicodeEncodeError` on non-ASCII paths and the unsuppressible stdout |
+| NEEDS-layout discovery | `discover_zips` falls back to a recursive search, so nested delivery trees (`個別株式{year}/TICST120/{yyyymm}/`) work |
+| Dtype consistency | All price/quote columns cast to `Float64` (**store-schema change**: was `String`; re-ingest to refresh) |
+| Empty-but-typed reads | No-match `read_ticks` / `create_df` / `query_ticks` return the full schema with 0 rows |
+| Ordering | `read_ticks` parts sort naturally by `(date, part#)`; row-cap truncation logs a warning |
+| Tests | Suite **227** (`+12` regression tests across 4 new files) |
 
 ---
 
@@ -378,7 +390,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Tool | Config |
 |------|--------|
-| **Build** | setuptools>=77 + wheel; static `version = "0.3.0"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
+| **Build** | setuptools>=77 + wheel; static `version = "0.4.0"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
 | **CLI** | `tse-tick = "tse_tick.cli:main"` |
 | **Extras** | `query` (duckdb), `test` (pandas/pytest/pytest-cov), `dev` (test + black/flake8/mypy/jupyter), `docs` |
 | **Black** | line-length=100, target Python 3.9–3.12 |

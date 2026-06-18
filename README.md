@@ -341,16 +341,17 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.3.0
+## What's New in 0.4.0
 
-`tse_tick` 0.3.0 is **available on PyPI** — `pip install tse-tick`. The public API names are
-**stable** — no renames (an earlier proposal to rename functions to yfinance/Polygon/ccxt
-conventions was reversed). The additions are purely additive and backward-compatible:
+`tse_tick` 0.4.0 — `pip install -U tse-tick`. Backward-compatible; the public API is unchanged.
 
-- **`read_ticks` one-shot reader** — raw ZIPs → ticker/time-filtered DataFrame without building a Parquet store (see [Two access patterns](#two-access-patterns)).
-- **`translate()` / `mapping()` name mapping** — a static lookup from yfinance / Polygon / ccxt names to `tse_tick`'s, so users of those libraries can find the equivalent call without coupling to their (changing) APIs.
-- **`DataType` / `Language` enums** — for autocomplete and to avoid magic strings.
-- **`query_ticks(ticker=…)` now accepts `str` or `int`**, plus PEP 257 docstrings across the public API.
+- **Editable translation tables** — the yfinance / Polygon / ccxt → `tse_tick` name maps now live in `tse_tick/data/translations.json` (contributors edit one file); override them at runtime with the optional `TSE_TICK_TRANSLATIONS` env var.
+- **Reliability fixes from a clean-room run** — no more `UnicodeEncodeError` on non-ASCII paths (library diagnostics moved to `logging`, quiet by default); `discover_zips` finds nested NEEDS delivery trees (`個別株式{year}/TICST120/{yyyymm}/`); price/quote columns are consistently `Float64`; no-match reads return an empty-but-typed frame; `read_ticks` parts sort chronologically and warn on row-cap truncation.
+
+> **Heads-up:** price/quote columns are now `Float64` (were a `str`/`f64` mix), which also changes the ingested Parquet store schema — re-ingest to refresh older stores.
+
+Earlier highlights (0.3.0): the `read_ticks` one-shot reader, the `translate()`/`mapping()` lookup,
+`DataType`/`Language` enums, and `query_ticks(ticker=…)` accepting `str` or `int`.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
