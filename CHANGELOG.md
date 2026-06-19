@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- **A bare `ticker_filter` code no longer misbehaves.** Passing a single code as a `str` (e.g.
+  `ticker_filter="101"`) was iterated character-by-character into `{'1', '0', '1'}` — matching nothing and
+  returning a silent typed-empty result — and passing an `int` (e.g. `ticker_filter=101`) raised a raw
+  `TypeError`. A bare `str`/`int` is now treated as a one-element filter on both read entry points
+  (`read_ticks` and `create_df`); a `set`/list/iterable of codes is unchanged.
+
 ## [0.11.0] - 2026-06-19
 
 Fixes from an eighth real-data run: the event-window analytics path crashed on the primary data type,

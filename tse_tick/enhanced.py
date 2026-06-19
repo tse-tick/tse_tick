@@ -644,6 +644,22 @@ def _year_hint_from_date(date: Optional[str]) -> Optional[int]:
     return None
 
 
+def _normalize_ticker_filter(ticker_filter) -> Optional[set]:
+    """Normalize ``ticker_filter`` to a set of string codes (or ``None``).
+
+    A bare single code is an easy novice mistake: a ``str`` like ``"101"`` would be
+    iterated into characters (``{'1', '0', '1'}`` — matching nothing, a silent
+    empty result) and an ``int`` like ``101`` would raise ``TypeError`` when
+    iterated. Treat a lone ``str``/``int`` as a one-element filter; otherwise
+    coerce each item of the iterable to a stripped string.
+    """
+    if ticker_filter is None:
+        return None
+    if isinstance(ticker_filter, (str, int)):  # a single bare code, not an iterable of codes
+        ticker_filter = {ticker_filter}
+    return {str(t).strip() for t in ticker_filter}
+
+
 def create_df(
     folder_path: str,
     language: Literal["en", "jp"] = "en",
@@ -671,14 +687,17 @@ def create_df(
             types (a :class:`DataType` works too).
         year: Required when ``auto_detect=False`` (selects era-specific parsing).
         ticker_filter: A ``set`` of **string** stock codes (e.g. ``{"7203"}``)
-            kept via the raw-byte fast path. Applied for ``individual_stock``
-            **only** — ignored for the other data types. Note a single numbered
-            ZIP holds only part of a day's code range, so filtering a lone part
-            may yield 0 rows; pass the day's directory for complete coverage.
+            kept via the raw-byte fast path; a bare ``"7203"`` / ``7203`` is also
+            accepted as a single code. Applied for ``individual_stock`` **only** —
+            ignored for the other data types. Note a single numbered ZIP holds
+            only part of a day's code range, so filtering a lone part may yield 0
+            rows; pass the day's directory for complete coverage.
 
     Returns:
         The cleaned DataFrame (empty if ``ticker_filter`` matched no rows).
     """
+    ticker_filter = _normalize_ticker_filter(ticker_filter)
+
     if auto_detect:
         data_type, year = detect_data_type_and_year(folder_path)
         logger.debug("Auto-detected: %s, Year: %s", data_type, year)
@@ -973,10 +992,12 @@ def read_ticks(
         data_type: One of the four NEEDS types (a :class:`DataType` works too).
         ticker_filter: A ``set`` of codes (e.g. ``{"7203"}``); ``int`` codes
             such as ``{7203}`` are accepted too and coerced to strings — so the
-            output of :func:`tse_tick.get_available_tickers` feeds straight in.
-            For ``individual_stock`` this drives the bounded-memory raw-byte fast
-            path; for ``indices`` it matches the index code (``"101"`` == Nikkei
-            225) after parsing.
+            output of :func:`tse_tick.get_available_tickers` feeds straight in. A
+            **bare single code** (``"7203"`` or ``7203``) is also accepted and
+            treated as a one-element filter (so a stray ``"7203"`` is not split
+            into characters). For ``individual_stock`` this drives the
+            bounded-memory raw-byte fast path; for ``indices`` it matches the
+            index code (``"101"`` == Nikkei 225) after parsing.
         date: A day ``"YYYYMMDD"``, month ``"YYYYMM"``, year ``"YYYY"``, or a
             ``"start-end"`` range. Selects which ZIPs to open. **Required** when
             ``source`` is a structured root; optional for a single ZIP/flat dir.
@@ -1038,9 +1059,7 @@ def read_ticks(
             f"(daily aggregates have no Execution Time); filter on 'date' only"
         )
 
-    norm_filter = None
-    if ticker_filter is not None:
-        norm_filter = {str(t).strip() for t in ticker_filter}
+    norm_filter = _normalize_ticker_filter(ticker_filter)
 
     zips = _resolve_source_zips(source, data_type, date)
     if not zips:
