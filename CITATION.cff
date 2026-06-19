@@ -15,7 +15,7 @@ authors:
     affiliation: "Psychometrics Centre, University of Cambridge"
 repository-code: "https://github.com/tse-tick/tse_tick"
 license: MIT
-version: 0.11.3
+version: 0.11.4
 keywords:
   - "tick data"
   - "Tokyo Stock Exchange"
