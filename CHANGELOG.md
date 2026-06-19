@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-06-19
+
 Fixes from an eleventh real-data run: a Major flat-folder discovery bug plus two consistency papercuts.
-Fixed consistency-first — each change removes a divergent code path rather than adding another.
+Fixed consistency-first — each change removes a divergent code path rather than adding another. Also ships
+a standalone, README-conformant evaluation notebook.
 
 ### Fixed
 - **A flat folder of a monthly-packaged type + a single-day date no longer returns a false-empty result.**
@@ -22,6 +25,14 @@ Fixed consistency-first — each change removes a divergent code path rather tha
   (e.g. `(2016, 2026)`) that disagreed with the `get_info()` banner (`2016-2025`) and had no docstring.
   Both now derive from one `_SUPPORTED_YEARS = (2016, 2025)` constant; `get_supported_years()` and
   `get_version()` are documented.
+
+### Added
+- **A standalone evaluation notebook** (`examples/notebooks/02_evaluation.ipynb`) — a README-conformant
+  acceptance test that exercises every documented access pattern (one-shot `read_ticks`, two-stage
+  `ingest_period` → `query_ticks`) for all four data types across both eras, with per-case pass/fail/skip
+  checks (column counts, dtypes, ticker/time filtering, one-shot↔store consistency, no-data handling) and
+  an overall verdict. Point it at a NEEDS root via `TSE_TICK_DATA_ROOT` (or edit `DATA_ROOT`) and *Run All*
+  to validate a release; standardizes QA runs on the documented usage so they don't drift into edge paths.
 
 ## [0.11.2] - 2026-06-19
 
