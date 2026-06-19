@@ -366,16 +366,13 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.11.0
+## What's New in 0.11.1
 
-`tse_tick` 0.11.0 — `pip install -U tse-tick`. Fixes the event-window analytics path (broken on the primary data type) plus message/docstring polish (an eighth real-data run; read/ingest/query were already correct).
+`tse_tick` 0.11.1 — `pip install -U tse-tick`. A small usability patch from a ninth real-data run (which found **0 blockers / 0 majors** — 0.11.0 was deemed usable as-is).
 
-- **`extract_event_window` works on `individual_stock` again.** It crashed (`time data '… ::'`) because it parsed `Execution Time` from every row, but quote-only book updates have a blank one; it now falls back to `Update Time` for those rows (like `query_ticks`), so every in-window row is timed.
-- **Event windows support `indices`, not just `individual_stock`.** `extract_event_window` / `extract_batch_event_windows` gained a `data_type` parameter (tick types only; the daily-aggregate `*_summary` types are rejected with a clear message).
-- **Every exported callable now has a docstring** (`extract_event_window`, the `ingest_*` helpers, the Parquet writers, `get_supported_data_types`, …) — `help()` is useful across the whole public API.
-- **Clearer messages:** `parse_period` errors list the bare single `YYYYMM`/`YYYYMMDD` forms, and `NoDataWarning` flags a possible `data_type`/folder mismatch or inverted time window instead of only blaming holidays.
+- **A bare `ticker_filter` code now works.** Passing a single code as a `str` (`ticker_filter="101"`) used to be iterated into characters (`{'1','0','1'}`) → a silent empty result, and an `int` (`ticker_filter=101`) raised `TypeError`. A bare `str`/`int` is now treated as a one-element filter on both `read_ticks` and `create_df`; a `set`/list/iterable is unchanged.
 
-Earlier highlights (0.10.0): compact date-only summary stores (~160× smaller), capturable `TruncationWarning`, normalized summary `*Time`. (0.9.0): numeric `stock_summary` measures, `individual_stock` time filter keeps the full order book. (0.8.0): capturable `NoDataWarning`, string `get_available_tickers` codes, UTF-8 Windows stdout.
+Earlier highlights (0.11.0): `extract_event_window` fixed on `individual_stock` (quote-only rows timed via `Update Time`) + a `data_type` param for index event windows; full public-API docstrings. (0.10.0): compact date-only summary stores (~160× smaller), capturable `TruncationWarning`. (0.9.0): numeric `stock_summary` measures, `individual_stock` time filter keeps the full order book.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
@@ -461,7 +458,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **304 tests**. Without a local NEEDS store, **256 pass** and **48 skip**; with a complete NEEDS store, **all 304 pass**. Stage-1
+The suite collects **311 tests**. Without a local NEEDS store, **263 pass** and **48 skip**; with a complete NEEDS store, **all 311 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by

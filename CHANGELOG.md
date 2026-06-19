@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-19
+
 ### Fixed
 - **A bare `ticker_filter` code no longer misbehaves.** Passing a single code as a `str` (e.g.
   `ticker_filter="101"`) was iterated character-by-character into `{'1', '0', '1'}` — matching nothing and
