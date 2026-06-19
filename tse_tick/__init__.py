@@ -18,6 +18,12 @@ __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
 __copyright__ = "Copyright 2025-2026"
 
+# Inclusive (min_year, max_year) of NEEDS calendar years the package targets. The
+# dataset spans 2016-2025 (the parser itself is not year-limited). Single source of
+# truth for get_supported_years() and the get_info() banner so they can't drift
+# (they previously disagreed: a dynamic (2016, current_year) vs a hardcoded banner).
+_SUPPORTED_YEARS = (2016, 2025)
+
 
 def _configure_windows_console() -> None:
     """Make ``print(df)`` safe on a legacy Windows console.
@@ -219,6 +225,7 @@ def __dir__():
 
 
 def get_version():
+    """Return the installed tse_tick version string (same as ``tse_tick.__version__``)."""
     return __version__
 
 
@@ -235,15 +242,20 @@ def get_supported_data_types():
 
 
 def get_supported_years():
-    from datetime import datetime as _dt
-    return (2016, _dt.now().year)
+    """Return the inclusive ``(min_year, max_year)`` of NEEDS years the package targets.
+
+    The NEEDS dataset spans 2016-2025; this returns that range (the parser itself
+    is not year-limited). It matches the "Year Range" shown by :func:`get_info`.
+    """
+    return _SUPPORTED_YEARS
 
 
 def get_info(path=None):
-    """Return (and print) a human-readable summary of the package.
+    """Return a human-readable summary of the package as a string.
 
-    Prints the banner for interactive use and also returns it as a string, so it
-    can be captured programmatically: ``info = tse_tick.get_info()``.
+    To display it, print the return value: ``print(tse_tick.get_info())``. The
+    function itself does **not** print, so wrapping it in ``print`` shows the
+    banner once, not twice (it previously printed *and* returned).
 
     ``get_info`` describes the **package**, not a dataset, so it takes no path. The
     optional ``path`` argument exists only to give a guiding error (instead of a
@@ -270,7 +282,7 @@ def get_info(path=None):
     - indices (TICIT110) - 10 fields (23 raw, 15 in 2016)
     - indices_summary (TICIS110) - 17 fields
 
-    Year Range: 2016-2025
+    Year Range: {_SUPPORTED_YEARS[0]}-{_SUPPORTED_YEARS[1]}
 
     Languages: English (en), Japanese (jp)
 
@@ -297,5 +309,4 @@ def get_info(path=None):
     For more information, visit:
     https://github.com/tse-tick/tse_tick
     """
-    print(info)
     return info

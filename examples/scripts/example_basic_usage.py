@@ -94,7 +94,7 @@ def main():
     # Example 5: Package information
     print("\n\n5. Package Information")
     print("-" * 70)
-    tse_tick.get_info()
+    print(tse_tick.get_info())
 
     print("\n" + "=" * 70)
     print("Example completed!")

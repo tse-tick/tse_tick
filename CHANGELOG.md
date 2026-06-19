@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+Fixes from an eleventh real-data run: a Major flat-folder discovery bug plus two consistency papercuts.
+Fixed consistency-first — each change removes a divergent code path rather than adding another.
+
+### Fixed
+- **A flat folder of a monthly-packaged type + a single-day date no longer returns a false-empty result.**
+  `read_ticks(r"…\TICIT110\202305", data_type="indices", date="20230508")` returned `(0, N)` with a
+  misleading `NoDataWarning` even though the day is inside that month's ZIP: the flat-folder branch matched
+  the date token as a filename *substring*, so a day (`20230508`) never matched a monthly file
+  (`…202305.zip`). The flat path now resolves dates via `discover_zips` — the same day→month logic the
+  structured-root path already used — so a single day maps onto its monthly file (then the existing
+  day-prune trims it). Affects `indices` / `indices_summary` / `stock_summary` (both eras); daily-packaged
+  `individual_stock` was unaffected and still matches by day.
+- **`get_info()` no longer prints and returns** (so `print(tse_tick.get_info())` showed the banner twice).
+  It now returns the string only — print it to display.
+
+### Changed
+- **`get_supported_years()` is consistent and documented.** It returned a dynamic `(2016, current_year)`
+  (e.g. `(2016, 2026)`) that disagreed with the `get_info()` banner (`2016-2025`) and had no docstring.
+  Both now derive from one `_SUPPORTED_YEARS = (2016, 2025)` constant; `get_supported_years()` and
+  `get_version()` are documented.
+
 ## [0.11.2] - 2026-06-19
 
 Fixes from a tenth real-data run: a Major projection-correctness bug on `indices`, plus API-surface and

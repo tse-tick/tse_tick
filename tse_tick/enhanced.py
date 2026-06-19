@@ -776,25 +776,6 @@ def _zip_year(zip_path: Path) -> int:
         ) from exc
 
 
-def _date_prefixes(date: Optional[str]) -> Optional[List[str]]:
-    """Expand ``date`` into filename date tokens, or ``None`` for 'all dates'."""
-    if date is None:
-        return None
-    token = str(date).strip()
-    if "-" not in token and token.isdigit() and len(token) in (4, 6, 8):
-        return [token]
-    parsed = parse_period(token)
-    gran = parsed["granularity"]
-    if gran == "year":
-        return [str(y) for y in parsed["years"]]
-    if gran == "month":
-        out: List[str] = []
-        for y, months in parsed["months_by_year"].items():
-            out.extend(f"{y}{m:02d}" for m in months)
-        return out
-    return list(parsed["dates"])
-
-
 def _requested_days(date: Optional[str]) -> Optional[set]:
     """The exact ``YYYYMMDD`` days a date request resolves to, or ``None`` when
     the request is month/year-level (no per-day pruning intended).
@@ -858,12 +839,18 @@ def _resolve_source_zips(source: str, data_type: str, date: Optional[str]) -> Li
             raise ValueError(f"read_ticks: source file must be a .zip, got {source!r}")
         return [p]
     if p.is_dir():
-        direct = sorted(p.glob("*.zip"), key=_zip_sort_key)
-        if direct:  # flat directory of ZIPs; narrow by date when given
-            prefixes = _date_prefixes(date)
-            if prefixes is None:
+        # With no date, a flat folder reads all its ZIPs (a structured root needs a
+        # date — the call below then raises a clear message).
+        if date is None:
+            direct = sorted(p.glob("*.zip"), key=_zip_sort_key)
+            if direct:
                 return direct
-            return [z for z in direct if any(pfx in z.name for pfx in prefixes)]
+        # With a date, resolve via discover_zips for BOTH a flat folder and a
+        # structured root: it maps a single *day* onto its containing *monthly*
+        # file and matches daily-packaged files by day. (The old flat-folder branch
+        # matched the date token as a filename substring, so a single-day date never
+        # matched a "…YYYYMM.zip" monthly file — a month-folder + single-day read
+        # came back falsely empty: run11 Finding 1.)
         return _discover_root_zips(str(p), data_type, date)
     raise ValueError(f"read_ticks: source must be a .zip file or a directory: {source!r}")
 
