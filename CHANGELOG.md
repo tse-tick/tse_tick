@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+Fixes from a tenth real-data run: a Major projection-correctness bug on `indices`, plus API-surface and
+message papercuts. (Otherwise clean — 0 blockers, and the 2016 legacy `…010` era path works.)
+
+### Fixed
+- **`read_ticks(data_type="indices", columns=<subset>)` no longer returns the whole month (~20× inflated)
+  when the projection omits `Data Date`.** The monthly day-prune runs at the end and needs `Data Date`,
+  but the column projection was applied per-part **before** it — so dropping `Data Date` silently skipped
+  the prune and returned every day in the file. Projection now happens **after** all filtering (code,
+  time, and the day-prune), so a `columns=` subset returns exactly the requested day's rows. (Latent for
+  all monthly types; `indices` surfaced it because the report combined a single-day + time + projection.)
+- **`get_info(path)` raises a guiding `ValueError` instead of a raw `TypeError`.** `get_info()` describes
+  the package and takes no dataset path; passing one now explains how to inspect data (`read_ticks` /
+  `get_available_*`) rather than failing with "takes 0 positional arguments".
+
+### Changed
+- **`tse_tick.ingest` (the submodule) no longer clutters `dir(tse_tick)`.** `dir()` now lists the curated
+  public API (via `__dir__`), so the bare `ingest` module no longer sits next to `ingest_period` etc. (a
+  novice trying `tse_tick.ingest(...)` got "'module' object is not callable"). The submodule is still
+  importable (`tse_tick.ingest.…`) and now carries a docstring pointing to the real entry points.
+- **An empty `ticker_filter=set()` is named in the no-data warning** (`… ticker_filter=[]`) instead of
+  being dropped — an accidentally-empty filter matches nothing, and omitting it wrongly implied no filter
+  was applied.
+- **Author metadata is consistent.** `get_info()` / `__author__` and the package metadata now both list
+  all three authors (Kazumi Li, Masataka Hayashi, Peter Romero); the maintainer email is unchanged.
+
 ## [0.11.1] - 2026-06-19
 
 ### Fixed

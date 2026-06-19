@@ -11,7 +11,7 @@ requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
-    {name = "Kazumi Li", email = "kaiwenli@keio.jp"},
+    {name = "Kazumi Li"},
     {name = "Masataka Hayashi"},
     {name = "Peter Romero"},
 ]

@@ -13,7 +13,7 @@ Developed at Keio University, Nakatsuma Seminar.
 import polars as pl
 
 __version__ = "0.11.1"
-__author__ = "Kazumi Li"
+__author__ = "Kazumi Li, Masataka Hayashi, Peter Romero"
 __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
 __copyright__ = "Copyright 2025-2026"
@@ -197,9 +197,25 @@ __all__ = [
     "mapping",
     "DataType",
     "Language",
+    "get_version",
+    "get_info",
+    "get_supported_data_types",
+    "get_supported_years",
     "__version__",
     "__author__",
 ]
+
+
+def __dir__():
+    """Curate ``dir(tse_tick)`` to the documented public API.
+
+    Without this, ``dir(tse_tick)`` also lists incidental submodules — most
+    confusingly ``ingest`` (the module) right next to ``ingest_period`` etc., so a
+    novice tries ``tse_tick.ingest(...)`` and hits "'module' object is not
+    callable" (run10 F2). Submodules remain importable (``tse_tick.ingest.…``);
+    they're just not advertised here.
+    """
+    return sorted(__all__)
 
 
 def get_version():
@@ -223,12 +239,24 @@ def get_supported_years():
     return (2016, _dt.now().year)
 
 
-def get_info():
+def get_info(path=None):
     """Return (and print) a human-readable summary of the package.
 
     Prints the banner for interactive use and also returns it as a string, so it
     can be captured programmatically: ``info = tse_tick.get_info()``.
+
+    ``get_info`` describes the **package**, not a dataset, so it takes no path. The
+    optional ``path`` argument exists only to give a guiding error (instead of a
+    raw ``TypeError``) if you pass one — to inspect data use :func:`read_ticks`
+    (raw ZIPs) or, on a built store, :func:`get_available_dates` /
+    :func:`get_available_tickers`.
     """
+    if path is not None:
+        raise ValueError(
+            "get_info() describes the tse_tick package and takes no dataset path; "
+            "to inspect data use read_ticks(...), or on a built store "
+            "get_available_dates() / get_available_tickers()."
+        )
     info = f"""
     tse_tick v{__version__}
     ========================
