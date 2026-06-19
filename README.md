@@ -366,15 +366,14 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.11.3
+## What's New in 0.11.4
 
-`tse_tick` 0.11.3 — `pip install -U tse-tick`. A consistency patch from an eleventh real-data run, fixed consistency-first (each change removes a divergent code path).
+`tse_tick` 0.11.4 — `pip install -U tse-tick`. An internal consolidation release: **no API or behavior change.**
 
-- **A flat folder of a monthly type + a single-day date no longer returns false-empty.** `read_ticks("…/TICIT110/202305", data_type="indices", date="20230508")` returned `(0, N)` because the flat-folder branch matched the date as a filename *substring* (a day never matched a `…202305.zip` monthly file). The flat path now resolves dates via `discover_zips` — the same day→month logic the structured root already used. Affects `indices` / `indices_summary` / `stock_summary`.
-- **`get_info()` returns the banner without printing it** (so `print(tse_tick.get_info())` shows it once), and **`get_supported_years()`** is documented and consistent with the banner (one `(2016, 2025)` source of truth).
-- **New: a standalone evaluation notebook** — `examples/notebooks/02_evaluation.ipynb` exercises every documented access pattern for all four data types with pass/fail checks; point it at your NEEDS root (`TSE_TICK_DATA_ROOT`) to validate a release.
+- **Data-type classification is single-sourced.** The "which types are X" checks (valid / summary / tick / index), previously duplicated across ~8 modules and prone to drift, now derive from one source in `tse_tick.constants` (tied to the `DataType` enum), with invariant tests guarding against future drift. Validation messages and public names are unchanged.
+- **Evaluation notebook** (`examples/notebooks/02_evaluation.ipynb`) now reloads a freshly-installed release without a manual kernel restart.
 
-Earlier highlights (0.11.2): `indices` column-subset projection no longer inflates rows. (0.11.1): a bare `ticker_filter` code is treated as a single code. (0.11.0): `extract_event_window` fixed on `individual_stock` + a `data_type` param; full public-API docstrings.
+Earlier highlights (0.11.3): flat-folder day→month discovery fix; `get_info` / `get_supported_years` consistency; the evaluation notebook. (0.11.2): `indices` column-subset projection no longer inflates rows. (0.11.1): a bare `ticker_filter` code is treated as a single code. (0.11.0): `extract_event_window` fixed on `individual_stock`.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
@@ -460,7 +459,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **331 tests**. Without a local NEEDS store, **283 pass** and **48 skip**; with a complete NEEDS store, **all 331 pass**. Stage-1
+The suite collects **336 tests**. Without a local NEEDS store, **288 pass** and **48 skip**; with a complete NEEDS store, **all 336 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by

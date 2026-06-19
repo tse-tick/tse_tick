@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-06-19
+
+Internal consolidation (**no API or behavior change**) — the durable follow-up to the run9/10/11 pattern
+of fixes drifting into new inconsistencies.
+
+### Changed
+- **Data-type classification is now single-sourced.** The "which types are X" checks were duplicated as
+  literal tuples/sets in ~20 places across 8 modules (`valid_types`, plus the summary / tick / index
+  classifications), free to drift — the root cause behind several past inconsistencies. They now derive
+  from one source in `tse_tick.constants` (`DATA_TYPES` / `VALID_DATA_TYPES`, `SUMMARY_TYPES`,
+  `TICK_TYPES`, `INDEX_TYPES`, and a `validate_data_type()` helper, all tied to the `DataType` enum).
+  Validation messages are byte-identical and no public name changed. A new invariant test suite guards
+  against the drift returning (including that `get_info()`'s field counts stay derivable from the schemas).
+
+### Fixed
+- **The evaluation notebook (`examples/notebooks/02_evaluation.ipynb`) reloads a freshly-installed release
+  without a kernel restart** — its install cell now purges `tse_tick` from `sys.modules` and re-imports
+  after `pip install -U`, and SETUP errors if the imported version ≠ the installed one.
+
 ## [0.11.3] - 2026-06-19
 
 Fixes from an eleventh real-data run: a Major flat-folder discovery bug plus two consistency papercuts.
