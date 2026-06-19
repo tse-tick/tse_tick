@@ -5,6 +5,7 @@ import logging
 import sys
 
 from tse_tick.ingest import ingest_directory, ingest_year_from_root, ingest_period, ingest_event_windows_period
+from tse_tick.constants import DATA_TYPES, VALID_DATA_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +56,8 @@ def _parse_tickers(tickers_str: str) -> set[str]:
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
-    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
-    if args.data_type not in valid_types:
-        print(f"Error: --data-type must be one of {sorted(valid_types)}", file=sys.stderr)
+    if args.data_type not in VALID_DATA_TYPES:
+        print(f"Error: --data-type must be one of {sorted(VALID_DATA_TYPES)}", file=sys.stderr)
         sys.exit(1)
 
     input_root = args.input_root
@@ -152,9 +152,8 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 def cmd_export(args: argparse.Namespace) -> None:
     import tse_tick
 
-    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
-    if args.data_type not in valid_types:
-        print(f"Error: --data-type must be one of {sorted(valid_types)}", file=sys.stderr)
+    if args.data_type not in VALID_DATA_TYPES:
+        print(f"Error: --data-type must be one of {sorted(VALID_DATA_TYPES)}", file=sys.stderr)
         sys.exit(1)
 
     ticker_filter = _parse_tickers(args.tickers) if args.tickers else None
@@ -186,7 +185,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_parser.add_argument(
         "--data-type",
         required=True,
-        choices=["individual_stock", "stock_summary", "indices", "indices_summary"],
+        choices=list(DATA_TYPES),
         help="Type of NEEDS data to ingest",
     )
     ingest_parser.add_argument(
@@ -277,7 +276,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument(
         "--data-type", required=True,
-        choices=["individual_stock", "stock_summary", "indices", "indices_summary"],
+        choices=list(DATA_TYPES),
         help="Type of NEEDS data to read",
     )
     export_parser.add_argument(

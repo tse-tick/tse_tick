@@ -21,6 +21,7 @@ import polars as pl
 from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
+from tse_tick.constants import validate_data_type
 
 logger = logging.getLogger(__name__)
 
@@ -184,11 +185,7 @@ def ingest_year(
         One result dict per ZIP (see :func:`ingest_single_zip`); a failed ZIP
         contributes ``{"zip_path": ..., "error": ...}`` instead.
     """
-    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
-    if data_type not in valid_types:
-        raise ValueError(
-            f"Unknown data_type {data_type!r}. Must be one of {sorted(valid_types)}"
-        )
+    validate_data_type(data_type)
 
     in_path = Path(input_dir)
     if not in_path.exists():
@@ -302,11 +299,7 @@ def ingest_year_from_root(
         One result dict per ingested date (``{"date", "parts", "rows",
         "output_path"}``).
     """
-    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
-    if data_type not in valid_types:
-        raise ValueError(
-            f"Unknown data_type {data_type!r}. Must be one of {sorted(valid_types)}"
-        )
+    validate_data_type(data_type)
 
     zip_paths = discover_zips(input_root, data_type, [year])
     return _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter)
@@ -345,11 +338,7 @@ def ingest_period(
         One result dict per processed ZIP (see :func:`ingest_single_zip`); a
         failed ZIP contributes ``{"zip_path": ..., "error": ...}`` instead.
     """
-    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
-    if data_type not in valid_types:
-        raise ValueError(
-            f"Unknown data_type {data_type!r}. Must be one of {sorted(valid_types)}"
-        )
+    validate_data_type(data_type)
 
     parsed = parse_period(period)
     granularity = parsed["granularity"]

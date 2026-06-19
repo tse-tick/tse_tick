@@ -6,6 +6,8 @@ from typing import Optional, Union
 import polars as pl
 import duckdb
 
+from .constants import SUMMARY_TYPES, validate_data_type
+
 # Column names are interpolated as double-quoted identifiers (f'"{c}"'), so the
 # only injection risk is a character that closes the quote (") or escapes it
 # (\), plus statement terminators / control chars. NEEDS column names legitimately
@@ -110,11 +112,7 @@ def query_ticks(
         ...                  ticker=7203, date="20240201",
         ...                  start_time="09:00:00", end_time="11:30:00")
     """
-    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
-    if data_type not in valid_types:
-        raise ValueError(
-            f"Unknown data_type {data_type!r}. Must be one of {sorted(valid_types)}"
-        )
+    validate_data_type(data_type)
 
     type_dir = _resolve_type_dir(data_dir, data_type)
 
@@ -131,7 +129,7 @@ def query_ticks(
     # matching per-ticker files directly. This is also robust to the in-file
     # code column being categorically decoded (e.g. Index Code "101" -> "Nikkei
     # 225"), which would defeat a value-based filter.
-    summary = data_type in ("stock_summary", "indices_summary")
+    summary = data_type in SUMMARY_TYPES
     code_condition: Optional[str] = None
     if ticker is not None:
         ticker_token = _normalize_ticker(ticker)
@@ -315,7 +313,7 @@ def get_available_tickers(
         # codes sort lexically, after all the numeric ones.
         return (0, int(code)) if code.isdigit() else (1, code)
 
-    if data_type in ("stock_summary", "indices_summary"):
+    if data_type in SUMMARY_TYPES:
         # Summary stores partition by date only, so codes live in a column rather
         # than per-ticker filenames; read it (first 4 chars, mirroring the
         # partition value the tick types encode in the filename).

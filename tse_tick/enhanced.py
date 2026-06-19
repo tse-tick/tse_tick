@@ -14,6 +14,7 @@ from typing import Optional, Literal, Tuple, List, Dict, Union
 import polars as pl
 
 from .core import clean_data, parse_line, _tick_datetime_expr
+from .constants import INDEX_TYPES, SUMMARY_TYPES, validate_data_type
 from .schemas import (
     get_schema_individual_stock_95,
     get_schema_summary_83,
@@ -292,7 +293,7 @@ def discover_zips(
     # Index types changed record code across eras: 2017+ uses …110, 2016 uses
     # …010 (HTICIT010 / HTICIS010). Search both so 2016 index data is reachable.
     prefixes = [prefix]
-    if data_type in ("indices", "indices_summary"):
+    if data_type in INDEX_TYPES:
         prefixes.append(prefix[:-3] + "010")
 
     if months is None:
@@ -335,7 +336,7 @@ def _raw_width(kind: str, year: int) -> int:
     """Expected raw (pre-clean) column count for a NEEDS data type/era."""
     if kind == "indices":
         return 15 if year == 2016 else 23
-    if kind in ("stock_summary", "indices_summary"):
+    if kind in SUMMARY_TYPES:
         return 83
     return 95  # individual_stock
 
@@ -495,7 +496,7 @@ def set_columns(df: pl.DataFrame, kind: str, language: Literal["en", "jp"] = "en
             col_names_en = get_schema_individual_stock_95()
         else:
             raise ValueError(f"Unexpected number of columns for {kind}: {len(df.columns)}")
-    elif (kind == "stock_summary") or (kind == "indices_summary"):
+    elif kind in SUMMARY_TYPES:
         if len(df.columns) == 83:
             col_names_en = get_schema_summary_83()
             if kind == "indices_summary":
@@ -1033,13 +1034,9 @@ def read_ticks(
         ...                 date="20240201", start_time="09:00:00",
         ...                 end_time="11:30:00")
     """
-    valid_types = {"individual_stock", "stock_summary", "indices", "indices_summary"}
-    if data_type not in valid_types:
-        raise ValueError(
-            f"Unknown data_type {data_type!r}. Must be one of {sorted(valid_types)}"
-        )
+    validate_data_type(data_type)
 
-    is_summary = data_type in ("stock_summary", "indices_summary")
+    is_summary = data_type in SUMMARY_TYPES
     if (start_time is not None or end_time is not None) and is_summary:
         raise ValueError(
             f"read_ticks: start_time/end_time are not supported for {data_type!r} "
