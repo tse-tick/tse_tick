@@ -366,13 +366,14 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.11.1
+## What's New in 0.11.2
 
-`tse_tick` 0.11.1 — `pip install -U tse-tick`. A small usability patch from a ninth real-data run (which found **0 blockers / 0 majors** — 0.11.0 was deemed usable as-is).
+`tse_tick` 0.11.2 — `pip install -U tse-tick`. A correctness patch from a tenth real-data run.
 
-- **A bare `ticker_filter` code now works.** Passing a single code as a `str` (`ticker_filter="101"`) used to be iterated into characters (`{'1','0','1'}`) → a silent empty result, and an `int` (`ticker_filter=101`) raised `TypeError`. A bare `str`/`int` is now treated as a one-element filter on both `read_ticks` and `create_df`; a `set`/list/iterable is unchanged.
+- **`read_ticks(data_type="indices", columns=<subset>)` no longer returns the whole month.** When a column projection dropped `Data Date`, the monthly day-prune silently skipped and returned every day in the file (~20× rows, value-confusing). Projection now runs **after** all filtering, so a `columns=` subset returns exactly the requested day. (Latent for all monthly types; `indices` surfaced it.)
+- **Papercuts:** `get_info(path)` gives a guiding error instead of a raw `TypeError`; the `ingest` submodule is hidden from `dir(tse_tick)` so it no longer looks callable next to `ingest_period` (still importable); an empty `ticker_filter=set()` is named in the no-data warning; author metadata lists the full team consistently.
 
-Earlier highlights (0.11.0): `extract_event_window` fixed on `individual_stock` (quote-only rows timed via `Update Time`) + a `data_type` param for index event windows; full public-API docstrings. (0.10.0): compact date-only summary stores (~160× smaller), capturable `TruncationWarning`. (0.9.0): numeric `stock_summary` measures, `individual_stock` time filter keeps the full order book.
+Earlier highlights (0.11.1): a bare `ticker_filter` code is treated as a single code. (0.11.0): `extract_event_window` fixed on `individual_stock` + a `data_type` param for index event windows; full public-API docstrings. (0.10.0): compact date-only summary stores (~160× smaller), capturable `TruncationWarning`.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
@@ -458,7 +459,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **311 tests**. Without a local NEEDS store, **263 pass** and **48 skip**; with a complete NEEDS store, **all 311 pass**. Stage-1
+The suite collects **323 tests**. Without a local NEEDS store, **275 pass** and **48 skip**; with a complete NEEDS store, **all 323 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
