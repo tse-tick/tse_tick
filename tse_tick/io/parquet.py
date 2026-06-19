@@ -8,6 +8,8 @@ import polars as pl
 
 import pyarrow.dataset as ds
 
+from tse_tick.constants import INDEX_TYPES, validate_data_type
+
 # Tick types partition by (date, code): each ticker-day holds thousands of ticks,
 # so a per-ticker file is large and prunes well. The two *daily-aggregate* summary
 # types hold ~1 row per (date, code), so a per-ticker file there is one tiny row —
@@ -21,9 +23,7 @@ _DEFAULT_PARTITION_COLS: dict[str, list[str]] = {
     "indices_summary": ["Data Date"],
 }
 
-_VALID_DATA_TYPES = set(_DEFAULT_PARTITION_COLS.keys())
-
-_INDEX_DATA_TYPES = {"indices", "indices_summary"}
+_INDEX_DATA_TYPES = INDEX_TYPES
 _UNKNOWN_CODE_RE = re.compile(r"^Unknown \((.+)\)$")
 
 
@@ -113,10 +113,7 @@ def write_partitioned_parquet(
     Returns:
         The absolute path of the ``<output_dir>/<data_type>`` directory.
     """
-    if data_type not in _VALID_DATA_TYPES:
-        raise ValueError(
-            f"Unknown data_type {data_type!r}. Must be one of {sorted(_VALID_DATA_TYPES)}"
-        )
+    validate_data_type(data_type)
 
     pcols = partition_cols if partition_cols is not None else _DEFAULT_PARTITION_COLS[data_type]
     for col in pcols:
@@ -201,7 +198,7 @@ def read_parquet_partition(
     # the comparison against the "YYYYMMDD" argument has a matching kernel. The
     # ticker is encoded in the filename (ticker=NNNN.parquet), not a directory,
     # so it is not a partition column — filter the in-file code column instead.
-    code_col = "Index Code" if data_type in ("indices", "indices_summary") else "Stock Code"
+    code_col = "Index Code" if data_type in _INDEX_DATA_TYPES else "Stock Code"
 
     expr = None
     if date is not None:

@@ -8,6 +8,7 @@ from typing import Optional
 import polars as pl
 
 from .core import _tick_datetime
+from .constants import TICK_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -153,11 +154,10 @@ def extract_event_window(
     """
     from tse_tick.query import query_ticks
 
-    _TICK_TYPES = {"individual_stock", "indices"}
-    if data_type not in _TICK_TYPES:
+    if data_type not in TICK_TYPES:
         raise ValueError(
             f"extract_event_window supports only tick types with an Execution Time "
-            f"({sorted(_TICK_TYPES)}); got {data_type!r}. The *_summary types are "
+            f"({sorted(TICK_TYPES)}); got {data_type!r}. The *_summary types are "
             f"daily aggregates with no intraday timestamp."
         )
 

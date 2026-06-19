@@ -1,5 +1,7 @@
 import polars as pl
 
+from .constants import SUMMARY_TYPES, TICK_TYPES
+
 
 def _tick_datetime_expr(
     date_col: str = "Data Date",
@@ -140,7 +142,7 @@ def clean_data(df, kind="individual_stock", language="en"):
             pl.col("Buy Quote 1 Best").cast(pl.Float64),
             pl.col("Buy Quote Vol 1").cast(pl.Float64),
         )
-    elif (kind == "stock_summary") or (kind == "indices_summary"):
+    elif kind in SUMMARY_TYPES:
         int_list = []
         float_list = []
         time_list = [17, 22, 42, 47]
@@ -218,7 +220,7 @@ def clean_data(df, kind="individual_stock", language="en"):
             _exec_time_6char().alias("Execution Time")  # 2016 HHMM -> HHMMSS
         )
 
-    elif (kind == "stock_summary") or (kind == "indices_summary"):
+    elif kind in SUMMARY_TYPES:
         # Normalize every time-of-day column to a fixed-width 6-char HHMMSS across
         # eras: 2016 (…010) emits 4-char HHMM, 2017+ (…110) emits 12-char
         # HHMMSSffffff. (Was: slice to 12, leaving 2016 at 4 chars and 2017+ at 12
@@ -241,9 +243,9 @@ def clean_data(df, kind="individual_stock", language="en"):
 
     schemas_categorical = get_schemas_categorical()
 
-    if (kind == "individual_stock") or (kind == "indices"):
+    if kind in TICK_TYPES:
         col_names = df_cleaned.columns
-    elif (kind == "stock_summary") or (kind == "indices_summary"):
+    elif kind in SUMMARY_TYPES:
         col_names = df_cleaned.columns[:5]
     else:
         col_names = []
