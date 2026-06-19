@@ -207,6 +207,13 @@ def get_version():
 
 
 def get_supported_data_types():
+    """Return the four NEEDS data-type names tse_tick supports.
+
+    ``["individual_stock", "stock_summary", "indices", "indices_summary"]`` —
+    the valid ``data_type`` values for :func:`read_ticks`, :func:`query_ticks`,
+    the ``ingest_*`` functions, etc. Derived from the :class:`DataType` enum so it
+    can never drift from it.
+    """
     # Derive from the DataType enum so this list can never drift from it.
     return DataType.values()
 

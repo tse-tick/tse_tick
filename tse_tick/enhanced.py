@@ -93,6 +93,15 @@ def _expand_month_range(from_str: str, to_str: str) -> List[Tuple[int, int]]:
     return months
 
 
+# Single source of truth for the accepted period forms, so every parse_period
+# error message lists the same complete set (incl. the bare YYYYMM / YYYYMMDD
+# forms the code accepts and read_ticks documents).
+_PERIOD_FORMATS_HELP = (
+    "Expected YYYY, a single YYYYMM or YYYYMMDD, or a "
+    "YYYYMM-YYYYMM / YYYYMMDD-YYYYMMDD range"
+)
+
+
 def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, List[int]], List[str]]]:
     """Parse a period string into structured parameters.
 
@@ -118,7 +127,7 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
     if "-" in period_str:
         parts = period_str.split("-")
         if len(parts) != 2:
-            raise ValueError(f"Invalid period format: {period_str!r}. Expected YYYY, YYYYMM-YYYYMM, or YYYYMMDD-YYYYMMDD")
+            raise ValueError(f"Invalid period format: {period_str!r}. {_PERIOD_FORMATS_HELP}")
         from_part, to_part = parts[0].strip(), parts[1].strip()
 
         if len(from_part) == 8 and len(to_part) == 8 and from_part.isdigit() and to_part.isdigit():
@@ -135,10 +144,7 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
             return {"granularity": "month", "years": years, "months_by_year": dict(months_by_year)}
 
         else:
-            raise ValueError(
-                f"Invalid period format: {period_str!r}. "
-                f"Expected YYYY, YYYYMM-YYYYMM (6-digit months), or YYYYMMDD-YYYYMMDD (8-digit dates)"
-            )
+            raise ValueError(f"Invalid period format: {period_str!r}. {_PERIOD_FORMATS_HELP}")
     else:
         if len(period_str) == 4 and period_str.isdigit():
             return {"granularity": "year", "years": [int(period_str)]}
@@ -148,11 +154,7 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
         elif len(period_str) == 8 and period_str.isdigit():
             return {"granularity": "date", "years": [int(period_str[:4])], "dates": [period_str]}
         else:
-            raise ValueError(
-                f"Invalid period: {period_str!r}. "
-                f"Expected YYYY, a single YYYYMM or YYYYMMDD, or a "
-                f"YYYYMM-YYYYMM / YYYYMMDD-YYYYMMDD range"
-            )
+            raise ValueError(f"Invalid period: {period_str!r}. {_PERIOD_FORMATS_HELP}")
 
 
 def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
@@ -1043,9 +1045,10 @@ def read_ticks(
     zips = _resolve_source_zips(source, data_type, date)
     if not zips:
         _warn_no_data(
-            f"read_ticks: no ZIP files found for the requested date(s) in {source!r}. "
-            "Verify these are trading days — exchange holidays (e.g. Golden Week "
-            "or year-end) have no data."
+            f"read_ticks: no ZIP files found for data_type={data_type!r} on the "
+            f"requested date(s) in {source!r}. Likely causes: a non-trading day "
+            "(e.g. an exchange holiday), or data_type not matching the files in "
+            "this folder (e.g. pointing 'individual_stock' at an index folder)."
         )
         return _empty_typed_frame(data_type, language, _year_hint_from_date(date))
 
@@ -1120,8 +1123,9 @@ def read_ticks(
         _warn_no_data(
             f"read_ticks: 0 rows for the requested filters "
             f"(data_type={data_type!r}, date={date!r}{ft}). Possible causes: a "
-            "non-trading day (e.g. a holiday), a ticker/index code not present, "
-            "or time/column filters that exclude every row."
+            "non-trading day (e.g. a holiday), a ticker/index code not present, or "
+            "time/column filters that exclude every row (e.g. start_time after "
+            "end_time)."
         )
 
     if rows is not None and result.height > rows:

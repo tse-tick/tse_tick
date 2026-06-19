@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+Fixes from an eighth real-data run: the event-window analytics path crashed on the primary data type,
+plus error-message and docstring papercuts. Read / ingest / query paths were already correct.
+
+### Fixed
+- **`extract_event_window` no longer crashes on `individual_stock`.** It computed `seconds_from_event` by
+  parsing `Execution Time` from every row, but quote-only book updates have a blank `Execution Time` (the
+  rows `query_ticks` keeps via its `Update Time` fallback) — so any real window raised
+  `ValueError: time data '… ::' does not match format …`, and the batch variant silently returned `None`
+  for every event. It now uses the same `Execution Time` → `Update Time` effective-time fallback, so every
+  in-window row is timed (and the computation is vectorized in Polars).
+- **`extract_event_window` supports `indices`, not just `individual_stock`.** It gained a `data_type`
+  parameter (a tick type — `individual_stock` or `indices`; the daily-aggregate `*_summary` types are
+  rejected with a clear message) instead of being hardcoded to `individual_stock`.
+- **`parse_period` error messages list the complete set of accepted forms** — including the bare single
+  `YYYYMM` / `YYYYMMDD` the code accepts and `read_ticks` documents (some messages previously omitted
+  them, contradicting the accepted inputs for a natural mistake like `date="2023-05-08"`).
+
+### Changed
+- **Docstrings added across the public API** — `extract_event_window`, `extract_batch_event_windows`,
+  `ingest_year`, `ingest_year_from_root`, `get_supported_data_types`, `write_partitioned_parquet`,
+  `write_event_window_parquet`, and `ingest_event_windows_period` (every exported callable now has one).
+  The event-window docs note that `before` / `after` apply only with `event_time` (omit it for the full
+  day).
+- **`NoDataWarning` hints are less holiday-centric** — the no-ZIPs message now also flags a possible
+  `data_type` / folder mismatch, and the empty-result message notes an inverted `start_time` / `end_time`.
+
 ## [0.10.0] - 2026-06-19
 
 Fixes from a seventh real-data run: a Major store-build scalability defect for the summary types, plus

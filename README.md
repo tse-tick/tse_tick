@@ -429,6 +429,11 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
   Re-ingest summary stores built before this change.
 - **Ingestion entry points** are the functions `ingest_period`, `ingest_single_zip`,
   `ingest_year_from_root`, … — `tse_tick.ingest` itself is the submodule.
+- **Event windows.** `extract_event_window(store, ticker, event_date, event_time, before, after,
+  data_type=...)` returns the ticks around one event from a store, adding a `seconds_from_event` column
+  (quote-only rows are timed via `Update Time`, like `query_ticks`). It works for the tick types
+  (`individual_stock`, `indices`); `before`/`after` apply only when `event_time` is given (omit it for the
+  whole day). `extract_batch_event_windows` runs many events and returns `None` for any that fail.
 
 ---
 
