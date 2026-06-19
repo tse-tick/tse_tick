@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-19
+
 Fixes from an eighth real-data run: the event-window analytics path crashed on the primary data type,
 plus error-message and docstring papercuts. Read / ingest / query paths were already correct.
 
