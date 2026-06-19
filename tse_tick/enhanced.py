@@ -1095,14 +1095,6 @@ def read_ticks(
             if start_time is not None or end_time is not None:
                 df = _filter_time_window(df, start_time, end_time)
 
-            if columns:
-                missing = [c for c in columns if c not in df.columns]
-                if missing:
-                    raise ValueError(
-                        f"read_ticks: requested columns not present: {missing}"
-                    )
-                df = df.select(columns)
-
             # Capture the typed schema from the first part so a no-match read
             # returns an empty-but-typed frame, not a schemaless (0, 0).
             if schema_frame is None:
@@ -1134,11 +1126,24 @@ def read_ticks(
             dd = pl.col(date_col).cast(pl.Date).cast(pl.String).str.replace_all("-", "")
             result = result.filter(dd.is_in(list(days)))
 
+    # Project AFTER all filtering — code, time, AND the monthly day-prune above.
+    # Projecting per-part earlier let a `columns` subset that drops 'Data Date'
+    # skip the day-prune and silently return the whole month (the run10 indices
+    # ~20x inflation bug); doing it here keeps every filter on the full schema.
+    if columns:
+        missing = [c for c in columns if c not in result.columns]
+        if missing:
+            raise ValueError(f"read_ticks: requested columns not present: {missing}")
+        result = result.select(columns)
+
     # A zero-row result is the same "no data" condition for every data type —
     # signal it the same capturable way (the ZIPs existed but a holiday/unknown
     # code/over-tight filter left nothing), not silently as before.
     if result.height == 0:
-        ft = f", ticker_filter={sorted(norm_filter)}" if norm_filter else ""
+        # `is not None` (not truthiness) so an *empty* filter is still named — an
+        # accidentally-empty set matches nothing, and omitting it from the message
+        # wrongly implied no filter was applied (run10 F4).
+        ft = f", ticker_filter={sorted(norm_filter)}" if norm_filter is not None else ""
         _warn_no_data(
             f"read_ticks: 0 rows for the requested filters "
             f"(data_type={data_type!r}, date={date!r}{ft}). Possible causes: a "

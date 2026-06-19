@@ -1,4 +1,13 @@
 # tse_tick/ingest.py
+"""Ingest raw NEEDS ZIPs into a Hive-partitioned Parquet store.
+
+This is the ``tse_tick.ingest`` *submodule*, not a callable. The entry points are
+the functions re-exported at the top level: :func:`ingest_period` (a structured
+``{year}/{yearmonth}/`` root), :func:`ingest_year_from_root`, :func:`ingest_year`,
+:func:`ingest_directory` (a flat folder of ZIPs), :func:`ingest_single_zip`, and
+:func:`ingest_event_windows_period` (the event-window store) — e.g. call
+``tse_tick.ingest_period(...)``, not ``tse_tick.ingest(...)``.
+"""
 import gc
 import glob as _glob
 import logging
