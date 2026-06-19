@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.11.1 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.11.2 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
@@ -21,7 +21,7 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.11.1)
+├── CHANGELOG.md                     # version history (current: 0.11.2)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
@@ -49,7 +49,7 @@ tse_tick/                          # Project root
 │   │   └── translations.json        # translate() mapping tables (override: TSE_TICK_TRANSLATIONS)
 │   └── py.typed                     # PEP 561 marker
 │
-├── tests/                           # Test suite (pytest, 311 tests; 263 pass / 48 skip w/o data, 311/0 with a NEEDS store)
+├── tests/                           # Test suite (pytest, 323 tests; 275 pass / 48 skip w/o data, 323/0 with a NEEDS store)
 │   ├── __init__.py
 │   ├── conftest.py                  # Session-scoped synthetic Parquet fixtures (stock_store, indices_store, events_df)
 │   ├── synthetic_data.py            # Generates obviously-fake NEEDS-format ZIPs feeding those fixtures
@@ -195,6 +195,15 @@ tse_tick/                          # Project root
 | Discovery fast path | `discover_zips` adds a `{yearmonth}/`-directly-under-root fast path (e.g. `…/TICST120`) before the recursive fallback; docstring corrected to match |
 | Docs | A single numbered ZIP holds only part of a day (filtering a lone part → 0 rows); pass the directory/root |
 | Tests | Suite **243** (`+6`: no-ZIPs empty+warn, `display`/Windows print, discovery fast-path) |
+
+### v0.11.2 — indices columns= projection day-prune fix + API/message papercuts (2026-06-19)
+
+| Change | Detail |
+|--------|--------|
+| Indices projection | `read_ticks` applies a `columns=` projection **after** all filtering (code, time, monthly day-prune) instead of per-part before it — a subset that dropped `Data Date` was skipping the day-prune and returning the whole month (~20× rows). Latent for all monthly types; `indices` surfaced it |
+| API surface | `tse_tick.ingest` (submodule) hidden from `dir()` via `__dir__` (still importable, now documented); `get_info(path)` raises a guiding `ValueError` not a raw `TypeError` |
+| Messages/metadata | empty `ticker_filter=set()` named in the no-data warning; `__author__` + package metadata list all three authors consistently |
+| Tests | Suite **323** (`+12`: `test_run11_fixes`) |
 
 ### v0.11.1 — ticker_filter footgun guard (2026-06-19)
 
@@ -469,7 +478,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Tool | Config |
 |------|--------|
-| **Build** | setuptools>=77 + wheel; static `version = "0.11.1"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
+| **Build** | setuptools>=77 + wheel; static `version = "0.11.2"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
 | **CLI** | `tse-tick = "tse_tick.cli:main"` |
 | **Extras** | `query` (duckdb), `test` (pandas/pytest/pytest-cov), `dev` (test + black/flake8/mypy/jupyter), `docs` |
 | **Black** | line-length=100, target Python 3.9–3.12 |
@@ -502,8 +511,8 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**311 tests.** Without proprietary data (the CI profile): **263 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 311 pass**.
+**323 tests.** Without proprietary data (the CI profile): **275 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 323 pass**.
 
 | Area | Coverage |
 |------|----------|

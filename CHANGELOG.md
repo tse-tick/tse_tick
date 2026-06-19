@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-19
+
 Fixes from a tenth real-data run: a Major projection-correctness bug on `indices`, plus API-surface and
 message papercuts. (Otherwise clean — 0 blockers, and the 2016 legacy `…010` era path works.)
 
