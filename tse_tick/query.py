@@ -1,5 +1,6 @@
 # tse_tick/query.py
 import re
+import warnings
 from pathlib import Path
 from typing import Optional, Union
 
@@ -7,6 +8,7 @@ import polars as pl
 import duckdb
 
 from .constants import SUMMARY_TYPES, validate_data_type
+from .enhanced import TruncationWarning
 
 # Column names are interpolated as double-quoted identifiers (f'"{c}"'), so the
 # only injection risk is a character that closes the quote (") or escapes it
@@ -99,6 +101,9 @@ def query_ticks(
         end_time: Inclusive upper bound on time-of-day (``"HH:MM:SS"``).
         columns: Column projection; ``None`` selects all columns.
         limit: Maximum rows returned (default 10,000,000); ``None`` for no cap.
+            When the result fills the cap exactly a :class:`TruncationWarning` is
+            emitted (capturable via ``warnings``) — rows were likely dropped, so
+            pass a larger ``limit=`` or ``limit=None``.
 
     Returns:
         A Polars DataFrame ordered by ``Data Date`` then ``Execution Time``
@@ -220,6 +225,18 @@ def query_ticks(
         df = con.execute(sql).pl()
     finally:
         con.close()
+
+    # A result whose length is exactly the cap was (almost certainly) truncated —
+    # surface it via the same capturable TruncationWarning read_ticks emits on its
+    # row cap, so callers learn rows were dropped instead of silently receiving a
+    # partial frame. Build a store-backed query with a larger limit= (or None).
+    if limit is not None and df.height == limit:
+        warnings.warn(
+            f"Result truncated at {limit} rows. Pass a larger limit= or use "
+            f"limit=None for all rows.",
+            TruncationWarning,
+            stacklevel=2,
+        )
 
     return df
 

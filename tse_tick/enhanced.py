@@ -57,6 +57,21 @@ class TruncationWarning(UserWarning):
 _MAX_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
 _MAX_ZIP_ENTRIES = 5
 
+# Cumulative decompressed-size ceiling for the one-shot (create_df) path. The
+# per-entry _MAX_DECOMPRESSED_BYTES guard above is checked per ZIP *member*, so it
+# can't see memory adding up across the many numbered parts of one trading day (a
+# normal individual_stock day is ~9 parts / tens of millions of rows). When the
+# running total of decompressed bytes crosses this ceiling we raise a catchable
+# MemoryError *before* the load rather than letting Polars panic uncatchably
+# (PanicException subclasses BaseException). Default 5 GB; override by setting
+# tse_tick.enhanced._MAX_ONESHOT_DECOMPRESSED_BYTES.
+_MAX_ONESHOT_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
+
+# Shared tail for the one-shot OOM guidance: the two-stage escape hatch.
+_TWO_STAGE_GUIDANCE = (
+    "Use the two-stage path instead: ingest_single_zip() then query_ticks()."
+)
+
 _CODE_TYPE_MAP = {
     "individual_stock": "HTICST120",
     "stock_summary": "HTICSS110",
@@ -158,49 +173,63 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
             raise ValueError(f"Invalid period: {period_str!r}. {_PERIOD_FORMATS_HELP}")
 
 
-def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
-    path = Path(folder_path)
-
-    year = None
-    for part in path.parts:
+def _detect_year_from_path(folder_path: str) -> Optional[int]:
+    """The first ``20xx`` year token found in the path parts, or ``None``."""
+    for part in Path(folder_path).parts:
         match = re.search(r"(20\d{2})", part)
         if match:
-            year = int(match.group(1))
-            break
+            return int(match.group(1))
+    return None
 
-    if year is None:
-        raise ValueError(f"Could not detect year from path: {folder_path}")
 
+def _detect_data_type_from_path(folder_path: str) -> str:
+    """Detect the NEEDS ``data_type`` from path keywords, or a sample filename.
+
+    Raises ``ValueError`` (with the same messages :func:`detect_data_type_and_year`
+    has always used) when the type can't be determined.
+    """
+    path = Path(folder_path)
     path_str = str(path).lower()
 
     if any(kw in path_str for kw in ["individual_stock", "ticst", "stock_tick"]):
-        data_type = "individual_stock"
+        return "individual_stock"
     elif any(kw in path_str for kw in ["stock_summary", "ticss", "stock_daily"]):
-        data_type = "stock_summary"
+        return "stock_summary"
     elif any(kw in path_str for kw in ["indices_tick", "ticit", "index_tick"]) and "summary" not in path_str:
-        data_type = "indices"
+        return "indices"
     elif any(kw in path_str for kw in ["indices_summary", "ticis", "index_daily", "index_summary"]):
-        data_type = "indices_summary"
-    else:
-        if path.exists() and path.is_dir():
-            files = list(path.glob("*.zip")) + list(path.glob("*.csv"))
-            if files:
-                sample_file = files[0].name.upper()
-                if "TICST" in sample_file:
-                    data_type = "individual_stock"
-                elif "TICSS" in sample_file:
-                    data_type = "stock_summary"
-                elif "TICIT" in sample_file:
-                    data_type = "indices"
-                elif "TICIS" in sample_file:
-                    data_type = "indices_summary"
-                else:
-                    raise ValueError(f"Could not detect data type from files in: {folder_path}")
-            else:
-                raise ValueError(f"No ZIP or CSV files found in: {folder_path}")
-        else:
-            raise ValueError(f"Could not detect data type from path: {folder_path}")
+        return "indices_summary"
 
+    if path.exists() and path.is_dir():
+        files = list(path.glob("*.zip")) + list(path.glob("*.csv"))
+        if files:
+            sample_file = files[0].name.upper()
+            if "TICST" in sample_file:
+                return "individual_stock"
+            elif "TICSS" in sample_file:
+                return "stock_summary"
+            elif "TICIT" in sample_file:
+                return "indices"
+            elif "TICIS" in sample_file:
+                return "indices_summary"
+            raise ValueError(f"Could not detect data type from files in: {folder_path}")
+        raise ValueError(f"No ZIP or CSV files found in: {folder_path}")
+    raise ValueError(f"Could not detect data type from path: {folder_path}")
+
+
+def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
+    """Detect both the NEEDS ``data_type`` and ``year`` from a path.
+
+    Year comes from a ``20xx`` token in the path; data type from path keywords or
+    a sample filename. Raises ``ValueError`` when either can't be determined (year
+    is reported first, preserving the original behavior). :func:`create_df` calls
+    the two underlying detectors independently so an explicitly-passed
+    ``year=``/``data_type=`` is honored without forcing the other to be detectable.
+    """
+    year = _detect_year_from_path(folder_path)
+    if year is None:
+        raise ValueError(f"Could not detect year from path: {folder_path}")
+    data_type = _detect_data_type_from_path(folder_path)
     return data_type, year
 
 
@@ -341,6 +370,26 @@ def _raw_width(kind: str, year: int) -> int:
     return 95  # individual_stock
 
 
+def _guard_polars_oom(load):
+    """Run a Polars load, converting an *uncatchable* panic into a catchable error.
+
+    A failed allocation on a huge one-shot read surfaces as a Polars
+    ``PanicException``, which subclasses ``BaseException`` (not ``Exception``) — so
+    ordinary ``except Exception`` can't catch it and it tears the caller down. Run
+    ``load`` and convert any such non-``Exception`` ``BaseException`` into a
+    ``MemoryError`` carrying the two-stage guidance; ordinary exceptions and real
+    interrupts (``KeyboardInterrupt`` / ``SystemExit``) pass through untouched.
+    """
+    try:
+        return load()
+    except (Exception, KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # PanicException & co. — not an Exception subclass
+        raise MemoryError(
+            f"Loading this data exhausted memory (Polars panicked). {_TWO_STAGE_GUIDANCE}"
+        ) from exc
+
+
 def get_1y_dataframe(
     folder_path: str,
     year: int,
@@ -369,6 +418,7 @@ def get_1y_dataframe(
 
     dfs = []
     total_rows_read = 0
+    cumulative_decompressed = 0
 
     schema_override = {f"column_{col+1}": pl.String for col in range(95)}
 
@@ -392,6 +442,18 @@ def get_1y_dataframe(
                     raise ValueError(
                         f"ZIP entry decompressed size ({decompressed_size:,} bytes) "
                         f"exceeds max ({_MAX_DECOMPRESSED_BYTES:,} bytes)"
+                    )
+                # Cumulative across parts: the per-entry guard above can't see
+                # memory accumulating over a day's many numbered ZIPs. Stop with a
+                # clear, catchable error *before* the load rather than letting the
+                # concat OOM-panic uncatchably.
+                cumulative_decompressed += decompressed_size
+                if cumulative_decompressed > _MAX_ONESHOT_DECOMPRESSED_BYTES:
+                    raise MemoryError(
+                        f"Estimated decompressed size "
+                        f"({cumulative_decompressed / 1024**3:.1f} GB) exceeds the "
+                        f"{_MAX_ONESHOT_DECOMPRESSED_BYTES / 1024**3:.0f} GB one-shot "
+                        f"limit. {_TWO_STAGE_GUIDANCE}"
                     )
                 with zf.open(file_name) as f:
                     rows_to_read = None
@@ -439,11 +501,13 @@ def get_1y_dataframe(
 
                         if kept_lines:
                             raw_bytes = b"".join(kept_lines)
-                            df_chunk = pl.read_csv(
-                                io.BytesIO(raw_bytes),
-                                has_header=False,
-                                schema_overrides=schema_override,
-                                truncate_ragged_lines=True,
+                            df_chunk = _guard_polars_oom(
+                                lambda: pl.read_csv(
+                                    io.BytesIO(raw_bytes),
+                                    has_header=False,
+                                    schema_overrides=schema_override,
+                                    truncate_ragged_lines=True,
+                                )
                             )
                             if rows_to_read is not None:
                                 df_chunk = df_chunk.slice(0, rows_to_read)
@@ -451,11 +515,13 @@ def get_1y_dataframe(
                             df_chunk = pl.DataFrame()
 
                     else:
-                        df_chunk = pl.read_csv(
-                            f,
-                            has_header=False,
-                            schema_overrides=schema_override,
-                            truncate_ragged_lines=True,
+                        df_chunk = _guard_polars_oom(
+                            lambda: pl.read_csv(
+                                f,
+                                has_header=False,
+                                schema_overrides=schema_override,
+                                truncate_ragged_lines=True,
+                            )
                         )
                         if rows_to_read is not None:
                             df_chunk = df_chunk.slice(0, rows_to_read)
@@ -467,7 +533,9 @@ def get_1y_dataframe(
                     if rows is not None and total_rows_read >= rows:
                         break
 
-        except (zipfile.BadZipFile, EOFError):
+        except (zipfile.BadZipFile, EOFError, MemoryError):
+            # MemoryError is the cumulative one-shot guard (and converted Polars
+            # panics) — propagate it instead of swallowing it as a skipped part.
             raise
         except Exception as e:
             logger.warning("Error reading %s: %s", zip_file, e)
@@ -482,7 +550,7 @@ def get_1y_dataframe(
             )
         raise ValueError("No data was successfully read")
 
-    result = pl.concat(dfs, how="vertical")
+    result = _guard_polars_oom(lambda: pl.concat(dfs, how="vertical"))
     logger.debug("Total rows read: %d", len(result))
 
     return result
@@ -682,11 +750,16 @@ def create_df(
             :class:`Language` works too).
         rows: Optional cap on rows read (a fast sample of the first N).
         auto_detect: When ``True`` (default) detect ``data_type``/``year`` from
-            the path. When ``False`` you **must** pass ``data_type`` and ``year``
-            (auto-detect would otherwise overwrite them).
-        data_type: Required when ``auto_detect=False``; one of the four NEEDS
-            types (a :class:`DataType` works too).
-        year: Required when ``auto_detect=False`` (selects era-specific parsing).
+            the path — but only for whichever you leave as ``None``. An explicitly
+            passed ``data_type=``/``year=`` is always honored (no longer
+            overwritten by detection), so a correctly-named ZIP in a folder whose
+            path has no year still reads when you pass ``year=``. When ``False``
+            you **must** pass both ``data_type`` and ``year``.
+        data_type: One of the four NEEDS types (a :class:`DataType` works too).
+            Auto-detected from the path when omitted; required when
+            ``auto_detect=False``.
+        year: Selects era-specific parsing. Auto-detected from the path when
+            omitted; required when ``auto_detect=False``.
         ticker_filter: A ``set`` of **string** stock codes (e.g. ``{"7203"}``)
             kept via the raw-byte fast path; a bare ``"7203"`` / ``7203`` is also
             accepted as a single code. Applied for ``individual_stock`` **only** —
@@ -699,9 +772,18 @@ def create_df(
     """
     ticker_filter = _normalize_ticker_filter(ticker_filter)
 
+    # Explicit year/data_type always win; auto-detection (when on) only fills in
+    # whichever was left as None. This lets a correctly-named ZIP in a year-less
+    # folder be read by passing year= even under the default auto_detect=True (it
+    # previously raised "Could not detect year from path": alpha-test Bug #3).
     if auto_detect:
-        data_type, year = detect_data_type_and_year(folder_path)
-        logger.debug("Auto-detected: %s, Year: %s", data_type, year)
+        if year is None:
+            year = _detect_year_from_path(folder_path)
+            if year is None:
+                raise ValueError(f"Could not detect year from path: {folder_path}")
+        if data_type is None:
+            data_type = _detect_data_type_from_path(folder_path)
+        logger.debug("Resolved: %s, Year: %s", data_type, year)
     else:
         if data_type is None or year is None:
             raise ValueError(
