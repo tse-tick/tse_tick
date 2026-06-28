@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.11.4 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.11.5 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
@@ -21,7 +21,7 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.11.4)
+├── CHANGELOG.md                     # version history (current: 0.11.5)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
@@ -195,6 +195,15 @@ tse_tick/                          # Project root
 | Discovery fast path | `discover_zips` adds a `{yearmonth}/`-directly-under-root fast path (e.g. `…/TICST120`) before the recursive fallback; docstring corrected to match |
 | Docs | A single numbered ZIP holds only part of a day (filtering a lone part → 0 rows); pass the directory/root |
 | Tests | Suite **243** (`+6`: no-ZIPs empty+warn, `display`/Windows print, discovery fast-path) |
+
+### v0.11.5 — alpha-test fixes: one-shot OOM guard, query truncation warning, explicit year (2026-06-28)
+
+| Change | Detail |
+|--------|--------|
+| One-shot OOM | `create_df`/`read_ticks` raise a catchable `OneShotMemoryError` (a `MemoryError`) — proactively when the cumulative decompressed size of the parts crosses `max_oneshot_bytes` (default 5 GB; `None` disables), or by converting a Polars `PanicException` (a `BaseException`) during the load. Bounded `ticker_filter` fast path exempt; `ingest_*` re-raise it (no silent partial-day writes) |
+| Explicit year/type | `create_df` auto-detects only the `None` of `year`/`data_type`, so an explicit `year=` is honored under the default `auto_detect=True` (a year-less folder path no longer raises) |
+| Truncation warning | `query_ticks` emits a capturable `TruncationWarning` on truncation, probing `limit+1` so an exact-fit result doesn't false-warn |
+| Tests | Suite **355** (`+19`: `test_alpha_fixes.py`) |
 
 ### v0.11.4 — internal consolidation: single-sourced data-type classification (2026-06-19)
 
@@ -496,7 +505,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Tool | Config |
 |------|--------|
-| **Build** | setuptools>=77 + wheel; static `version = "0.11.4"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
+| **Build** | setuptools>=77 + wheel; static `version = "0.11.5"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
 | **CLI** | `tse-tick = "tse_tick.cli:main"` |
 | **Extras** | `query` (duckdb), `test` (pandas/pytest/pytest-cov), `dev` (test + black/flake8/mypy/jupyter), `docs` |
 | **Black** | line-length=100, target Python 3.9–3.12 |
