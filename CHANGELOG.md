@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-06-28
+
+Fixes from an alpha-test report — three findings, hardened after a full code review that caught a
+data-loss regression in the first pass.
+
+### Fixed
+- **Large one-shot reads no longer crash uncatchably.** A normal multi-part `individual_stock` day
+  could exhaust memory and raise an **uncatchable** Polars `PanicException` (it subclasses
+  `BaseException`, so `except Exception` can't catch it). `create_df` / `read_ticks` now raise a
+  catchable `OneShotMemoryError` (a `MemoryError`) — either proactively, when the cumulative
+  decompressed size of the parts they would load crosses a ceiling (default 5 GB), or by converting a
+  Polars panic during the load — with guidance to use the two-stage `ingest_single_zip()` →
+  `query_ticks()` path. The bounded `individual_stock` `ticker_filter` fast path is exempt (it keeps
+  only matching lines), and the `ingest_*` functions **re-raise** the error rather than swallowing it,
+  so a too-large read aborts loudly instead of silently writing a partial day.
+- **`create_df` honors an explicit `year=` (and `data_type=`) under the default `auto_detect=True`.**
+  It now auto-detects only whichever you leave as `None`, so a correctly-named ZIP in a folder whose
+  path has no year reads when you pass `year=` (it previously raised `Could not detect year from path`).
+- **`query_ticks` no longer silently truncates at `limit`.** Hitting the cap now emits the same
+  capturable `TruncationWarning` that `read_ticks` uses; a result that *exactly* fills `limit` with
+  nothing dropped does not warn (it probes one row beyond the cap to tell the two apart).
+
+### Added
+- **`max_oneshot_bytes=`** on `create_df` / `read_ticks` — the one-shot decompressed-size ceiling
+  (default 5 GB; pass a larger value for a high-RAM machine, or `None` to disable the guard).
+- **`OneShotMemoryError`** (exported) — the catchable signal for an over-large one-shot read.
+
 ## [0.11.4] - 2026-06-19
 
 Internal consolidation (**no API or behavior change**) — the durable follow-up to the run9/10/11 pattern

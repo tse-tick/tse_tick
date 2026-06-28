@@ -366,14 +366,15 @@ Built-in protections for local data processing:
 
 ---
 
-## What's New in 0.11.4
+## What's New in 0.11.5
 
-`tse_tick` 0.11.4 — `pip install -U tse-tick`. An internal consolidation release: **no API or behavior change.**
+`tse_tick` 0.11.5 — `pip install -U tse-tick`. Bug fixes from an alpha-test report:
 
-- **Data-type classification is single-sourced.** The "which types are X" checks (valid / summary / tick / index), previously duplicated across ~8 modules and prone to drift, now derive from one source in `tse_tick.constants` (tied to the `DataType` enum), with invariant tests guarding against future drift. Validation messages and public names are unchanged.
-- **Evaluation notebook** (`examples/notebooks/02_evaluation.ipynb`) now reloads a freshly-installed release without a manual kernel restart.
+- **Large one-shot reads fail safely.** `create_df` / `read_ticks` now raise a catchable `OneShotMemoryError` (a `MemoryError`) — proactively when a multi-part day's decompressed size crosses a ceiling, or by converting a Polars OOM panic — instead of an uncatchable crash, and point you at the two-stage `ingest_*` → `query_ticks` path. New `max_oneshot_bytes=` tunes the ceiling (default 5 GB; `None` disables). The `ingest_*` functions re-raise it, so it can never silently write a partial day.
+- **`create_df` honors an explicit `year=` / `data_type=`** under the default `auto_detect=True` — a correctly-named ZIP in a folder whose path has no year now reads when you pass `year=`.
+- **`query_ticks` warns on truncation** (a capturable `TruncationWarning`) instead of silently returning exactly `limit` rows — and no longer false-warns on a result that exactly fills `limit`.
 
-Earlier highlights (0.11.3): flat-folder day→month discovery fix; `get_info` / `get_supported_years` consistency; the evaluation notebook. (0.11.2): `indices` column-subset projection no longer inflates rows. (0.11.1): a bare `ticker_filter` code is treated as a single code. (0.11.0): `extract_event_window` fixed on `individual_stock`.
+Earlier highlights (0.11.4): single-sourced data-type classification (internal, no API change). (0.11.3): flat-folder day→month discovery fix; `get_info` / `get_supported_years` consistency. (0.11.2): `indices` column-subset projection no longer inflates rows. (0.11.1): a bare `ticker_filter` code is treated as a single code.
 
 See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
 
