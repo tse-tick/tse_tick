@@ -18,7 +18,7 @@ from typing import Optional
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes, OneShotMemoryError
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -128,6 +128,8 @@ def ingest_directory(
     def _process(zf: Path) -> dict:
         try:
             return ingest_single_zip(str(zf), output_dir, data_type=data_type, language=language, ticker_filter=ticker_filter)
+        except OneShotMemoryError:
+            raise  # a one-shot OOM aborts loudly; never record it as a skipped zip
         except Exception as exc:
             return {"zip_path": str(zf), "error": str(exc)}
 
@@ -197,6 +199,8 @@ def ingest_year(
     for zf in year_zips:
         try:
             meta = ingest_single_zip(str(zf), output_dir, data_type=data_type, year=year, language=language, ticker_filter=ticker_filter)
+        except OneShotMemoryError:
+            raise
         except Exception as exc:
             meta = {"zip_path": str(zf), "error": str(exc)}
         results.append(meta)
@@ -222,6 +226,10 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
         except (zipfile.BadZipFile, EOFError) as exc:
             logger.error("Corrupt zip %s: %s", Path(zp).name, exc)
             continue
+        except OneShotMemoryError:
+            # A one-shot OOM must abort the date group, not silently write a partial
+            # day that resume then marks complete (alpha-review finding 1).
+            raise
         except Exception as exc:
             logger.error("Error reading %s: %s", Path(zp).name, exc)
             continue
@@ -544,6 +552,11 @@ def ingest_event_windows_period(
                     corrupt_log.write(f"{zip_path}\n")
                     corrupt_log.flush()
                     logger.error("Corrupt zip %s: %s", zip_fname, exc)
+
+                except OneShotMemoryError:
+                    # A one-shot OOM must abort, not mislabel this ZIP as corrupt and
+                    # drop its event ticks (alpha-review finding 2).
+                    raise
 
                 except Exception as exc:
                     corrupt_log.write(f"{zip_path}\n")

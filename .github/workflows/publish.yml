@@ -4,7 +4,7 @@ name: publish
 # no stored API token. Real publish fires when a GitHub Release is published;
 # a manual run (workflow_dispatch) can dry-run to TestPyPI first.
 #
-# One-time external setup (see PYPI_RELEASE_PLAN.md, Phase C2):
+# One-time external setup (per project, done once):
 #   - PyPI: add a pending trusted publisher for project "tse-tick", this repo,
 #     workflow "publish.yml", environment "pypi".
 #   - GitHub: create the "pypi" Environment (and "testpypi" for the dry run).

@@ -1,5 +1,6 @@
 # tse_tick/query.py
 import re
+import warnings
 from pathlib import Path
 from typing import Optional, Union
 
@@ -7,6 +8,7 @@ import polars as pl
 import duckdb
 
 from .constants import SUMMARY_TYPES, validate_data_type
+from .enhanced import TruncationWarning
 
 # Column names are interpolated as double-quoted identifiers (f'"{c}"'), so the
 # only injection risk is a character that closes the quote (") or escapes it
@@ -99,6 +101,10 @@ def query_ticks(
         end_time: Inclusive upper bound on time-of-day (``"HH:MM:SS"``).
         columns: Column projection; ``None`` selects all columns.
         limit: Maximum rows returned (default 10,000,000); ``None`` for no cap.
+            When more rows match than the cap the result is truncated and a
+            :class:`TruncationWarning` is emitted (capturable via ``warnings``); a
+            result that exactly fills the cap with nothing dropped does **not** warn.
+            Pass a larger ``limit=`` or ``limit=None`` for the full result.
 
     Returns:
         A Polars DataFrame ordered by ``Data Date`` then ``Execution Time``
@@ -193,7 +199,10 @@ def query_ticks(
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    limit_clause = f"LIMIT {limit}" if limit is not None else ""
+    # Fetch one row beyond the cap so an exact-fit result (height == limit, nothing
+    # dropped) isn't mistaken for truncation — only a genuine overflow warns
+    # (alpha-review finding 7).
+    limit_clause = f"LIMIT {limit + 1}" if limit is not None else ""
 
     # Summary types are daily aggregates with no "Execution Time" column, so order
     # only by the columns this data_type actually has (a hard-coded ORDER BY
@@ -220,6 +229,20 @@ def query_ticks(
         df = con.execute(sql).pl()
     finally:
         con.close()
+
+    # We fetched limit+1 above; if more than `limit` rows came back the result was
+    # truncated — trim to `limit` and surface the same capturable TruncationWarning
+    # read_ticks emits on its row cap, so callers learn rows were dropped instead of
+    # silently receiving a partial frame. An exact-fit result (nothing dropped) does
+    # not warn.
+    if limit is not None and df.height > limit:
+        df = df.head(limit)
+        warnings.warn(
+            f"Result truncated at {limit} rows. Pass a larger limit= or use "
+            f"limit=None for all rows.",
+            TruncationWarning,
+            stacklevel=2,
+        )
 
     return df
 

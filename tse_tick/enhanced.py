@@ -54,8 +54,57 @@ class TruncationWarning(UserWarning):
     """
 
 
+class OneShotMemoryError(MemoryError):
+    """Raised when a one-shot read (:func:`create_df` / :func:`read_ticks`) would
+    exhaust memory — either the cumulative decompressed size crossed the ceiling,
+    or a Polars load panicked (an uncatchable ``BaseException``) and was converted.
+
+    Subclasses :class:`MemoryError`, so callers can ``except MemoryError`` (or this
+    type) to catch it and fall back to the two-stage ingest+query path. The
+    ``ingest_*`` functions deliberately **re-raise** it rather than swallowing it
+    via their broad ``except Exception`` handlers, so a too-large read aborts
+    loudly instead of silently persisting a partial day.
+    """
+
+
 _MAX_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
 _MAX_ZIP_ENTRIES = 5
+
+# Cumulative decompressed-size ceiling for the one-shot (create_df) path. The
+# per-entry _MAX_DECOMPRESSED_BYTES guard above is checked per ZIP *member*, so it
+# can't see memory adding up across the many numbered parts of one trading day (a
+# normal individual_stock day is ~9 parts / tens of millions of rows). When the
+# running total of decompressed bytes crosses this ceiling we raise a catchable
+# MemoryError *before* the load rather than letting Polars panic uncatchably
+# (PanicException subclasses BaseException). Default 5 GB; override by setting
+# tse_tick.enhanced._MAX_ONESHOT_DECOMPRESSED_BYTES.
+_MAX_ONESHOT_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
+
+# Shared tail for the one-shot OOM guidance: the two-stage escape hatch.
+_TWO_STAGE_GUIDANCE = (
+    "Use the two-stage path instead: ingest_single_zip() then query_ticks()."
+)
+
+# Sentinel for the create_df/read_ticks ``max_oneshot_bytes`` default: resolved to
+# _MAX_ONESHOT_DECOMPRESSED_BYTES at call time (so the module constant stays
+# monkeypatchable), while an explicit ``None`` disables the ceiling entirely.
+_DEFAULT_ONESHOT = object()
+
+
+def _resolve_oneshot_bytes(max_oneshot_bytes):
+    """Resolve ``max_oneshot_bytes``: the sentinel -> the module default; otherwise
+    the value as given (an ``int`` ceiling, or ``None`` to disable the guard)."""
+    if max_oneshot_bytes is _DEFAULT_ONESHOT:
+        return _MAX_ONESHOT_DECOMPRESSED_BYTES
+    return max_oneshot_bytes
+
+
+def _oneshot_limit_message(total_bytes: int, limit_bytes: int) -> str:
+    return (
+        f"Estimated decompressed size ({total_bytes / 1024**3:.1f} GB) exceeds the "
+        f"{limit_bytes / 1024**3:.0f} GB one-shot limit. {_TWO_STAGE_GUIDANCE}"
+    )
+
 
 _CODE_TYPE_MAP = {
     "individual_stock": "HTICST120",
@@ -158,49 +207,71 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
             raise ValueError(f"Invalid period: {period_str!r}. {_PERIOD_FORMATS_HELP}")
 
 
-def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
-    path = Path(folder_path)
-
-    year = None
-    for part in path.parts:
+def _detect_year_from_path(folder_path: str) -> Optional[int]:
+    """The first ``20xx`` year token found in the path parts, or ``None``."""
+    for part in Path(folder_path).parts:
         match = re.search(r"(20\d{2})", part)
         if match:
-            year = int(match.group(1))
-            break
+            return int(match.group(1))
+    return None
 
+
+def _require_year_from_path(folder_path: str) -> int:
+    """The year detected from the path, or raise the canonical 'could not detect'
+    error. Single source for the message shared by :func:`create_df` and
+    :func:`detect_data_type_and_year`."""
+    year = _detect_year_from_path(folder_path)
     if year is None:
         raise ValueError(f"Could not detect year from path: {folder_path}")
+    return year
 
+
+def _detect_data_type_from_path(folder_path: str) -> str:
+    """Detect the NEEDS ``data_type`` from path keywords, or a sample filename.
+
+    Raises ``ValueError`` (with the same messages :func:`detect_data_type_and_year`
+    has always used) when the type can't be determined.
+    """
+    path = Path(folder_path)
     path_str = str(path).lower()
 
     if any(kw in path_str for kw in ["individual_stock", "ticst", "stock_tick"]):
-        data_type = "individual_stock"
+        return "individual_stock"
     elif any(kw in path_str for kw in ["stock_summary", "ticss", "stock_daily"]):
-        data_type = "stock_summary"
+        return "stock_summary"
     elif any(kw in path_str for kw in ["indices_tick", "ticit", "index_tick"]) and "summary" not in path_str:
-        data_type = "indices"
+        return "indices"
     elif any(kw in path_str for kw in ["indices_summary", "ticis", "index_daily", "index_summary"]):
-        data_type = "indices_summary"
-    else:
-        if path.exists() and path.is_dir():
-            files = list(path.glob("*.zip")) + list(path.glob("*.csv"))
-            if files:
-                sample_file = files[0].name.upper()
-                if "TICST" in sample_file:
-                    data_type = "individual_stock"
-                elif "TICSS" in sample_file:
-                    data_type = "stock_summary"
-                elif "TICIT" in sample_file:
-                    data_type = "indices"
-                elif "TICIS" in sample_file:
-                    data_type = "indices_summary"
-                else:
-                    raise ValueError(f"Could not detect data type from files in: {folder_path}")
-            else:
-                raise ValueError(f"No ZIP or CSV files found in: {folder_path}")
-        else:
-            raise ValueError(f"Could not detect data type from path: {folder_path}")
+        return "indices_summary"
 
+    if path.exists() and path.is_dir():
+        files = list(path.glob("*.zip")) + list(path.glob("*.csv"))
+        if files:
+            sample_file = files[0].name.upper()
+            if "TICST" in sample_file:
+                return "individual_stock"
+            elif "TICSS" in sample_file:
+                return "stock_summary"
+            elif "TICIT" in sample_file:
+                return "indices"
+            elif "TICIS" in sample_file:
+                return "indices_summary"
+            raise ValueError(f"Could not detect data type from files in: {folder_path}")
+        raise ValueError(f"No ZIP or CSV files found in: {folder_path}")
+    raise ValueError(f"Could not detect data type from path: {folder_path}")
+
+
+def detect_data_type_and_year(folder_path: str) -> Tuple[str, int]:
+    """Detect both the NEEDS ``data_type`` and ``year`` from a path.
+
+    Year comes from a ``20xx`` token in the path; data type from path keywords or
+    a sample filename. Raises ``ValueError`` when either can't be determined (year
+    is reported first, preserving the original behavior). :func:`create_df` calls
+    the two underlying detectors independently so an explicitly-passed
+    ``year=``/``data_type=`` is honored without forcing the other to be detectable.
+    """
+    year = _require_year_from_path(folder_path)
+    data_type = _detect_data_type_from_path(folder_path)
     return data_type, year
 
 
@@ -341,12 +412,34 @@ def _raw_width(kind: str, year: int) -> int:
     return 95  # individual_stock
 
 
+def _guard_polars_oom(load):
+    """Run a Polars load, converting an *uncatchable* panic into a catchable error.
+
+    A failed allocation on a huge one-shot read surfaces as a Polars
+    ``PanicException``, which subclasses ``BaseException`` (not ``Exception``) — so
+    ordinary ``except Exception`` can't catch it and it tears the caller down. Run
+    ``load`` and convert any such non-``Exception`` ``BaseException`` into a
+    ``MemoryError`` carrying the two-stage guidance; ordinary exceptions and real
+    interrupts (``KeyboardInterrupt`` / ``SystemExit``) pass through untouched.
+    """
+    try:
+        return load()
+    except (Exception, KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # PanicException & co. — not an Exception subclass
+        raise OneShotMemoryError(
+            f"A Polars load panicked, most often from running out of memory "
+            f"(underlying error: {type(exc).__name__}: {exc}). {_TWO_STAGE_GUIDANCE}"
+        ) from exc
+
+
 def get_1y_dataframe(
     folder_path: str,
     year: int,
     kind: str,
     rows: Optional[int] = None,
     ticker_filter: Optional[set] = None,
+    max_oneshot_bytes: Optional[int] = None,
 ) -> pl.DataFrame:
     path = Path(folder_path)
 
@@ -369,6 +462,11 @@ def get_1y_dataframe(
 
     dfs = []
     total_rows_read = 0
+    cumulative_decompressed = 0
+    # The individual_stock ticker fast path keeps only matching lines (bounded
+    # memory), so the cumulative size ceiling — meant for full-frame loads — must
+    # not block it (alpha-review finding 4). ``None`` disables the guard entirely.
+    guard_bytes = None if (ticker_filter and kind == "individual_stock") else max_oneshot_bytes
 
     schema_override = {f"column_{col+1}": pl.String for col in range(95)}
 
@@ -393,6 +491,16 @@ def get_1y_dataframe(
                         f"ZIP entry decompressed size ({decompressed_size:,} bytes) "
                         f"exceeds max ({_MAX_DECOMPRESSED_BYTES:,} bytes)"
                     )
+                # Cumulative across parts: the per-entry guard above can't see
+                # memory accumulating over a day's many numbered ZIPs. Stop with a
+                # clear, catchable error *before* the load rather than letting the
+                # concat OOM-panic uncatchably.
+                if guard_bytes is not None:
+                    cumulative_decompressed += decompressed_size
+                    if cumulative_decompressed > guard_bytes:
+                        raise OneShotMemoryError(
+                            _oneshot_limit_message(cumulative_decompressed, guard_bytes)
+                        )
                 with zf.open(file_name) as f:
                     rows_to_read = None
                     if rows is not None:
@@ -409,7 +517,7 @@ def get_1y_dataframe(
                                 break
                             parsed_rows.append(parse_line(line))
                             n_lines += 1
-                        df_chunk = pl.DataFrame(parsed_rows)
+                        df_chunk = _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
 
                     elif (year == 2016) and (kind == "indices"):
                         parsed_rows = []
@@ -419,7 +527,7 @@ def get_1y_dataframe(
                                 break
                             parsed_rows.append(parse_line(line, kind="indices"))
                             n_lines += 1
-                        df_chunk = pl.DataFrame(parsed_rows)
+                        df_chunk = _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
 
                     elif ticker_filter and kind == "individual_stock":
                         kept_lines = []
@@ -439,11 +547,13 @@ def get_1y_dataframe(
 
                         if kept_lines:
                             raw_bytes = b"".join(kept_lines)
-                            df_chunk = pl.read_csv(
-                                io.BytesIO(raw_bytes),
-                                has_header=False,
-                                schema_overrides=schema_override,
-                                truncate_ragged_lines=True,
+                            df_chunk = _guard_polars_oom(
+                                lambda: pl.read_csv(
+                                    io.BytesIO(raw_bytes),
+                                    has_header=False,
+                                    schema_overrides=schema_override,
+                                    truncate_ragged_lines=True,
+                                )
                             )
                             if rows_to_read is not None:
                                 df_chunk = df_chunk.slice(0, rows_to_read)
@@ -451,11 +561,13 @@ def get_1y_dataframe(
                             df_chunk = pl.DataFrame()
 
                     else:
-                        df_chunk = pl.read_csv(
-                            f,
-                            has_header=False,
-                            schema_overrides=schema_override,
-                            truncate_ragged_lines=True,
+                        df_chunk = _guard_polars_oom(
+                            lambda: pl.read_csv(
+                                f,
+                                has_header=False,
+                                schema_overrides=schema_override,
+                                truncate_ragged_lines=True,
+                            )
                         )
                         if rows_to_read is not None:
                             df_chunk = df_chunk.slice(0, rows_to_read)
@@ -467,7 +579,10 @@ def get_1y_dataframe(
                     if rows is not None and total_rows_read >= rows:
                         break
 
-        except (zipfile.BadZipFile, EOFError):
+        except (zipfile.BadZipFile, EOFError, OneShotMemoryError):
+            # OneShotMemoryError (the cumulative guard and converted Polars panics)
+            # propagates; an incidental plain MemoryError still falls through to the
+            # skip-and-continue below, as it did before (alpha-review finding 11).
             raise
         except Exception as e:
             logger.warning("Error reading %s: %s", zip_file, e)
@@ -482,7 +597,7 @@ def get_1y_dataframe(
             )
         raise ValueError("No data was successfully read")
 
-    result = pl.concat(dfs, how="vertical")
+    result = _guard_polars_oom(lambda: pl.concat(dfs, how="vertical"))
     logger.debug("Total rows read: %d", len(result))
 
     return result
@@ -669,6 +784,7 @@ def create_df(
     data_type: Optional[str] = None,
     year: Optional[int] = None,
     ticker_filter: Optional[set] = None,
+    max_oneshot_bytes: Optional[int] = _DEFAULT_ONESHOT,
 ) -> pl.DataFrame:
     """Read raw NEEDS ZIP(s) into a cleaned Polars DataFrame.
 
@@ -682,26 +798,44 @@ def create_df(
             :class:`Language` works too).
         rows: Optional cap on rows read (a fast sample of the first N).
         auto_detect: When ``True`` (default) detect ``data_type``/``year`` from
-            the path. When ``False`` you **must** pass ``data_type`` and ``year``
-            (auto-detect would otherwise overwrite them).
-        data_type: Required when ``auto_detect=False``; one of the four NEEDS
-            types (a :class:`DataType` works too).
-        year: Required when ``auto_detect=False`` (selects era-specific parsing).
+            the path — but only for whichever you leave as ``None``. An explicitly
+            passed ``data_type=``/``year=`` is always honored (no longer
+            overwritten by detection), so a correctly-named ZIP in a folder whose
+            path has no year still reads when you pass ``year=``. When ``False``
+            you **must** pass both ``data_type`` and ``year``.
+        data_type: One of the four NEEDS types (a :class:`DataType` works too).
+            Auto-detected from the path when omitted; required when
+            ``auto_detect=False``.
+        year: Selects era-specific parsing. Auto-detected from the path when
+            omitted; required when ``auto_detect=False``.
         ticker_filter: A ``set`` of **string** stock codes (e.g. ``{"7203"}``)
             kept via the raw-byte fast path; a bare ``"7203"`` / ``7203`` is also
             accepted as a single code. Applied for ``individual_stock`` **only** —
             ignored for the other data types. Note a single numbered ZIP holds
             only part of a day's code range, so filtering a lone part may yield 0
             rows; pass the day's directory for complete coverage.
+        max_oneshot_bytes: Cumulative decompressed-size ceiling for this one-shot
+            read. Defaults to 5 GB; pass a larger ``int`` for a high-RAM machine,
+            or ``None`` to disable the guard. Crossing it raises
+            :class:`OneShotMemoryError` (a :class:`MemoryError`) *before* the load —
+            the signal to switch to the two-stage ingest+query path. Not applied to
+            the bounded ``individual_stock`` ``ticker_filter`` fast path.
 
     Returns:
         The cleaned DataFrame (empty if ``ticker_filter`` matched no rows).
     """
     ticker_filter = _normalize_ticker_filter(ticker_filter)
 
+    # Explicit year/data_type always win; auto-detection (when on) only fills in
+    # whichever was left as None. This lets a correctly-named ZIP in a year-less
+    # folder be read by passing year= even under the default auto_detect=True (it
+    # previously raised "Could not detect year from path": alpha-test Bug #3).
     if auto_detect:
-        data_type, year = detect_data_type_and_year(folder_path)
-        logger.debug("Auto-detected: %s, Year: %s", data_type, year)
+        if year is None:
+            year = _require_year_from_path(folder_path)
+        if data_type is None:
+            data_type = _detect_data_type_from_path(folder_path)
+        logger.debug("Resolved: %s, Year: %s", data_type, year)
     else:
         if data_type is None or year is None:
             raise ValueError(
@@ -715,6 +849,7 @@ def create_df(
         data_type,
         rows,
         ticker_filter=ticker_filter if data_type == "individual_stock" else None,
+        max_oneshot_bytes=_resolve_oneshot_bytes(max_oneshot_bytes),
     )
 
     df_final = _finalize_raw(df_raw, data_type, language)
@@ -767,14 +902,27 @@ def _zip_year(zip_path: Path) -> int:
     for part in zip_path.name.split("."):
         if len(part) == 8 and part.isdigit() and part.startswith("20"):
             return int(part[:4])
-    try:  # fall back to scanning the path (handles {year}/{yearmonth}/ roots)
-        _, year = detect_data_type_and_year(str(zip_path))
-        return year
-    except Exception as exc:
+    # Fall back to scanning the path (handles {year}/{yearmonth}/ roots). Only the
+    # year is needed, so use the year detector directly rather than full
+    # data-type+year detection (which would also glob the dir for a sample file).
+    year = _detect_year_from_path(str(zip_path))
+    if year is None:
         raise ValueError(
             f"read_ticks: could not determine the year for {zip_path} "
             f"(needed for era-specific parsing)"
-        ) from exc
+        )
+    return year
+
+
+def _zip_decompressed_size(zip_path) -> int:
+    """Total decompressed size of a ZIP's members (central-directory read, no
+    decompression). Returns 0 if the ZIP can't be opened — the actual read then
+    surfaces the real error rather than this sizing probe."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            return sum(info.file_size for info in zf.infolist())
+    except (zipfile.BadZipFile, EOFError, OSError):
+        return 0
 
 
 def _requested_days(date: Optional[str]) -> Optional[set]:
@@ -963,6 +1111,7 @@ def read_ticks(
     columns: Optional[List[str]] = None,
     rows: Optional[int] = 10_000_000,
     language: Literal["en", "jp"] = "en",
+    max_oneshot_bytes: Optional[int] = _DEFAULT_ONESHOT,
 ) -> pl.DataFrame:
     """One-shot read: raw NEEDS ZIPs -> a ticker/time-filtered DataFrame (no store).
 
@@ -997,6 +1146,11 @@ def read_ticks(
             emitted** (capturable via ``warnings``) — the signal to build a store
             and use :func:`tse_tick.query_ticks` instead.
         language: Output column-name language, ``"en"`` or ``"jp"``.
+        max_oneshot_bytes: Cumulative decompressed-size ceiling across the ZIPs this
+            read opens (default 5 GB; pass a larger ``int`` or ``None`` to disable).
+            Crossing it raises :class:`OneShotMemoryError` — the signal to switch to
+            the two-stage ingest+query path. Exempt for the bounded
+            ``individual_stock`` ``ticker_filter`` fast path.
 
     Returns:
         The cleaned Polars DataFrame — empty but fully typed if nothing matches.
@@ -1058,10 +1212,23 @@ def read_ticks(
     # create_df reaches the raw-byte fast path only for individual_stock.
     cdf_filter = norm_filter if data_type == "individual_stock" else None
 
+    # One-shot size ceiling across every ZIP this read accumulates into `parts`.
+    # The individual_stock ticker fast path is bounded-memory, so it's exempt;
+    # create_df is called with its own guard off (max_oneshot_bytes=None) because
+    # read_ticks does the cross-ZIP accounting here (alpha-review finding 5).
+    guard_bytes = None if cdf_filter is not None else _resolve_oneshot_bytes(max_oneshot_bytes)
+
     parts: List[pl.DataFrame] = []
     total = 0
+    cumulative_bytes = 0
     schema_frame: Optional[pl.DataFrame] = None
     for zip_path in zips:
+        if guard_bytes is not None:
+            cumulative_bytes += _zip_decompressed_size(zip_path)
+            if cumulative_bytes > guard_bytes:
+                raise OneShotMemoryError(
+                    _oneshot_limit_message(cumulative_bytes, guard_bytes)
+                )
         df = None
         try:
             year = _zip_year(zip_path)
@@ -1072,6 +1239,7 @@ def read_ticks(
                 data_type=data_type,
                 year=year,
                 ticker_filter=cdf_filter,
+                max_oneshot_bytes=None,
             )
             if norm_filter is not None and data_type != "individual_stock":
                 df = _filter_codes(df, data_type, norm_filter)
@@ -1095,7 +1263,7 @@ def read_ticks(
             break
 
     if parts:
-        result = pl.concat(parts, how="vertical")
+        result = _guard_polars_oom(lambda: pl.concat(parts, how="vertical"))
     elif schema_frame is not None:
         result = schema_frame
     else:
