@@ -21,7 +21,7 @@ import pytest
 import polars as pl
 
 import tse_tick.enhanced as enhanced
-from tse_tick import create_df, TruncationWarning
+from tse_tick import create_df, read_ticks, TruncationWarning, OneShotMemoryError
 from tse_tick.enhanced import detect_data_type_and_year
 from tse_tick.query import query_ticks
 from tests.synthetic_data import (
@@ -87,24 +87,27 @@ def test_bug1_single_part_under_ceiling_still_reads(tmp_path, monkeypatch):
     assert df.height == 6
 
 
-class _FakePanic(BaseException):
-    """Stand-in for ``polars.exceptions.PanicException`` — subclasses
-    ``BaseException`` (not ``Exception``), so a plain ``except Exception`` misses it."""
+def test_bug1_real_polars_panic_becomes_catchable_oneshot_error(tmp_path, monkeypatch):
+    """A *real* Polars ``PanicException`` during the read is converted into a
+    catchable ``OneShotMemoryError`` (a ``MemoryError``) instead of tearing the
+    process down as an uncatchable ``BaseException``."""
+    from polars.exceptions import PanicException
 
+    # The load-bearing assumption the whole guard rests on: a panic is a
+    # BaseException, NOT an Exception, so a plain `except Exception` can't catch it.
+    assert issubclass(PanicException, BaseException)
+    assert not issubclass(PanicException, Exception)
 
-def test_bug1_polars_panic_becomes_catchable_memoryerror(tmp_path, monkeypatch):
-    """A Polars panic during the CSV read is converted into a catchable
-    MemoryError rather than propagating as an uncatchable BaseException."""
     _make_parts(tmp_path, "20230703", n_parts=1, rows_per_ticker=6)
 
     def _boom(*args, **kwargs):
-        raise _FakePanic("simulated polars OOM panic")
+        raise PanicException("simulated polars OOM panic")
 
     monkeypatch.setattr(enhanced.pl, "read_csv", _boom)
 
-    # MemoryError IS an Exception, so this also proves the panic became catchable
-    # via ordinary `except Exception` (it was not before the fix).
-    with pytest.raises(MemoryError):
+    # OneShotMemoryError IS a MemoryError (an Exception), so the panic is now
+    # catchable via ordinary `except MemoryError` (it was not before the fix).
+    with pytest.raises(OneShotMemoryError):
         create_df(
             str(tmp_path), auto_detect=False, data_type="individual_stock", year=2023
         )
@@ -226,3 +229,108 @@ def test_bug3_full_auto_detect_still_works(tmp_path):
 
     df = create_df(str(folder))  # both auto-detected
     assert df.height == 4
+
+
+# --------------------------------------------------------------------------- #
+# Alpha-review rework — regressions for the code-review findings on PR #28
+# --------------------------------------------------------------------------- #
+def test_bug1_ticker_filter_fast_path_exempt_from_size_guard(tmp_path, monkeypatch):
+    """The bounded individual_stock ticker fast path keeps only matching lines, so
+    the cumulative size guard must NOT block it even when the parts' total
+    decompressed size dwarfs the ceiling (review finding 4)."""
+    part_bytes = _make_parts(tmp_path, "20230703", n_parts=3, rows_per_ticker=10)
+    # A ceiling below even one part would trip a full-frame read immediately.
+    monkeypatch.setattr(enhanced, "_MAX_ONESHOT_DECOMPRESSED_BYTES", part_bytes // 2)
+
+    df = create_df(
+        str(tmp_path), auto_detect=False, data_type="individual_stock",
+        year=2023, ticker_filter={"7203"},
+    )
+    assert df.height == 30  # 3 parts x 10 rows of 7203, all kept, no MemoryError
+
+
+def test_bug1_max_oneshot_bytes_none_disables_guard(tmp_path, monkeypatch):
+    """``max_oneshot_bytes=None`` disables the ceiling even when the module default
+    is tiny — the opt-out the review asked for (Q2)."""
+    _make_parts(tmp_path, "20230703", n_parts=3, rows_per_ticker=8)
+    part_bytes = len(individual_stock_csv("20230703", ["7203"], rows_per_ticker=8))
+    monkeypatch.setattr(enhanced, "_MAX_ONESHOT_DECOMPRESSED_BYTES", part_bytes // 2)
+
+    df = create_df(
+        str(tmp_path), auto_detect=False, data_type="individual_stock",
+        year=2023, max_oneshot_bytes=None,
+    )
+    assert df.height == 24  # 3 parts x 8 rows, fully loaded despite the tiny default
+
+
+def test_bug1_max_oneshot_bytes_custom_value_trips(tmp_path):
+    """A custom (low) ``max_oneshot_bytes`` trips without monkeypatching the default."""
+    part_bytes = _make_parts(tmp_path, "20230703", n_parts=3, rows_per_ticker=8)
+    with pytest.raises(OneShotMemoryError, match="one-shot limit"):
+        create_df(
+            str(tmp_path), auto_detect=False, data_type="individual_stock",
+            year=2023, max_oneshot_bytes=part_bytes + 10,
+        )
+
+
+def test_bug1_ingest_reraises_oneshot_oom_not_partial_write(tmp_path, monkeypatch):
+    """A one-shot OOM during ingest must ABORT (raise), not be swallowed by ingest's
+    broad ``except Exception`` into a silent partial-day write (review finding 1)."""
+    from polars.exceptions import PanicException
+    from tse_tick.ingest import _ingest_date_group
+
+    date = "20230703"
+    _make_parts(tmp_path, date, n_parts=1, rows_per_ticker=6)
+    zip_path = tmp_path / f"HTICST120.{date}.1.zip"
+
+    def _boom(*args, **kwargs):
+        raise PanicException("simulated polars OOM panic")
+
+    monkeypatch.setattr(enhanced.pl, "read_csv", _boom)
+
+    store = tmp_path / "store"
+    with pytest.raises(OneShotMemoryError):
+        _ingest_date_group(
+            date, [str(zip_path)], str(store), "individual_stock", 2023, "en", None
+        )
+
+
+def test_bug1_read_ticks_one_shot_path_is_guarded(tmp_path):
+    """read_ticks accumulates one frame per ZIP and is now guarded: a no-filter read
+    whose cumulative size crosses the ceiling raises OneShotMemoryError before the
+    concat can OOM (review finding 5)."""
+    date = "20230703"
+    part_bytes = _make_parts(tmp_path, date, n_parts=3, rows_per_ticker=10)
+    with pytest.raises(OneShotMemoryError, match="one-shot limit"):
+        read_ticks(
+            str(tmp_path), data_type="individual_stock",
+            max_oneshot_bytes=part_bytes + 10,
+        )
+
+
+def test_bug1_read_ticks_ticker_filter_exempt_from_guard(tmp_path):
+    """read_ticks' individual_stock ticker fast path is bounded, so the ceiling does
+    not apply even on a big multi-part day (review findings 4 + 5)."""
+    date = "20230703"
+    part_bytes = _make_parts(tmp_path, date, n_parts=3, rows_per_ticker=10)
+    df = read_ticks(
+        str(tmp_path), data_type="individual_stock", ticker_filter={"7203"},
+        max_oneshot_bytes=part_bytes // 2,  # below one part; would trip a full read
+    )
+    assert df.height == 30
+
+
+def test_bug2_query_ticks_no_warn_on_exact_fit(stock_store):
+    """A result that exactly fills ``limit`` with nothing dropped must NOT warn — the
+    limit+1 probe distinguishes exact-fit from real truncation (review finding 7)."""
+    full = query_ticks(
+        stock_store, "individual_stock", ticker=7203, date="20230704", limit=None
+    )
+    n = full.height
+    assert n > 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", TruncationWarning)  # any warning -> failure
+        df = query_ticks(
+            stock_store, "individual_stock", ticker=7203, date="20230704", limit=n
+        )
+    assert df.height == n
