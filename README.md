@@ -164,7 +164,7 @@ df = tse_tick.query_ticks("/store", ticker=7203, date="20220201")
 # Bid-ask spread
 spread = tse_tick.compute_spread(df)
 
-# Order-book depth (10 levels per side)
+# Order-book depth (levels per side; default 10)
 depth = tse_tick.compute_depth(df, levels=5, side="both")
 
 # Order flow imbalance over rolling window
@@ -302,7 +302,7 @@ Event-window filtered ingest writes per-date files:
 | `--output-root` (required) | Root directory for Parquet output |
 | `--period` | Date range: `YYYY`, `YYYYMM-YYYYMM`, or `YYYYMMDD-YYYYMMDD` |
 | `--language` | Column name language: `en` (default) or `jp` |
-| `--parallel` | Number of parallel workers (default 1, max 8) |
+| `--parallel` | Parallel worker processes for **flat** ingest (default 1; the `--period`/`--year` path runs sequentially). Values above 8 are clamped to 8. |
 | `--no-resume` | Disable resume (reprocess dates even if output exists) |
 | `--tickers` | Comma-separated codes or `@file.txt` with one per line. Keeps only these stocks. |
 | `--filter-csv` | Path to event filter CSV. Enables event-window mode. Overrides `--tickers`. |
@@ -312,13 +312,13 @@ Event-window filtered ingest writes per-date files:
 
 ### Event Filter CSV Format
 
-When using `--filter-csv`, the file must have these columns:
+When using `--filter-csv`, the ingest path builds each window from `zip_date`, `ticker`, and `reaction_anchor_dt`. The CSV may also carry these descriptive columns:
 
 | Column | Description |
 |--------|-------------|
 | `ticker` | 4-digit stock code (string) |
-| `event_date` | Original event date `YYYY-MM-DD` |
-| `event_time` | Original event time `HH:MM` (JST) |
+| `event_date` | Original event date `YYYY-MM-DD` — metadata; not used by ingest |
+| `event_time` | Original event time `HH:MM` (JST) — metadata; not used by ingest |
 | `event_type` | Category (`earnings`, `buyback`, `dividend`, etc.) |
 | `session_type` | `intraday` or `after_hours` |
 | `reaction_anchor_dt` | Datetime to center the window on `YYYY-MM-DD HH:MM` (JST) |
@@ -330,7 +330,7 @@ For after-hours events, `reaction_anchor_dt` shifts to the next trading day's 09
 
 ## Python API Reference
 
-### `create_df(folder_path, language="en", rows=None, auto_detect=True, data_type=None, year=None, ticker_filter=None)`
+### `create_df(folder_path, language="en", rows=None, auto_detect=True, data_type=None, year=None, ticker_filter=None, max_oneshot_bytes=<5 GB>)`
 
 Load and clean tick data from a ZIP file or directory of ZIP files.
 
@@ -341,6 +341,7 @@ Load and clean tick data from a ZIP file or directory of ZIP files.
 - `data_type` — `"individual_stock"`, `"stock_summary"`, `"indices"`, or `"indices_summary"`
 - `year` — data year (e.g., 2023)
 - `ticker_filter` — optional `set` of 4-digit stock codes to pre-filter at line level
+- `max_oneshot_bytes` — cumulative decompressed-size ceiling for the one-shot read (default 5 GB; `None` disables). Crossing it raises a catchable `OneShotMemoryError`; use the two-stage `ingest_* → query_ticks` path instead.
 
 Returns a Polars DataFrame with English or Japanese column names.
 
