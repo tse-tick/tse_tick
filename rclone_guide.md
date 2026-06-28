@@ -30,10 +30,26 @@ Run the interactive config:
 rclone config
 ```
 
-- `n` → new remote; give it a short name (referred to below as `REMOTE`).
-- Storage type: **Google Drive** (`drive`).
-- Scope: full access (read-only is sufficient, but full avoids edge-case surprises).
-- Leave advanced options at their defaults; authorize in the browser when prompted (OAuth). On a headless server, choose the no-browser option and paste the token generated on another machine.
+`rclone config` is a menu-driven Q&A. You will be asked a series of prompts; here is the full
+sequence and what to answer:
+
+1. **`n`** → new remote.
+2. **Name**: a short name (referred to below as `REMOTE`). This is the prefix before every path: `REMOTE:`.
+3. **Storage type**: choose **Google Drive** (`drive`). It is selected by number, and the number shifts
+   between rclone versions — read the list, don't assume; type the digit shown next to "Google Drive".
+4. **client_id / client_secret**: leave blank (Enter) unless you have your own Google API credentials.
+5. **Scope**: full access (option `1`). Read-only (`2`) is sufficient for mirroring, but full avoids edge cases.
+6. **root_folder_id / service_account_file**: leave blank (Enter).
+7. **Edit advanced config?** → **`n`** (No).
+8. **Use web browser to automatically authenticate rclone? / Use auto config?**
+   - **Desktop with a browser: `y` (Yes).** rclone opens a browser tab, you sign in and click **Allow**.
+   - **Headless server (no browser): `n` (No).** rclone prints a `config_token>` prompt and a
+     `rclone authorize "drive" "..."` command; run that on a machine with a browser, then paste the full
+     JSON token back. Desktop users should not see `config_token>` — if you do, you answered No to the
+     browser question; Ctrl+C and restart, answering Yes.
+9. **Configure this as a Shared Drive (Team Drive)?** → **`n` (No).** The dataset is a *Shared with me*
+   item, not a Team Drive; access comes from the `--drive-shared-with-me` flag (Step 3).
+10. **Keep this remote?** → **`y` (Yes)**, then `q` to quit.
 
 Confirm the remote exists:
 
@@ -50,6 +66,9 @@ Because the data sits under *Shared with me*, the remote's default root shows on
 ```
 
 Forgetting it is the single most common reason a command returns "directory not found" or an empty listing.
+
+This step is a rule, not a command — there is nothing to "run" for Step 3 by itself; you simply append
+the flag to every command from here on.
 
 ## Step 4 — Map the structure and measure size
 
@@ -168,3 +187,9 @@ rclone check REMOTE:"<dataset>/<year>/<product>/" "<LOCAL_ROOT>/<year>/<product>
 - **`userRateLimitExceeded` or quota errors:** rclone backs off and retries automatically; if persistent, lower `--transfers` or add `--tpslimit`.
 - **OAuth token expired:** `rclone config reconnect REMOTE:`.
 - **Interrupted run:** simply re-run the same `rclone copy`; completed files are skipped and the transfer resumes from where it stopped.
+- **Windows: a trailing backslash before a closing quote breaks the command.** A destination written as
+  `"C:\...\YYYYMM\"` ends in `\"`, which Windows parses as an escaped quote — so the quote never closes and
+  everything after it (including `--drive-shared-with-me`) is swallowed into the path and never passed to
+  rclone, producing a misleading "directory not found". Fix: use forward slashes for local paths
+  (`"C:/.../YYYYMM"`), or drop the trailing backslash. Also never paste placeholder text like
+  `<LOCAL_ROOT>` literally — `<` and `>` are redirection operators in cmd.exe.
