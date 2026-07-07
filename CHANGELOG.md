@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+Faster ticker-filtered `individual_stock` reads and ingests (performance only; output unchanged).
+
+### Performance
+- **Vectorized the field-5 ticker filter in `get_1y_dataframe`.** The
+  `individual_stock` ticker fast path filtered raw lines with a pure-Python per-line
+  loop (byte-scanning field 5 via `extract_stock_code`), which roughly doubled each
+  opened part's read time and was the dominant CPU cost of a ticker-filtered
+  read/ingest once part-pruning had narrowed which parts open. It now streams each
+  part in bounded blocks and extracts field 5 with a vectorized Polars filter —
+  **~2× faster per opened part** (measured 183.5 s → 91.2 s, 2.01×, opening all 13
+  parts of a real Toyota `7203` day) with a **byte-identical** kept-line set (verified
+  line-for-line on real multi-part days, including the off-auction appendix part).
+  Memory stays bounded: only matching lines are handed to Polars, so peak RAM tracks
+  the matched rows plus one 16 MB block, never the whole decompressed part.
+
+### Fixed
+- **Ticker-filtered ingest now prunes per day, not the whole period upfront.**
+  `ingest_period(..., ticker_filter=...)` for `individual_stock` pruned every day's
+  parts before writing any partition — for a year that was ~80 min of probe/boundary
+  scans (~20 s/day) with no partition and no checkpoint written first, and, because
+  pruning ran before the per-date resume check, a resumed run re-pruned the whole
+  period before skipping already-written dates. Pruning now runs per date inside the
+  ingest loop, after the resume-skip check: a partition lands after each day
+  (incremental progress + per-day checkpoint), and a resumed run prunes only the dates
+  it actually ingests. Store contents are unchanged.
+
 ## [0.12.1] - 2026-07-07
 
 Bug fix: `extract_to_store` returns all rows (no 10M query cap), plus refreshed example notebooks.
