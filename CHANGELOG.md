@@ -11,6 +11,13 @@
   unchanged. An absent ticker contributes no rows (its empty per-ticker frame — which
   `query_ticks` returns without the `date` partition column — is dropped before concat).
 
+### Documentation
+- **Large / multi-ticker reads and the 10M-row cap.** README and the `read_ticks`
+  docstring now spell out that a one-shot read caps at 10,000,000 rows (with a
+  `TruncationWarning`) — a whole month of a couple of active tickers exceeds it —
+  and give the three ways to read everything: two-stage `ingest_period` →
+  `query_ticks` (or `extract_to_store`), a per-day loop, or `rows=None`.
+
 ## [0.11.6] - 2026-07-07
 
 Faster single-ticker `individual_stock` reads via part-pruning, plus a one-call two-stage helper.

@@ -1155,8 +1155,12 @@ def read_ticks(
         columns: Column projection; ``None`` selects all columns.
         rows: Cap on returned rows (default 10,000,000). On hitting the cap the
             result is truncated **and a** :class:`TruncationWarning` **is
-            emitted** (capturable via ``warnings``) — the signal to build a store
-            and use :func:`tse_tick.query_ticks` instead.
+            emitted** (capturable via ``warnings``). A whole **month** of a couple
+            of *active* tickers can exceed 10M (e.g. 7203 + 9984 for one January is
+            ~25M rows), so a single monthly call would stop partway. To read it all,
+            use the two-stage ``ingest_period`` -> :func:`tse_tick.query_ticks` path
+            (or :func:`tse_tick.extract_to_store` for a single ticker), loop
+            per-day, or pass ``rows=None`` (bounded only by memory).
         language: Output column-name language, ``"en"`` or ``"jp"``.
         prune_parts: For ``individual_stock`` + a ``ticker_filter``, open only the
             short contiguous run of numbered parts that actually holds the
