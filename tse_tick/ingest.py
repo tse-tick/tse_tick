@@ -435,8 +435,11 @@ def extract_to_store(
         The queried Polars DataFrame for the requested ticker(s) — columns match
         :func:`tse_tick.query_ticks` (the read columns plus a ``date`` column). With
         several tickers the per-ticker frames are concatenated (in sorted code
-        order). A multi-day ``period`` returns every stored day for those tickers;
-        build into a fresh ``output_dir`` to get exactly ``period``.
+        order). **All** matching rows are returned — this queries with ``limit=None``,
+        so unlike a bare :func:`query_ticks` call it is not subject to the default
+        10M-row cap (a whole month of a very active ticker exceeds it). A multi-day
+        ``period`` returns every stored day for those tickers; build into a fresh
+        ``output_dir`` to get exactly ``period``.
 
     Requires the optional ``[query]`` extra (DuckDB). Example::
 
@@ -460,7 +463,11 @@ def extract_to_store(
     query_date = period if (period.isdigit() and len(period) == 8) else None
     frames = []
     for code in sorted(tickers):
-        kw = dict(data_type=data_type, ticker=code, date=query_date)
+        # limit=None: extract_to_store returns ALL of the ticker's rows for the
+        # period (that is its whole purpose), not query_ticks's default 10M
+        # exploratory cap — a whole month of a very active ticker (e.g. 9984)
+        # exceeds 10M and would otherwise be silently truncated.
+        kw = dict(data_type=data_type, ticker=code, date=query_date, limit=None)
         if start_time is not None:
             kw["start_time"] = start_time
         if end_time is not None:

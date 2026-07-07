@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`extract_to_store` no longer truncates a very active ticker at 10M rows.** It
+  queried the store via `query_ticks` with the default `limit=10_000_000`, so a
+  whole month of a high-volume ticker (e.g. SoftBank `9984` — >10M rows/month) came
+  back capped at 10M (partial days), with a `TruncationWarning`. It now queries with
+  `limit=None`, returning **all** of the ticker's rows for the period — matching the
+  "no 10M cap" the two-stage path promises. Found by running the example notebooks
+  against a full month of `["7203", "9984"]`.
+
+### Documentation
+- **Example notebooks refreshed for 0.12.0** (`01_basic_usage`, `02_evaluation`):
+  `read_ticks` is part-pruned (not "every part"); the two-stage section leads with
+  `extract_to_store` taking one *or many* tickers with no row cap.
+
 ## [0.12.0] - 2026-07-07
 
 Multi-ticker `extract_to_store` and clearer guidance for large / multi-ticker reads.

@@ -72,3 +72,21 @@ def test_extract_to_store_empty_tickers_raises(tmp_path):
     store = str(tmp_path / "store")
     with pytest.raises(ValueError):
         tse_tick.extract_to_store(src, store, "20240104", [])
+
+
+def test_extract_to_store_queries_without_row_cap(tmp_path, monkeypatch):
+    """extract_to_store must query with limit=None — otherwise a very active ticker
+    over a whole month is silently truncated at query_ticks's default 10M cap."""
+    _seed(tmp_path / "src", "20240104", {1: ["1301"], 2: ["7203"]})
+    import tse_tick.query as q
+    real = q.query_ticks
+    seen_limits = []
+
+    def spy(store, **kw):
+        seen_limits.append(kw.get("limit", "MISSING"))
+        return real(store, **kw)
+
+    monkeypatch.setattr(q, "query_ticks", spy)   # extract_to_store imports it lazily
+    tse_tick.extract_to_store(str(tmp_path / "src"), str(tmp_path / "store"), "20240104", "7203")
+    assert seen_limits and all(lim is None for lim in seen_limits), \
+        f"expected limit=None on every query_ticks call, got {seen_limits}"
