@@ -122,6 +122,7 @@ from .ingest import (
     ingest_year_from_root,
     ingest_period,
     ingest_event_windows_period,
+    extract_to_store,
 )
 
 from .io.parquet import (
@@ -186,6 +187,7 @@ __all__ = [
     "ingest_year_from_root",
     "ingest_period",
     "ingest_event_windows_period",
+    "extract_to_store",
     "write_partitioned_parquet",
     "read_parquet_partition",
     "write_event_window_parquet",
@@ -289,14 +291,17 @@ def get_info(path=None):
     Languages: English (en), Japanese (jp)
 
     Quick Start (two access paths):
-    # One-shot - read raw ZIPs straight to a filtered DataFrame (no store):
+    # One-shot - read raw ZIPs straight to a filtered DataFrame (no store).
+    # For individual_stock + a ticker it opens only the ticker's parts (part-pruned):
     >>> import tse_tick
     >>> df = tse_tick.read_ticks("DATA_ROOT", ticker_filter={{"7203"}},
     ...                          date="20240201", start_time="09:00:00",
     ...                          end_time="11:30:00")
     >>> tse_tick.display(df)   # UTF-8 print (Windows-safe alternative to print(df))
 
-    # Two-stage - ingest once into a Parquet store, then query repeatedly:
+    # Two-stage (recommended for repeated reads) - build a reusable store once,
+    # then query it (sub-second). extract_to_store does both in one call:
+    >>> df = tse_tick.extract_to_store("DATA_ROOT", store, "20240201", "7203")
     >>> from tse_tick import DataType
     >>> tse_tick.query_ticks(store, data_type=DataType.INDIVIDUAL_STOCK,
     ...                      ticker=7203, date="20240201",

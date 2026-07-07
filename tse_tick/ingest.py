@@ -18,7 +18,7 @@ from typing import Optional
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes, OneShotMemoryError
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes, _prune_parts_by_ticker, OneShotMemoryError
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -259,6 +259,13 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
     Resume is keyed per-date (a date is written atomically), so later parts of a
     date are never skipped or overwritten — fixing the multi-part data loss.
     """
+    # Part-pruning: for a ticker-filtered individual_stock ingest, open only the
+    # contiguous run of parts that holds the ticker(s) per day, not every part.
+    # Degrades to all parts when the ascending-code layout can't be confirmed, so
+    # the store contents are identical — only the ingest I/O shrinks.
+    if ticker_filter and data_type == "individual_stock":
+        zip_paths = _prune_parts_by_ticker(list(zip_paths), ticker_filter)
+
     output_root_path = Path(output_dir) / data_type
     groups: dict = {}
     for zp in zip_paths:
@@ -386,6 +393,69 @@ def ingest_period(
         return results
 
     raise ValueError(f"Unknown granularity: {granularity}")
+
+
+def extract_to_store(
+    input_root: str,
+    output_dir: str,
+    period: str,
+    ticker: str,
+    *,
+    data_type: str = "individual_stock",
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    language: str = "en",
+    resume: bool = True,
+) -> "pl.DataFrame":
+    """Two-stage extraction in ONE call: ingest a ticker for a period into a
+    reusable Parquet store, then return the queried DataFrame.
+
+    The one-liner for "give me this ticker for this period." Prefer it over
+    :func:`tse_tick.read_ticks` whenever the data will be read more than once: the
+    expensive raw scan is paid **once** into the store (the build is resume-safe
+    and, for ``individual_stock``, part-pruned to the ticker's parts), and every
+    later :func:`tse_tick.query_ticks` against ``output_dir`` is sub-second.
+
+    Args:
+        input_root: Structured NEEDS root (``{year}/{yearmonth}/`` or a folder
+            above it — the same inputs the ``ingest_*`` functions accept).
+        output_dir: Parquet store to build/reuse.
+        period: ``"YYYY"``, ``"YYYYMM"``, ``"YYYYMMDD"``, or a ``"start-end"`` range.
+        ticker: A single stock/index code, e.g. ``"7203"`` (Toyota) or ``"101"``
+            (Nikkei 225).
+        data_type: One of the four NEEDS types (default ``"individual_stock"``).
+        start_time: Optional intraday lower bound ``"HH:MM:SS"`` (tick types only;
+            the two ``*_summary`` types are daily aggregates and raise if given).
+        end_time: Optional intraday upper bound ``"HH:MM:SS"``.
+        language: Output column-name language (``"en"`` / ``"jp"``).
+        resume: Skip dates already in the store (default ``True``).
+
+    Returns:
+        The queried Polars DataFrame for ``ticker`` (columns match
+        :func:`tse_tick.query_ticks` — the read columns plus a ``date`` column). A
+        multi-day ``period`` returns every stored day for the ticker; build into a
+        fresh ``output_dir`` to get exactly ``period``.
+
+    Requires the optional ``[query]`` extra (DuckDB). Example::
+
+        >>> df = tse_tick.extract_to_store("G:/NEEDS", "toyota_store",
+        ...                                "20230101-20251231", "7203")
+    """
+    from tse_tick.query import query_ticks
+
+    ingest_period(
+        input_root, output_dir, period, data_type,
+        language=language, resume=resume, ticker_filter={str(ticker)},
+    )
+    # query_ticks takes a single day or all stored dates (None). A fresh store holds
+    # exactly (ticker, period), so query all of it; scope to the day if period is one.
+    query_date = period if (period.isdigit() and len(period) == 8) else None
+    kw = dict(data_type=data_type, ticker=str(ticker), date=query_date)
+    if start_time is not None:
+        kw["start_time"] = start_time
+    if end_time is not None:
+        kw["end_time"] = end_time
+    return query_ticks(output_dir, **kw)
 
 
 def _process_zips(
