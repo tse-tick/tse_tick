@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-07
+
+Multi-ticker `extract_to_store` and clearer guidance for large / multi-ticker reads.
+
 ### Changed
 - **`extract_to_store` accepts one *or many* tickers.** Its `ticker` argument now
   takes a string **or an iterable** (`"7203"` or `["7203", "9984"]`) — the tickers are
