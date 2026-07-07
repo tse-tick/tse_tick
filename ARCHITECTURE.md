@@ -36,9 +36,10 @@ tse_tick/                          # Project root
 │   ├── constants.py                 # DataType / Language enums (str-subclassing; new in 0.3.0)
 │   ├── translate.py                 # yfinance/Polygon/ccxt → tse_tick name map; loads data/translations.json (0.3.0)
 │   ├── schemas.py                   # Column name definitions (EN/JP) for all 4 data types
-│   ├── enhanced.py                  # Core ETL: create_df(), read_ticks(), discover_zips(), parse_period()
+│   ├── enhanced.py                  # Core ETL: create_df(), read_ticks(), discover_zips(), parse_period(), _prune_parts_by_ticker()
+│   ├── partscan.py                  # Part-pruning: probe part start codes, select the ticker's contiguous run ∪ last part (0.11.6)
 │   ├── core.py                      # Data cleaning + 2016 fixed-width parser + categorical schemas + _tick_datetime()
-│   ├── ingest.py                    # Batch ZIP→Parquet: ingest_period(), ingest_year_from_root(), _process_zips()
+│   ├── ingest.py                    # Batch ZIP→Parquet: ingest_period(), extract_to_store(), ingest_year_from_root(), _process_zips()
 │   ├── query.py                     # DuckDB SQL interface over partitioned Parquet stores
 │   ├── event_window.py              # ±N-minute tick extraction around corporate disclosure events
 │   ├── features.py                  # Order-book feature engineering (spread, depth, OFI, volatility)
@@ -195,6 +196,15 @@ tse_tick/                          # Project root
 | Discovery fast path | `discover_zips` adds a `{yearmonth}/`-directly-under-root fast path (e.g. `…/TICST120`) before the recursive fallback; docstring corrected to match |
 | Docs | A single numbered ZIP holds only part of a day (filtering a lone part → 0 rows); pass the directory/root |
 | Tests | Suite **243** (`+6`: no-ZIPs empty+warn, `display`/Windows print, discovery fast-path) |
+
+### v0.11.6 — part-pruning for single-ticker reads + one-call two-stage (2026-07-07)
+
+| Change | Detail |
+|--------|--------|
+| Part-pruning | `read_ticks` (individual_stock + ticker_filter) opens only the ticker's contiguous **run** of numbered parts **∪ {last part}** (the day's trailing off-auction appendix), via `partscan.py` (probe each part's first stock code → backward run-scan). Falls back to a full scan if the ascending-code layout isn't monotonic, so results are **row-for-row identical** (validated 18/18 days, 3-year Toyota 7203). `prune_parts=True` default. Ticker-filtered `ingest`/`_ingest_grouped` and `tse-tick export` use the same path |
+| `extract_to_store()` | Two-stage in one call: ingest a ticker for a period into a reusable, part-pruned store → return the queried DataFrame. `tse-tick export --store <dir>` exposes it on the CLI. Requires `[query]` |
+| DRY | The field-5 stock-code parse is now the single shared `partscan.extract_stock_code` (used by the raw-byte fast path and the probes) |
+| Tests | Suite **373** (`+18`: `test_partscan.py` 10, `test_part_pruning.py` 5, `test_extract_to_store.py` 2, `test_cli.py` +1) |
 
 ### v0.11.5 — alpha-test fixes: one-shot OOM guard, query truncation warning, explicit year (2026-06-28)
 
