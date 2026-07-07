@@ -467,16 +467,23 @@ def _field5_codes(lines: "pl.Series") -> "pl.Series":
     """Vectorized field-5 stock code for a Series of raw TICST120 lines.
 
     The Polars equivalent of :func:`tse_tick.partscan.extract_stock_code` applied
-    per line: split on the ``","`` field delimiter, take field index 5, then
-    ``.strip()[:4]``. (An empty field-5 yields ``""`` where ``extract_stock_code``
-    returns ``None``; neither is a member of any ticker set, so the kept-line set is
-    identical — pinned by ``tests/test_field5_filter.py``.)
+    per line, matching it byte-for-byte on every input: split on the ``","`` field
+    delimiter, take field index 5, then read only up to the next ``"`` (so a field-5
+    that is the record's terminal field, or contains an embedded ``"``, parses the
+    same as ``extract_stock_code``'s ``find('"')`` — not reachable in a real 95-field
+    TICST120 record, but kept exact), then ``.strip()[:4]``. An empty/absent field-5
+    is mapped to ``null`` — exactly as ``extract_stock_code`` returns ``None`` — so
+    such a line is never kept, even for a degenerate ``ticker_filter`` containing
+    ``""``. Pinned by ``tests/test_field5_filter.py``.
     """
     return (
         lines.str.split('","')
         .list.get(5, null_on_oob=True)
+        .str.split('"')
+        .list.get(0, null_on_oob=True)
         .str.strip_chars(_FIELD5_WS)
         .str.slice(0, 4)
+        .replace("", None)
     )
 
 

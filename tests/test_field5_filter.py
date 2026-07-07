@@ -76,9 +76,8 @@ def test_field5_codes_membership_matches_extract_stock_code():
     lines = [_line(c) for c in cases]
     vec = _field5_codes(pl.Series("raw", lines, dtype=pl.String)).to_list()
     ref = [extract_stock_code((ln + "\n").encode("latin-1")) for ln in lines]
-    # extract_stock_code returns None for empty/missing; the vectorized form yields
-    # "" — neither is a member of any real ticker set, so normalize both to "".
-    assert [v or "" for v in vec] == [r or "" for r in ref]
+    # exact match, including empty/missing field-5 -> None (not "") in both.
+    assert vec == ref
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +119,81 @@ def test_crlf_line_endings_round_trip():
 def test_no_matches_returns_empty_bytes():
     payload = _multi_ticker_part(["1301", "7203"])
     assert _read_individual_stock_matches(io.BytesIO(payload), {"6758"}) == b""
+
+
+def test_degenerate_empty_ticker_filter_keeps_nothing_like_oracle():
+    # A line whose field-5 is empty: the byte-loop drops it (extract_stock_code ->
+    # None); the vectorized filter must too, even for the degenerate filter {""}
+    # (which _normalize_ticker_filter can produce from ticker_filter={""}).
+    empty5 = _line(["1", "2", "3", "4", "5", "", "x"])
+    normal = _line(["1", "2", "3", "4", "5", "7203", "x"])
+    payload = (empty5 + "\n" + normal + "\n").encode("latin-1")
+    for flt in ({""}, {"", "  "}):
+        ref = _byteloop_matches(io.BytesIO(payload), flt)
+        vec = _read_individual_stock_matches(io.BytesIO(payload), flt)
+        assert ref == []  # oracle keeps nothing for an empty/whitespace code
+        assert _vec_lines(vec) == _norm(ref) == []
+
+
+def test_malformed_field5_parses_like_oracle():
+    # Not reachable in a real 95-field TICST120 record (field 5 is never the terminal
+    # field, and a stock code never contains a `"`), but the vectorized parser still
+    # matches extract_stock_code exactly for these malformed shapes.
+    cases = [
+        (b'"1","2","3","4","5","72"\n', {"72"}),        # terminal field, <4-char code
+        (b'"1","2","3","4","5","7"20","z"\n', {"7"}),   # embedded quote inside field 5
+    ]
+    for payload, flt in cases:
+        ref = _byteloop_matches(io.BytesIO(payload), flt)
+        vec = _read_individual_stock_matches(io.BytesIO(payload), flt)
+        assert len(ref) == 1  # the oracle keeps it (code read up to the next `"`)
+        assert _vec_lines(vec) == _norm(ref)
+
+
+def test_non_ascii_high_byte_latin1_round_trip():
+    # A field carrying non-ASCII / high bytes (>0x7F) must round-trip byte-for-byte
+    # through the latin-1 decode/encode; this pins the load-bearing round-trip in CI
+    # (the real-data test that exercises it is skipped without NEEDS data).
+    hi = b"\x80\xa0\xff\xe3\x83\x88"  # arbitrary high bytes in a non-field-5 column
+    a = b'"1","2","3","4","5","7203","' + hi + b'","z"'
+    b = b'"1","2","3","4","5","1301","' + hi + b'","z"'
+    payload = a + b"\n" + b + b"\n"
+    flt = {"7203"}
+    ref = _byteloop_matches(io.BytesIO(payload), flt)
+    vec = _read_individual_stock_matches(io.BytesIO(payload), flt)
+    assert vec == b"".join(ref)  # exact bytes incl. the high-byte column
+
+
+class _CountingReader:
+    """A binary stream that records the largest single ``read`` it served."""
+
+    def __init__(self, data: bytes):
+        self._bio = io.BytesIO(data)
+        self.max_read = 0
+        self.n_reads = 0
+
+    def read(self, n: int = -1) -> bytes:
+        chunk = self._bio.read(n)
+        self.max_read = max(self.max_read, len(chunk))
+        self.n_reads += 1
+        return chunk
+
+
+def test_reads_are_block_bounded_never_whole_part():
+    # Bounded-memory gate (G2), asserted structurally in CI: the filter must stream
+    # the part in blocks and never read (hence never materialize) the whole part.
+    payload = _multi_ticker_part(["1301", "7203", "8001", "9984", "9999"], rows=200)
+    assert len(payload) > 50_000  # comfortably many blocks at block_bytes=4096
+    block = 4096
+    reader = _CountingReader(payload)
+    out = _read_individual_stock_matches(reader, {"7203", "9984"}, block_bytes=block)
+    # No single read returned more than one block, and it took many reads to consume
+    # the part -> the whole decompressed part is never held at once.
+    assert reader.max_read <= block
+    assert reader.n_reads >= len(payload) // block
+    # ...and correctness is unaffected by the small block size.
+    ref = _norm(_byteloop_matches(io.BytesIO(payload), {"7203", "9984"}))
+    assert _vec_lines(out) == ref
 
 
 def test_last_line_without_trailing_newline():
