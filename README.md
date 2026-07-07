@@ -222,6 +222,32 @@ df = tse_tick.read_ticks(
 )
 ```
 
+> **⚠️ Reading a lot at once? Mind the 10M-row cap.** `read_ticks` returns at most
+> **10,000,000 rows** per call — on hitting it, the result is truncated and a capturable
+> `tse_tick.TruncationWarning` is emitted. A whole **month** of a couple of *active*
+> tickers can exceed this: e.g. Toyota (7203) + SoftBank (9984) for one January is
+> ~25M rows, so a single `read_ticks(..., date="202201")` stops at ~10M (about 10 of
+> 19 days). To get **everything**, pick one:
+>
+> - **Two-stage (recommended for scale)** — `ingest_period(...)` → `query_ticks(...)`,
+>   or `extract_to_store(...)` for a single ticker. No row cap; the store is reusable.
+> - **Loop per day** — call `read_ticks(..., date=day)` for each trading day and
+>   `pl.concat(...)`; each day stays well under the cap.
+> - **Lift the cap** — `read_ticks(..., rows=None)` (or a higher `rows=`) reads it all
+>   in one shot, bounded only by memory.
+>
+> If a one-shot read might be large, check for a `TruncationWarning` (it's the signal
+> to switch to the two-stage store):
+>
+> ```python
+> import warnings
+> with warnings.catch_warnings(record=True) as w:
+>     warnings.simplefilter("always")
+>     df = tse_tick.read_ticks(root, ticker_filter={"7203", "9984"}, date="202201")
+> if any(issubclass(x.category, tse_tick.TruncationWarning) for x in w):
+>     ...  # truncated — build a store instead
+> ```
+
 ---
 
 ## Data Types
