@@ -149,6 +149,51 @@ def test_partition_lands_per_day_incrementally(tmp_path, monkeypatch):
         assert _ticker_rows(store, day, TICKER) == 18, day
 
 
+def test_resume_ingested_dates_hold_correct_rows(tmp_path):
+    # Beyond counting prune CALLS: the dates actually ingested during a resumed run
+    # must end up with the right store content (not just be visited).
+    src = tmp_path / "src"
+    _seed_days(src)
+    store = tmp_path / "store"
+
+    # Partial first pass: only the first day.
+    tse_tick.ingest_period(str(src), str(store), DAYS[0],
+                           "individual_stock", ticker_filter={TICKER})
+    first_rows = _ticker_rows(store, DAYS[0], TICKER)
+    assert first_rows == 18
+
+    # Resume the full period: the remaining days get ingested now.
+    tse_tick.ingest_period(str(src), str(store), f"{DAYS[0]}-{DAYS[-1]}",
+                           "individual_stock", ticker_filter={TICKER}, resume=True)
+
+    assert _ticker_rows(store, DAYS[0], TICKER) == first_rows  # unchanged, not rewritten
+    for day in DAYS[1:]:
+        ref = tse_tick.read_ticks(str(src), ticker_filter={TICKER}, date=day, prune_parts=False)
+        assert _ticker_rows(store, day, TICKER) == ref.height == 18, day
+
+
+def test_per_date_prune_selects_same_parts_as_whole_period_prune(tmp_path):
+    # The commit's core claim: pruning each date's parts inside the loop selects the
+    # IDENTICAL parts as the old whole-period prune (which grouped by day internally).
+    src = tmp_path / "src"
+    _seed_days(src)
+    all_parts = sorted(
+        (src).glob("**/HTICST120.*.zip"),
+        key=lambda p: (p.name.split(".")[1], int(p.name.split(".")[2])),
+    )
+    flt = {TICKER}
+    # OLD behavior: prune the whole multi-day list at once.
+    whole = _prune_parts_by_ticker(all_parts, flt)
+    whole_by_day = {}
+    for p in whole:
+        whole_by_day.setdefault(p.name.split(".")[1], []).append(p.name)
+    # NEW behavior: prune each day's parts separately.
+    for day in DAYS:
+        day_parts = [p for p in all_parts if p.name.split(".")[1] == day]
+        per_date = _prune_parts_by_ticker(day_parts, flt)
+        assert sorted(p.name for p in per_date) == sorted(whole_by_day[day]), day
+
+
 def test_query_ticks_store_equals_read_ticks_multiday(tmp_path):
     pytest.importorskip("duckdb")
     src = tmp_path / "src"
