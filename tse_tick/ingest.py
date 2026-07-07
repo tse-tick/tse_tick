@@ -259,13 +259,6 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
     Resume is keyed per-date (a date is written atomically), so later parts of a
     date are never skipped or overwritten — fixing the multi-part data loss.
     """
-    # Part-pruning: for a ticker-filtered individual_stock ingest, open only the
-    # contiguous run of parts that holds the ticker(s) per day, not every part.
-    # Degrades to all parts when the ascending-code layout can't be confirmed, so
-    # the store contents are identical — only the ingest I/O shrinks.
-    if ticker_filter and data_type == "individual_stock":
-        zip_paths = _prune_parts_by_ticker(list(zip_paths), ticker_filter)
-
     output_root_path = Path(output_dir) / data_type
     groups: dict = {}
     for zp in zip_paths:
@@ -274,12 +267,25 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
             continue
         groups.setdefault(tok, []).append(zp)
 
+    # Part-pruning runs per date INSIDE the loop, after the resume-skip check
+    # (issue #39): a ticker-filtered individual_stock ingest opens only the
+    # contiguous run of parts holding the ticker(s) for that day. Doing it per date
+    # rather than for the whole period upfront means (a) a partition lands after each
+    # day's short prune instead of only after the entire period is pruned (~80 min
+    # for a year, with no partition and no checkpoint written), and (b) a resumed run
+    # prunes only the dates it actually ingests, not every date it is about to skip.
+    # `_prune_parts_by_ticker` groups by day internally, so per-date pruning selects
+    # the identical parts per day — the store contents are unchanged.
+    prune = bool(ticker_filter) and data_type == "individual_stock"
+
     results: list[dict] = []
     for date_str, parts in groups.items():
         if resume and output_root_path.exists():
             date_dir = output_root_path / f"date={date_str}"
             if date_dir.exists() and any(date_dir.glob("ticker=*.parquet")):
                 continue
+        if prune:
+            parts = _prune_parts_by_ticker(parts, ticker_filter)
         meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language, ticker_filter)
         results.append(meta)
         logger.info("  %s (%d parts) -> %s rows", date_str, meta["parts"], meta["rows"])
