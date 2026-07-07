@@ -197,6 +197,13 @@ tse_tick/                          # Project root
 | Docs | A single numbered ZIP holds only part of a day (filtering a lone part → 0 rows); pass the directory/root |
 | Tests | Suite **243** (`+6`: no-ZIPs empty+warn, `display`/Windows print, discovery fast-path) |
 
+### v0.12.0 — multi-ticker `extract_to_store` (2026-07-07)
+
+| Change | Detail |
+|--------|--------|
+| Multi-ticker `extract_to_store` | `ticker` accepts a `str` **or an iterable** (`"7203"` or `["7203","9984"]`). Tickers are ingested in one part-pruned `ingest_period` pass, then each is queried and the frames concatenated (sorted-code order). No 10M-row cap (unlike one-shot `read_ticks`). Single-ticker calls unchanged. Absent-ticker empty frames (which `query_ticks` returns without the `date` partition column) are dropped before concat |
+| Tests | `test_extract_to_store.py` +3 (multi-ticker, one-absent, empty-raises) |
+
 ### v0.11.6 — part-pruning for single-ticker reads + one-call two-stage (2026-07-07)
 
 | Change | Detail |

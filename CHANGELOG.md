@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+- **`extract_to_store` accepts one *or many* tickers.** Its `ticker` argument now
+  takes a string **or an iterable** (`"7203"` or `["7203", "9984"]`) — the tickers are
+  ingested into the store in one part-pruned pass and returned concatenated. This makes
+  a whole month of several active tickers a single call with no 10M-row cap (the
+  one-shot `read_ticks` limit that truncated such reads). Single-ticker calls are
+  unchanged. An absent ticker contributes no rows (its empty per-ticker frame — which
+  `query_ticks` returns without the `date` partition column — is dropped before concat).
+
 ### Documentation
 - **Large / multi-ticker reads and the 10M-row cap.** README and the `read_ticks`
   docstring now spell out that a one-shot read caps at 10,000,000 rows (with a
