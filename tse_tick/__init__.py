@@ -301,7 +301,7 @@ def get_info(path=None):
 
     # Two-stage (recommended for repeated reads) - build a reusable store once,
     # then query it (sub-second). extract_to_store does both in one call:
-    >>> df = tse_tick.extract_to_store("DATA_ROOT", store, "20240201", "7203")
+    >>> df = tse_tick.extract_to_store("DATA_ROOT", store, "202402", ["7203", "9984"])
     >>> from tse_tick import DataType
     >>> tse_tick.query_ticks(store, data_type=DataType.INDIVIDUAL_STOCK,
     ...                      ticker=7203, date="20240201",
