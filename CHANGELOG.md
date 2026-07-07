@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-07
+
+Bug fix: `extract_to_store` returns all rows (no 10M query cap), plus refreshed example notebooks.
+
 ### Fixed
 - **`extract_to_store` no longer truncates a very active ticker at 10M rows.** It
   queried the store via `query_ticks` with the default `limit=10_000_000`, so a
