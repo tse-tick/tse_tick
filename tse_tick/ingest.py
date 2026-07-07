@@ -14,11 +14,11 @@ import logging
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Union
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes, _prune_parts_by_ticker, OneShotMemoryError
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, OneShotMemoryError
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -399,7 +399,7 @@ def extract_to_store(
     input_root: str,
     output_dir: str,
     period: str,
-    ticker: str,
+    ticker: Union[str, Iterable[str]],
     *,
     data_type: str = "individual_stock",
     start_time: Optional[str] = None,
@@ -407,13 +407,14 @@ def extract_to_store(
     language: str = "en",
     resume: bool = True,
 ) -> "pl.DataFrame":
-    """Two-stage extraction in ONE call: ingest a ticker for a period into a
-    reusable Parquet store, then return the queried DataFrame.
+    """Two-stage extraction in ONE call: ingest one or more tickers for a period
+    into a reusable Parquet store, then return the queried DataFrame.
 
-    The one-liner for "give me this ticker for this period." Prefer it over
-    :func:`tse_tick.read_ticks` whenever the data will be read more than once: the
-    expensive raw scan is paid **once** into the store (the build is resume-safe
-    and, for ``individual_stock``, part-pruned to the ticker's parts), and every
+    The one-liner for "give me this ticker (or these tickers) for this period."
+    Prefer it over :func:`tse_tick.read_ticks` whenever the data will be read more
+    than once, or when a whole month of active tickers would exceed ``read_ticks``'s
+    10M-row cap: the expensive raw scan is paid **once** into the store (resume-safe
+    and, for ``individual_stock``, part-pruned to the tickers' parts), and every
     later :func:`tse_tick.query_ticks` against ``output_dir`` is sub-second.
 
     Args:
@@ -421,8 +422,8 @@ def extract_to_store(
             above it — the same inputs the ``ingest_*`` functions accept).
         output_dir: Parquet store to build/reuse.
         period: ``"YYYY"``, ``"YYYYMM"``, ``"YYYYMMDD"``, or a ``"start-end"`` range.
-        ticker: A single stock/index code, e.g. ``"7203"`` (Toyota) or ``"101"``
-            (Nikkei 225).
+        ticker: One code **or an iterable of codes**, e.g. ``"7203"`` (Toyota),
+            ``["7203", "9984"]``, or ``"101"`` (Nikkei 225). ``int`` codes work too.
         data_type: One of the four NEEDS types (default ``"individual_stock"``).
         start_time: Optional intraday lower bound ``"HH:MM:SS"`` (tick types only;
             the two ``*_summary`` types are daily aggregates and raise if given).
@@ -431,31 +432,48 @@ def extract_to_store(
         resume: Skip dates already in the store (default ``True``).
 
     Returns:
-        The queried Polars DataFrame for ``ticker`` (columns match
-        :func:`tse_tick.query_ticks` — the read columns plus a ``date`` column). A
-        multi-day ``period`` returns every stored day for the ticker; build into a
-        fresh ``output_dir`` to get exactly ``period``.
+        The queried Polars DataFrame for the requested ticker(s) — columns match
+        :func:`tse_tick.query_ticks` (the read columns plus a ``date`` column). With
+        several tickers the per-ticker frames are concatenated (in sorted code
+        order). A multi-day ``period`` returns every stored day for those tickers;
+        build into a fresh ``output_dir`` to get exactly ``period``.
 
     Requires the optional ``[query]`` extra (DuckDB). Example::
 
-        >>> df = tse_tick.extract_to_store("G:/NEEDS", "toyota_store",
-        ...                                "20230101-20251231", "7203")
+        >>> df = tse_tick.extract_to_store("G:/NEEDS", "toyota_sb_store",
+        ...                                "202201", ["7203", "9984"])
     """
     from tse_tick.query import query_ticks
 
+    tickers = _normalize_ticker_filter(ticker)
+    if not tickers:
+        raise ValueError("extract_to_store: at least one ticker is required")
+
+    # Stage 1 — ingest every ticker in one part-pruned pass into the reusable store.
     ingest_period(
         input_root, output_dir, period, data_type,
-        language=language, resume=resume, ticker_filter={str(ticker)},
+        language=language, resume=resume, ticker_filter=tickers,
     )
-    # query_ticks takes a single day or all stored dates (None). A fresh store holds
-    # exactly (ticker, period), so query all of it; scope to the day if period is one.
+    # Stage 2 — query each ticker. query_ticks takes a single day or all stored dates
+    # (None); a fresh store holds exactly (tickers, period), so scope to the day only
+    # when period is one. Concatenate the per-ticker frames in sorted-code order.
     query_date = period if (period.isdigit() and len(period) == 8) else None
-    kw = dict(data_type=data_type, ticker=str(ticker), date=query_date)
-    if start_time is not None:
-        kw["start_time"] = start_time
-    if end_time is not None:
-        kw["end_time"] = end_time
-    return query_ticks(output_dir, **kw)
+    frames = []
+    for code in sorted(tickers):
+        kw = dict(data_type=data_type, ticker=code, date=query_date)
+        if start_time is not None:
+            kw["start_time"] = start_time
+        if end_time is not None:
+            kw["end_time"] = end_time
+        frames.append(query_ticks(output_dir, **kw))
+    # Drop empty per-ticker frames before concatenating: query_ticks omits the
+    # `date` partition column from a 0-row result (there is no partition dir to
+    # derive it from), so an absent ticker's frame has one fewer column and would
+    # break a vertical concat. An absent ticker contributes no rows regardless.
+    non_empty = [f for f in frames if f.height > 0]
+    if not non_empty:
+        return frames[0]  # every requested ticker absent for the period -> typed-empty
+    return non_empty[0] if len(non_empty) == 1 else pl.concat(non_empty, how="vertical")
 
 
 def _process_zips(
