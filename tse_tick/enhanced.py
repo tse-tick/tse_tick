@@ -8,6 +8,7 @@ import glob
 import logging
 import warnings
 from collections import defaultdict
+from itertools import groupby
 from pathlib import Path
 from typing import Optional, Literal, Tuple, List, Dict, Union
 
@@ -22,6 +23,7 @@ from .schemas import (
     get_schema_indices_23,
     get_japanese_column_mapping,
 )
+from .partscan import extract_stock_code, select_parts_for_day
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +302,24 @@ def _zip_sort_key(path) -> Tuple[str, int]:
     return (date_tok, part_num)
 
 
+def _prune_parts_by_ticker(zips: List[Path], ticker_filter: set) -> List[Path]:
+    """Restrict a (possibly multi-day) TICST120 zip list to the parts that hold
+    ``ticker_filter``, per day.
+
+    A high-volume code straddles a contiguous run of consecutive parts, so this
+    delegates to :func:`tse_tick.partscan.select_parts_for_day` (probe + backward
+    run scan). Keeps ALL of a day's parts whenever pruning can't be confirmed
+    (``select`` returns ``None``), so results never change — only the I/O shrinks.
+    """
+    out: List[Path] = []
+    ordered = sorted(zips, key=_zip_sort_key)
+    for _day, grp in groupby(ordered, key=lambda p: _zip_sort_key(p)[0]):
+        parts = list(grp)
+        chosen = select_parts_for_day(parts, ticker_filter)
+        out.extend(parts if chosen is None else chosen)
+    return out
+
+
 def _discover_zips_recursive(
     root: Path,
     prefixes: Union[str, List[str]],
@@ -532,18 +552,9 @@ def get_1y_dataframe(
                     elif ticker_filter and kind == "individual_stock":
                         kept_lines = []
                         for raw_line in f:
-                            pos = 0
-                            for _ in range(5):
-                                idx = raw_line.find(b'","', pos)
-                                if idx == -1:
-                                    break
-                                pos = idx + 3
-                            else:
-                                end = raw_line.find(b'"', pos)
-                                if end != -1:
-                                    stock_code = raw_line[pos:end].strip()[:4].decode("ascii")
-                                    if stock_code in ticker_filter:
-                                        kept_lines.append(raw_line)
+                            stock_code = extract_stock_code(raw_line)
+                            if stock_code is not None and stock_code in ticker_filter:
+                                kept_lines.append(raw_line)
 
                         if kept_lines:
                             raw_bytes = b"".join(kept_lines)
@@ -1111,6 +1122,7 @@ def read_ticks(
     columns: Optional[List[str]] = None,
     rows: Optional[int] = 10_000_000,
     language: Literal["en", "jp"] = "en",
+    prune_parts: bool = True,
     max_oneshot_bytes: Optional[int] = _DEFAULT_ONESHOT,
 ) -> pl.DataFrame:
     """One-shot read: raw NEEDS ZIPs -> a ticker/time-filtered DataFrame (no store).
@@ -1146,6 +1158,12 @@ def read_ticks(
             emitted** (capturable via ``warnings``) — the signal to build a store
             and use :func:`tse_tick.query_ticks` instead.
         language: Output column-name language, ``"en"`` or ``"jp"``.
+        prune_parts: For ``individual_stock`` + a ``ticker_filter``, open only the
+            short contiguous run of numbered parts that actually holds the
+            ticker(s) instead of every part of the day (NEEDS numbers parts by
+            ascending code but a busy code spans a few consecutive parts). Falls
+            back to opening all parts if the ascending-code layout can't be
+            confirmed, so the result is identical — only faster. Default ``True``.
         max_oneshot_bytes: Cumulative decompressed-size ceiling across the ZIPs this
             read opens (default 5 GB; pass a larger ``int`` or ``None`` to disable).
             Crossing it raises :class:`OneShotMemoryError` — the signal to switch to
@@ -1208,6 +1226,12 @@ def read_ticks(
             "this folder (e.g. pointing 'individual_stock' at an index folder)."
         )
         return _empty_typed_frame(data_type, language, _year_hint_from_date(date))
+
+    # Part-pruning: a single ticker's rows sit in a short contiguous run of parts,
+    # so open only that run instead of every part of the day. Degrades to all parts
+    # when the ascending-code layout can't be confirmed, so results are identical.
+    if prune_parts and data_type == "individual_stock" and norm_filter:
+        zips = _prune_parts_by_ticker(zips, norm_filter)
 
     # create_df reaches the raw-byte fast path only for individual_stock.
     cdf_filter = norm_filter if data_type == "individual_stock" else None

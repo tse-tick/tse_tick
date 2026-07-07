@@ -180,3 +180,32 @@ def test_cli_export_csv_from_nested_tree(tmp_path, monkeypatch, capsys):
     assert set(df["Stock Code"].cast(str).str.slice(0, 4).to_list()) == {"7203"}
     assert df.height == 20
     assert "Wrote 20 rows" in capsys.readouterr().out
+
+
+def test_cli_export_two_stage_store(tmp_path, monkeypatch, capsys):
+    """`tse-tick export --store` builds a reusable store (two-stage) then writes CSV.
+
+    7203 straddles both parts, exercising the run-scan + last-part pruning end to end.
+    """
+    import polars as pl
+    pytest.importorskip("duckdb")
+
+    month = tmp_path / "個別株式2024" / "TICST120" / "202401"
+    month.mkdir(parents=True)
+    write_zip(month / "HTICST120.20240104.1.zip", "HTICST120.20240104.1.csv",
+              individual_stock_csv("20240104", ["1301", "7203"], rows_per_ticker=10))
+    write_zip(month / "HTICST120.20240104.2.zip", "HTICST120.20240104.2.csv",
+              individual_stock_csv("20240104", ["7203", "9999"], rows_per_ticker=10))
+    out = tmp_path / "toyota.csv"
+    store = tmp_path / "store"
+    monkeypatch.setattr("sys.argv", [
+        "tse-tick", "export", "--data-type", "individual_stock",
+        "--input-root", str(tmp_path), "--tickers", "7203",
+        "--period", "20240104", "--output", str(out), "--store", str(store),
+    ])
+    main()
+    assert out.exists()
+    assert store.exists()                       # reusable store was built and left on disk
+    df = pl.read_csv(out)
+    assert set(df["Stock Code"].cast(str).str.slice(0, 4).to_list()) == {"7203"}
+    assert df.height == 20                       # 7203 rows from BOTH parts captured

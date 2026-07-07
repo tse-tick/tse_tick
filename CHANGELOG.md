@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-07-07
+
+Faster single-ticker `individual_stock` reads via part-pruning, plus a one-call two-stage helper.
+
+### Added
+- **Part-pruning for `individual_stock` single-ticker reads.** NEEDS numbers each day's TICST120 parts
+  in ascending stock-code order, so a ticker's rows sit in a short contiguous **run** of parts (plus a
+  trailing off-auction/special-records **appendix** in the day's last part). `read_ticks(...)` now
+  probes each part's first record, opens only that run **∪ {last part}**, and falls back to opening all
+  parts if the ascending-code layout can't be confirmed — so results are **row-for-row identical** to a
+  full scan, only faster (~5-7× typical; validated 18/18 days on a 3-year Toyota 7203 sample). New
+  `read_ticks(..., prune_parts=True)` (default; `False` forces a full scan). New module
+  `tse_tick/partscan.py`.
+- **`extract_to_store(input_root, output_dir, period, ticker, ...)`** — two-stage in one call: ingest a
+  ticker for a period into a reusable, part-pruned Parquet store, then return the queried DataFrame.
+  The recommended path when the data will be read more than once. Requires the `[query]` extra.
+- **`tse-tick export --store <dir>`** — build a reusable store while exporting a single
+  `individual_stock` ticker (two-stage).
+
+### Changed
+- **Ticker-filtered `individual_stock` ingest is part-pruned** (`ingest_period` / `_ingest_grouped`), so
+  the two-stage store build opens only the ticker's parts. Store contents unchanged.
+- The field-5 stock-code parse used by the raw-byte fast path is now the single shared
+  `partscan.extract_stock_code`.
+
 ## [0.11.5] - 2026-06-28
 
 Fixes from an alpha-test report — three findings, hardened after a full code review that caught a

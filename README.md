@@ -19,7 +19,8 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 - **Ticker filtering** (`--tickers`) — keep only specific stock codes at read time
 - **Event-window extraction** (`--filter-csv`) — extract ±N minute windows around corporate events with automatic after-hours reaction-anchor shifting
 - **Bilingual columns** — English and Japanese column names via `--language en|jp`
-- **One-shot reader** (`read_ticks`) — raw ZIPs → a ticker/time-filtered DataFrame with no Parquet store to build first
+- **One-shot reader** (`read_ticks`) — raw ZIPs → a ticker/time-filtered DataFrame with no Parquet store to build first; **part-pruned** for `individual_stock` (opens only the ticker's parts, not the whole day)
+- **One-call two-stage** (`extract_to_store`) — ingest a ticker for a period into a reusable store and get the DataFrame back in one call (the recommended path for repeated reads)
 - **Name translation** (`translate`) — look up the `tse_tick` equivalent of a yfinance / Polygon / ccxt call (tables in `tse_tick/data/translations.json`; override with `TSE_TICK_TRANSLATIONS`)
 - **Typed enums** (`DataType`, `Language`) — autocomplete-friendly and accepted anywhere the magic strings are
 - **Security guards** — ZIP bomb detection (5 GB max decompressed, 100:1 compression ratio cap, max 5 entries), path traversal prevention, query row limits (10M)
@@ -116,10 +117,11 @@ tse-tick ingest \
     --window 120
 ```
 
-### CLI — export one ticker to CSV or Parquet (no store)
+### CLI — export one ticker to CSV or Parquet
 
-For a quick slice straight from the raw ZIPs — ideal if you don't write Python. Reads **every part**
-of each day, so the result is complete:
+For a quick slice straight from the raw ZIPs — ideal if you don't write Python. For
+`individual_stock` + a ticker it is **part-pruned** (opens only the ticker's parts), so it's fast
+and the result is complete:
 
 ```bash
 tse-tick export \
@@ -128,6 +130,15 @@ tse-tick export \
     --period 20240201-20240205 \
     --input-root /path/to/TSE_DATA \
     --output toyota.csv            # .csv or .parquet, chosen by extension
+```
+
+Add `--store /path/to/store` to build a **reusable Parquet store** as it exports (the two-stage
+path — best when you'll read the data again; requires the `[query]` extra):
+
+```bash
+tse-tick export --data-type individual_stock --tickers 7203 \
+    --period 20240201-20240205 --input-root /path/to/TSE_DATA \
+    --output toyota.csv --store /path/to/toyota_store
 ```
 
 ### Query the Parquet store
@@ -176,16 +187,32 @@ features = tse_tick.compute_all_features(df)
 
 ### Two access patterns
 
-`tse_tick` gives you a filtered DataFrame two ways:
+`tse_tick` gives you a filtered DataFrame two ways. **For anything you'll read more than once, prefer the two-stage store** — you pay the raw scan once and every later query is sub-second.
 
-1. **Two-stage (scale / repeated work)** — `ingest` the raw ZIPs into a Hive-partitioned Parquet store once, then `query_ticks` it repeatedly. Querying the store prunes by date/ticker and is far faster than re-reading raw files (~694× vs a pandas CSV scan; see [Performance](#performance)).
-2. **One-shot (quick, targeted exploration)** — `read_ticks(...)` reads straight from raw ZIPs to a ticker/time-filtered DataFrame with no store to build first. It reads **every ZIP part** of each day (complete multi-part data) and accepts a **date range** (`date="20240201-20240205"`); best for one or a few tickers over a bounded window. The `tse-tick export` CLI wraps it to CSV/Parquet for non-coders.
+1. **Two-stage (recommended — scale / repeated work).** `ingest` the raw ZIPs into a Hive-partitioned Parquet store once, then `query_ticks` it repeatedly (~694× faster than a pandas CSV scan; see [Performance](#performance)). `extract_to_store(...)` does both in one call:
+
+```python
+import tse_tick
+
+# Build a reusable store for Toyota and get the DataFrame back — in one call.
+df = tse_tick.extract_to_store(
+    "/path/to/TSE_DATA",          # a .zip, flat folder, or ANY folder above the data
+    "/path/to/PARQUET_STORE",     # reusable store (built once; resume-safe, part-pruned)
+    "20240201-20240205",          # a day, month, year, or range
+    "7203",                       # Toyota
+)
+# ...every later read of the store is sub-second:
+df = tse_tick.query_ticks("/path/to/PARQUET_STORE", data_type="individual_stock",
+                          ticker=7203, date="20240201")
+```
+
+2. **One-shot (quick, targeted exploration).** `read_ticks(...)` reads straight from raw ZIPs to a ticker/time-filtered DataFrame with no store to build first. For `individual_stock` + a ticker filter it is **part-pruned** — it opens only the small run of numbered parts that hold the ticker (not every part of the day), so a single-ticker read is several times faster while returning **identical** rows (pass `prune_parts=False` to force a full scan). Accepts a **date range** (`date="20240201-20240205"`); best for one or a few tickers over a bounded window. The `tse-tick export` CLI wraps it to CSV/Parquet for non-coders.
 
 ```python
 import tse_tick
 
 # Toyota (7203) over a date range — straight from the raw ZIPs, no store.
-# read_ticks reads EVERY part of each day, so the result is complete.
+# Part-pruned: opens only 7203's parts; the result is complete and exact.
 df = tse_tick.read_ticks(
     "/path/to/TSE_DATA",          # a .zip, a flat folder, or ANY folder above the data (located by type+date)
     ticker_filter={"7203"},
@@ -349,6 +376,19 @@ Returns a Polars DataFrame with English or Japanese column names.
 
 Load and export to CSV. If `output_path` is `None`, generates a filename.
 
+### `read_ticks(source, *, data_type="individual_stock", ticker_filter=None, date=None, start_time=None, end_time=None, columns=None, rows=10_000_000, language="en", prune_parts=True, max_oneshot_bytes=...)`
+
+One-shot read: raw NEEDS ZIPs → a ticker/time-filtered DataFrame, no store.
+
+- `source` — a `.zip`, a flat folder, or any folder above the data (located by type + date)
+- `ticker_filter` — a `set` of codes (e.g. `{"7203"}`); a bare `"7203"`/`7203` also works
+- `date` — a day `"YYYYMMDD"`, month `"YYYYMM"`, year `"YYYY"`, or a `"start-end"` range
+- `prune_parts` — for `individual_stock` + a `ticker_filter`, open only the contiguous run of numbered parts that hold the ticker (plus the day's trailing appendix part) instead of every part. Falls back to a full scan if the ascending-code layout can't be confirmed, so results are identical — only faster. Default `True`; set `False` to force a full scan.
+
+### `extract_to_store(input_root, output_dir, period, ticker, *, data_type="individual_stock", start_time=None, end_time=None, language="en", resume=True)`
+
+Two-stage in one call: ingest `ticker` for `period` into a reusable, part-pruned Parquet store (`output_dir`), then return the queried DataFrame. Prefer it over `read_ticks` when the data will be read more than once — the raw scan is paid once and later `query_ticks` reads are sub-second. Requires the `[query]` extra (DuckDB).
+
 ---
 
 ## Security
@@ -366,6 +406,14 @@ Built-in protections for local data processing:
 | SQL injection prevention | Identifier/date/time format validation |
 
 ---
+
+## What's New in 0.11.6
+
+`tse_tick` 0.11.6 — `pip install -U tse-tick`. Faster single-ticker reads + a one-call two-stage helper:
+
+- **Part-pruning for `individual_stock` single-ticker reads.** `read_ticks(...)` (and the ticker-filtered `ingest_*` / `tse-tick export`) now open only the contiguous run of numbered parts that hold the ticker — plus the day's trailing off-auction appendix part — instead of every part of the day. Validated **row-for-row identical** to a full scan across a 3-year Toyota (7203) sample (18/18 days), ~5-7× faster typically. Controlled by `read_ticks(..., prune_parts=True)` (default; set `False` to force a full scan); falls back to a full scan automatically if the ascending stock-code layout can't be confirmed.
+- **`extract_to_store(input_root, store, period, ticker, ...)`** — two-stage in one call: build a reusable, part-pruned Parquet store then return the queried DataFrame. The recommended path when you'll read the data more than once.
+- **`tse-tick export --store <dir>`** — build a reusable store while exporting (single `individual_stock` ticker).
 
 ## What's New in 0.11.5
 

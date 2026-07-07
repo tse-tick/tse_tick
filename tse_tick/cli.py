@@ -157,16 +157,39 @@ def cmd_export(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     ticker_filter = _parse_tickers(args.tickers) if args.tickers else None
-    print(f"Reading {args.data_type} from {args.input_root} (this scans raw ZIPs)...")
-    df = tse_tick.read_ticks(
-        args.input_root,
-        data_type=args.data_type,
-        ticker_filter=ticker_filter,
-        date=args.period,
-        start_time=args.start_time,
-        end_time=args.end_time,
-        language=args.language,
-    )
+
+    store = getattr(args, "store", None)
+    if store and args.data_type == "individual_stock" and ticker_filter and len(ticker_filter) == 1:
+        # Two-stage: build a reusable, part-pruned Parquet store then query it. The
+        # store is left on disk for fast (sub-second) repeat queries.
+        ticker = next(iter(ticker_filter))
+        print(f"Building part-pruned store at {store}, then querying {ticker} (two-stage)...")
+        df = tse_tick.extract_to_store(
+            args.input_root,
+            store,
+            args.period,
+            ticker,
+            data_type=args.data_type,
+            start_time=args.start_time,
+            end_time=args.end_time,
+            language=args.language,
+        )
+    else:
+        if store:
+            print("Note: --store supports a single individual_stock ticker; "
+                  "doing a direct read instead.", file=sys.stderr)
+        # One-shot direct read. For individual_stock + a ticker filter this is
+        # automatically part-pruned (opens only the ticker's parts), so it's fast.
+        print(f"Reading {args.data_type} from {args.input_root} (part-pruned raw scan)...")
+        df = tse_tick.read_ticks(
+            args.input_root,
+            data_type=args.data_type,
+            ticker_filter=ticker_filter,
+            date=args.period,
+            start_time=args.start_time,
+            end_time=args.end_time,
+            language=args.language,
+        )
     if args.output.lower().endswith(".parquet"):
         df.write_parquet(args.output)
     else:
@@ -305,6 +328,13 @@ def _build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument(
         "--language", default="en", choices=["en", "jp"],
         help="Column name language (default: en)",
+    )
+    export_parser.add_argument(
+        "--store", default=None,
+        help="Optional Parquet store dir. If given for a single individual_stock "
+             "ticker, build a reusable, part-pruned store here then query it "
+             "(two-stage) — best when you will read the data more than once. Omit "
+             "for a one-off direct read (also part-pruned). Requires the [query] extra.",
     )
     export_parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
