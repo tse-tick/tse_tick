@@ -74,19 +74,25 @@ def test_extract_to_store_empty_tickers_raises(tmp_path):
         tse_tick.extract_to_store(src, store, "20240104", [])
 
 
-def test_extract_to_store_queries_without_row_cap(tmp_path, monkeypatch):
-    """extract_to_store must query with limit=None — otherwise a very active ticker
-    over a whole month is silently truncated at query_ticks's default 10M cap."""
-    _seed(tmp_path / "src", "20240104", {1: ["1301"], 2: ["7203"]})
+def test_extract_to_store_uses_single_uncapped_scan(tmp_path, monkeypatch):
+    """extract_to_store must query via the single-scan batch (issue #44): ONE call for
+    all tickers (no per-ticker N+1) and no row cap — a very active ticker over a whole
+    month would otherwise be truncated at query_ticks's default 10M."""
+    _seed(tmp_path / "src", "20240104", {1: ["1301"], 2: ["7203"], 3: ["9984"]})
     import tse_tick.query as q
-    real = q.query_ticks
-    seen_limits = []
+    real = q._query_extract_batch
+    calls = []
 
-    def spy(store, **kw):
-        seen_limits.append(kw.get("limit", "MISSING"))
-        return real(store, **kw)
+    def spy(data_dir, data_type, tickers, **kw):
+        calls.append((sorted(tickers), kw))
+        return real(data_dir, data_type, tickers, **kw)
 
-    monkeypatch.setattr(q, "query_ticks", spy)   # extract_to_store imports it lazily
-    tse_tick.extract_to_store(str(tmp_path / "src"), str(tmp_path / "store"), "20240104", "7203")
-    assert seen_limits and all(lim is None for lim in seen_limits), \
-        f"expected limit=None on every query_ticks call, got {seen_limits}"
+    monkeypatch.setattr(q, "_query_extract_batch", spy)  # extract_to_store imports it lazily
+    df = tse_tick.extract_to_store(
+        str(tmp_path / "src"), str(tmp_path / "store"), "20240104", ["7203", "9984"]
+    )
+    assert len(calls) == 1, f"expected ONE scan for all tickers, got {len(calls)}"
+    # the batch takes no `limit` (uncapped by construction) and covers every ticker
+    assert "limit" not in calls[0][1]
+    assert calls[0][0] == ["7203", "9984"]
+    assert df.height > 0

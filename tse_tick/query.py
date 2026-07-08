@@ -247,6 +247,140 @@ def query_ticks(
     return df
 
 
+def _query_extract_batch(
+    data_dir: str,
+    data_type: str,
+    tickers,
+    date: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+) -> pl.DataFrame:
+    """Byte-identical, lower-overhead replacement for concatenating
+    ``query_ticks(..., limit=None)`` over ``sorted(tickers)`` — the
+    :func:`tse_tick.extract_to_store` Stage-2 query without the per-ticker N+1 (issue #44).
+
+    A single DuckDB connection and a single scan replace the per-ticker loop's fresh
+    connection + whole-store glob + scan + Arrow->Polars conversion *per ticker* (and, for
+    the two ``*_summary`` types, N full-store scans). Every ticker's file list is built from
+    ONE store walk.
+
+    The result is the identical **multiset** of rows in the same ``(code, Data Date,
+    effective-time)`` order as the old loop, with the same columns (incl. the Hive ``date``)
+    and the same all-absent return shape per type (tick: 0 rows *without* ``date``; summary:
+    0 rows *with* ``date``). The ``*_summary`` types are daily aggregates (one row per
+    (code, date)), so their order is total and deterministic — byte-identical. For the tick
+    types the order WITHIN a same-(date, time) tie is arbitrary, exactly as in the loop it
+    replaces: both order via DuckDB, whose parallel sort does not fix a tie order, so the
+    current per-ticker ``query_ticks`` already returns a run-dependent within-tie order on
+    real data (two runs differ only in the position of same-timestamp rows).
+
+    Fixed to ``limit=None`` — extract_to_store's mode. Do NOT use for general
+    :func:`query_ticks`, whose finite ``limit`` is a per-call total, not a whole-result cap.
+    """
+    validate_data_type(data_type)
+    type_dir = _resolve_type_dir(data_dir, data_type)
+
+    # sorted(tickers) is the concat block order of the old loop; normalise each code the
+    # same way query_ticks does (so the per-ticker file glob / IN-list match exactly).
+    ordered_codes = [_normalize_ticker(t) for t in sorted(tickers)]
+    summary = data_type in SUMMARY_TYPES
+
+    # Effective time column — individual_stock falls back to Update Time for quote-only
+    # rows (blank Execution Time); identical to query_ticks.
+    if data_type == "individual_stock":
+        time_expr = (
+            'CASE WHEN "Execution Time" IS NULL OR "Execution Time" = \'\' '
+            'THEN substr("Update Time", 1, 6) ELSE "Execution Time" END'
+        )
+    else:
+        time_expr = '"Execution Time"'
+
+    conditions: list[str] = []
+    if date is not None:
+        _validate_date(date)
+        conditions.append(f"date = '{date}'")
+    if start_time is not None:
+        _validate_time(start_time)
+        conditions.append(f"{time_expr} >= '{start_time.replace(':', '')}'")
+    if end_time is not None:
+        _validate_time(end_time)
+        conditions.append(f"{time_expr} <= '{end_time.replace(':', '')}'")
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    if summary:
+        # Summary stores partition by date only; the code lives in a column. One scan of
+        # the whole store with an IN-list over the first 4 chars replaces the per-ticker
+        # loop's N full-store scans. Summary types are daily aggregates (one row per
+        # (code, date)), so ORDER BY that same substr then Data Date is a *total* order
+        # that reproduces the per-ticker block order exactly — no ties to break. An
+        # all-absent request yields a 0-row frame that keeps the schema (incl. date).
+        code_col = "Index Code" if data_type == "indices_summary" else "Stock Code"
+        code_sql = f'substr("{code_col}", 1, 4)'
+        in_list = ", ".join(f"'{c}'" for c in ordered_codes)
+        conds = conditions + [f"{code_sql} IN ({in_list})"]
+        glob_pattern = str(type_dir / "**" / "*.parquet").replace("\\", "/")
+        sql = (
+            f"SELECT * FROM read_parquet('{glob_pattern}', hive_partitioning=true) "
+            f"WHERE {' AND '.join(conds)} "
+            f'ORDER BY {code_sql}, "Data Date"'
+        )
+        con = duckdb.connect()
+        try:
+            return con.execute(sql).pl()
+        finally:
+            con.close()
+
+    # Tick types: ONE scan over all the requested tickers' files (the file list is built
+    # from a SINGLE store walk, vs the loop's fresh connection + whole-store glob per
+    # ticker — the dominant cost on a large reused store). Tag each row with the code from
+    # its filename and ORDER BY (code, Data Date, effective time) — the same ordering the
+    # per-ticker loop produces.
+    #
+    # The row order WITHIN a same-(date, time) tick tie is arbitrary here, exactly as in
+    # the loop it replaces: both rely on DuckDB's ORDER BY, whose parallel sort does not
+    # fix a tie order. The current per-ticker query_ticks is itself non-deterministic on
+    # real data — two runs of the same query differ only in the position of same-timestamp
+    # rows (verified: 16 of ~912k rows for one ticker-month). So this returns the identical
+    # multiset in the identical (code, date, time) order; only that already-nondeterministic
+    # within-tie order may differ. `EXCLUDE (filename)` keeps the columns byte-identical
+    # (file columns + the Hive `date`), with no `filename`/`_code` artifact.
+    files_by_code: dict[str, list[str]] = {}
+    for p in type_dir.glob("**/ticker=*.parquet"):
+        files_by_code.setdefault(p.stem[len("ticker="):], []).append(
+            str(p).replace("\\", "/")
+        )
+    files: list[str] = []
+    for code in ordered_codes:
+        files.extend(sorted(files_by_code.get(code, [])))
+    if not files:
+        # Every requested ticker absent -> mirror query_ticks's tick all-absent shape
+        # (store schema, 0 rows, WITHOUT the Hive date column).
+        any_file = next(type_dir.glob("**/*.parquet"), None)
+        if any_file is None:
+            return pl.DataFrame()
+        return pl.read_parquet(any_file, n_rows=0)
+
+    source = "[" + ", ".join(f"'{f}'" for f in files) + "]"
+    code_sql = "regexp_extract(filename, 'ticker=([A-Za-z0-9]+)\\.parquet', 1)"
+    order_cols = [code_sql, '"Data Date"']
+    if data_type == "individual_stock":
+        order_cols.append(time_expr)
+    elif data_type == "indices":
+        order_cols.append('"Execution Time"')
+    sql = (
+        f"SELECT * EXCLUDE (filename) "
+        f"FROM read_parquet({source}, hive_partitioning=true, filename=true) "
+        f"{where_clause} "
+        f"ORDER BY {', '.join(order_cols)}"
+    )
+    con = duckdb.connect()
+    try:
+        return con.execute(sql).pl()
+    finally:
+        con.close()
+
+
 def query_sql(
     data_dir: str,
     sql: str,
