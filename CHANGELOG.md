@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`extract_to_store` no longer issues an N+1 per-ticker query (#44).** Its Stage-2 step
+  opened a fresh DuckDB connection and re-globbed the whole store for **every** ticker, and
+  for the two `*_summary` types each per-ticker call re-scanned the **entire** store. It now
+  runs **one connection and one scan** for all tickers, building every ticker's file list
+  from a single store walk (the summary types scan the store once with an `IN`-list instead
+  of N times). It returns the **same multiset of rows in the same `(code, Data Date,
+  effective-time)` order** as the old loop; the `*_summary` types (one row per (code, date))
+  are fully deterministic and byte-identical. For the tick types the order *within* a
+  same-`(date, time)` tie is arbitrary — but it already is in the current code:
+  `query_ticks` orders via DuckDB's parallel sort, which does not fix a tie order, so two
+  runs of the existing per-ticker path differ only in the position of same-timestamp rows
+  (measured: 16 of ~912k rows for one ticker-month). Verified on real data *with*
+  same-second ties across single / multiple / absent tickers and tick / summary types.
+  `query_ticks` is unchanged; scoped to the extract path's fixed `limit=None`.
+
 ## [0.12.2] - 2026-07-08
 
 Faster ticker-filtered `individual_stock` reads and ingests (performance only; output unchanged).
