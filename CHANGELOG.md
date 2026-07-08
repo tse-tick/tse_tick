@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-07-08
+
 Faster ticker-filtered `individual_stock` reads and ingests (performance only; output unchanged).
 
 ### Performance
