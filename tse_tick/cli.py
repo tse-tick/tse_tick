@@ -67,9 +67,9 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print("Error: --filter-csv is only supported with --data-type individual_stock", file=sys.stderr)
         sys.exit(1)
 
-    if args.parallel and args.parallel > 1 and not args.flat:
+    if args.parallel and args.parallel > 1 and args.filter_csv:
         logger.warning(
-            "--parallel applies only to --flat ingest; the --period / --year path runs sequentially"
+            "--parallel does not apply to the event-window (--filter-csv) ingest; it runs sequentially"
         )
 
     if args.period is not None:
@@ -142,6 +142,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 data_type=args.data_type,
                 language=args.language,
                 resume=not args.no_resume,
+                max_workers=args.parallel,
                 ticker_filter=ticker_filter,
             )
             success = sum(1 for r in results if "error" not in r)
@@ -253,7 +254,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--parallel",
         type=int,
         default=1,
-        help="Number of parallel worker processes (default: 1)",
+        help="Parallel worker processes for per-date ingest (default: 1, serial; "
+             "capped at the machine's logical core count). Applies to --period and "
+             "--year (structured root) and --flat; not to --filter-csv event windows.",
     )
     ingest_parser.add_argument(
         "--no-resume",

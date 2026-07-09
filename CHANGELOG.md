@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Performance
+- **Parallelized the per-date ingest loop and honored `max_workers` on the structured-root
+  path (#43).** `ingest_period` / `ingest_year_from_root` (used by `extract_to_store` and
+  the CLI `--period` / `--year`) processed trading days one at a time on one core; the
+  `max_workers` argument and the CLI `--parallel` flag were a **silent no-op** there. Each
+  date is an independent unit (read its parts → concat → clean → write one `date=`
+  partition), so they now dispatch across a **`spawn`-started** process pool when
+  `max_workers > 1` (default `1`, serial; `spawn` avoids a `fork`-after-Polars deadlock —
+  `fork` copies Polars' thread-pool lock state but not its threads, hanging the worker). The store is **byte-identical** to the serial path and the results list is
+  sorted by date for determinism; the per-date part-prune stays inside the worker so it
+  remains interleaved with each day's write (#39 incremental progress preserved). Measured
+  **2.3× on 4 workers and 3.6× on 8 workers** on a 16-core box for a ticker-filtered
+  multi-day ingest (388 s → 169 s → 107 s).
+
+### Changed
+- **RAM-aware parallel-ingest worker cap (#43).** Each worker process holds a whole trading
+  day's frame, so the cap is by the machine's logical cores **and its available RAM** — not
+  a flat 8, and *not* a naive `os.cpu_count()`, which would OOM a full-frame parallel ingest
+  (one busy `individual_stock` day is many GB). The cap estimates per-worker memory (small
+  for ticker-filtered / summary / index; sized from the largest day's part bytes for
+  full-frame `individual_stock`) and clamps workers so `N × per-worker` stays within 70 %
+  of available RAM, with a warning; ticker-filtered ingests parallelize freely. Each
+  worker's Polars thread pool is also bounded (`cores // concurrency`) so N processes don't
+  oversubscribe. The remaining `max_workers` no-ops (the flat `ingest_year`, the event-window
+  builder) now log a warning instead of silently ignoring the flag, and the per-date
+  `gc.collect()` calls were kept (full-frame ingest is memory-critical).
+
 ### Fixed
 - **`extract_to_store` no longer issues an N+1 per-ticker query (#44).** Its Stage-2 step
   opened a fresh DuckDB connection and re-globbed the whole store for **every** ticker, and
@@ -17,6 +44,10 @@
   (measured: 16 of ~912k rows for one ticker-month). Verified on real data *with*
   same-second ties across single / multiple / absent tickers and tick / summary types.
   `query_ticks` is unchanged; scoped to the extract path's fixed `limit=None`.
+- **`ingest_directory(..., max_workers>1)` no longer crashes.** Its process-pool task was a
+  local closure, which cannot be pickled under the `spawn` start method (Windows/macOS), so
+  `--flat --parallel N` raised `Can't pickle local object`. The task is now a module-level
+  function; the parallel store is byte-identical to serial.
 
 ## [0.12.2] - 2026-07-08
 

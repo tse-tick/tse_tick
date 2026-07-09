@@ -11,8 +11,12 @@ the functions re-exported at the top level: :func:`ingest_period` (a structured
 import gc
 import glob as _glob
 import logging
+import multiprocessing
+import os
+import sys
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
@@ -25,7 +29,142 @@ from tse_tick.constants import validate_data_type
 
 logger = logging.getLogger(__name__)
 
-_MAX_WORKERS = 8
+# ProcessPoolExecutor defaults to the 'fork' start method on Linux. Forking a process that
+# has already initialised Polars' (rayon) thread pool DEADLOCKS the worker — fork copies the
+# lock state but not the threads holding those locks, so the child hangs the first time it
+# touches Polars. Force 'spawn' (a fresh interpreter, as on Windows/macOS) for every ingest
+# pool; it also lets each worker read POLARS_MAX_THREADS at its own Polars import.
+_MP_SPAWN = multiprocessing.get_context("spawn")
+
+
+_RAM_SAFETY_FRACTION = 0.7   # use at most this fraction of available RAM for worker frames
+_FILTERED_WORKER_GB = 0.5    # ticker-filtered / summary / index: a small per-worker frame
+_FULLFRAME_EXPANSION = 8.0   # compressed part bytes -> peak per-worker RAM (full-frame day)
+
+
+def _cpu_cap() -> int:
+    """This machine's logical core count — the CPU ceiling for parallel ingest."""
+    return os.cpu_count() or 1
+
+
+def _available_ram_gb() -> float:
+    """Best-effort available physical RAM in GB; ``0.0`` if it can't be determined."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class _MS(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            m = _MS()
+            m.dwLength = ctypes.sizeof(_MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return m.ullAvailPhys / 1e9
+        except Exception:
+            pass
+        return 0.0
+    try:  # Linux / macOS: available physical pages
+        return (os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")) / 1e9
+    except (ValueError, OSError, AttributeError):
+        return 0.0
+
+
+def _estimate_worker_gb(units, data_type, ticker_filter) -> float:
+    """Rough peak RAM (GB) one worker needs for its largest unit of work.
+
+    A worker holds one whole date's frame in memory. Ticker-filtered reads (only the
+    matching rows are materialised) and the summary / index types (small daily frames)
+    need little; a **full-frame** ``individual_stock`` day is the whole day — every part,
+    decompressed and cleaned — estimated from the largest day's total compressed part
+    bytes times an expansion factor. ``units`` is an iterable of ``(label, [part paths])``
+    (one entry per date group, or per ZIP for the flat path).
+    """
+    if data_type not in (None, "individual_stock") or ticker_filter:
+        return _FILTERED_WORKER_GB
+    biggest = 0
+    for _label, parts in units:
+        total = 0
+        for p in parts:
+            try:
+                total += Path(p).stat().st_size
+            except OSError:
+                continue  # skip one vanished/unreadable part, don't zero the whole day
+        if total > biggest:
+            biggest = total
+    return max(_FILTERED_WORKER_GB, (biggest / 1e9) * _FULLFRAME_EXPANSION)
+
+
+def _cap_workers(requested: int, per_worker_gb: Optional[float] = None) -> int:
+    """Clamp a requested worker count by what this machine's cores AND RAM allow.
+
+    **Cores:** never more workers than logical cores. **RAM:** each worker process holds a
+    whole trading day's frame, so N workers must fit in available RAM — a naive
+    core-count cap ignores this and can OOM a full-frame parallel ingest, where one busy
+    ``individual_stock`` day is many GB (this is why the old flat cap of 8 was NOT simply
+    raised to ``os.cpu_count()``). When ``per_worker_gb`` is given and available RAM can be
+    read, workers are capped so ``N x per_worker_gb`` stays within
+    ``_RAM_SAFETY_FRACTION`` of available RAM; when RAM can't be read, a heavy per-worker
+    estimate only warns. Filtered / summary ingests estimate a small per-worker frame and
+    parallelize freely.
+    """
+    cap = _cpu_cap()
+    workers = max(1, min(requested, cap))
+    if requested > cap:
+        logger.warning(
+            "max_workers=%d exceeds this machine's %d logical cores; using %d",
+            requested, cap, cap,
+        )
+    if workers > 1 and per_worker_gb and per_worker_gb > 0:
+        avail = _available_ram_gb()
+        if avail > 0:
+            ram_cap = max(1, int((avail * _RAM_SAFETY_FRACTION) / per_worker_gb))
+            if ram_cap < workers:
+                logger.warning(
+                    "Limiting workers %d -> %d: ~%.1f GB/worker x %d would exceed %d%% of "
+                    "%.1f GB available RAM. Each worker holds a whole trading day; lower "
+                    "max_workers, ticker-filter, or run serially for a full-frame ingest.",
+                    workers, ram_cap, per_worker_gb, workers,
+                    int(_RAM_SAFETY_FRACTION * 100), avail,
+                )
+                workers = ram_cap
+        elif per_worker_gb > _FILTERED_WORKER_GB:
+            logger.warning(
+                "Could not read available RAM to size workers; each of %d workers holds "
+                "~%.1f GB (a whole trading day). Lower max_workers if RAM-constrained.",
+                workers, per_worker_gb,
+            )
+    return workers
+
+
+@contextmanager
+def _bounded_polars_threads(workers: int, n_tasks: int):
+    """Cap each spawned worker's Polars thread pool for the lifetime of a pool.
+
+    W worker processes that each let Polars use every core would oversubscribe
+    (W x cores threads) and erase the multi-core win. Sizing each worker's
+    ``POLARS_MAX_THREADS`` to ``cores // concurrency`` keeps the total near the core
+    count. Spawn-based workers (Windows/macOS — the primary target) inherit this env
+    var and read it when they import Polars; on fork-based platforms Polars is already
+    initialised in the parent, so this is a harmless no-op there.
+    """
+    concurrency = max(1, min(workers, n_tasks))
+    per_worker = max(1, _cpu_cap() // concurrency)
+    key = "POLARS_MAX_THREADS"
+    prev = os.environ.get(key)
+    os.environ[key] = str(per_worker)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
 
 
 def ingest_single_zip(
@@ -83,6 +222,25 @@ def ingest_single_zip(
     }
 
 
+def _ingest_single_zip_safe(zip_path, output_dir, data_type, language, ticker_filter):
+    """Module-level ingest-one-ZIP task for ``ingest_directory``'s process pool.
+
+    A local closure cannot be pickled under the ``spawn`` start method (Windows/macOS),
+    which silently broke ``ingest_directory(..., max_workers>1)``; a module-level function
+    pickles fine. A one-shot OOM aborts loudly (never recorded as a skipped ZIP); any
+    other error is recorded as ``{"zip_path", "error"}``.
+    """
+    try:
+        return ingest_single_zip(
+            str(zip_path), output_dir, data_type=data_type,
+            language=language, ticker_filter=ticker_filter,
+        )
+    except OneShotMemoryError:
+        raise
+    except Exception as exc:
+        return {"zip_path": str(zip_path), "error": str(exc)}
+
+
 def ingest_directory(
     input_dir: str,
     output_dir: str,
@@ -104,7 +262,8 @@ def ingest_directory(
         output_dir: Store root to write under.
         data_type: NEEDS type; auto-detected per ZIP from the path when ``None``.
         language: Output column-name language (``"en"`` / ``"jp"``).
-        max_workers: Parallel worker processes (capped at 8); ``1`` is serial.
+        max_workers: Parallel worker processes; ``1`` is serial. Capped by the machine's
+            logical cores AND available RAM (each worker holds one ZIP's frame).
         progress: Log a per-ZIP progress line.
         ticker_filter: Optional ``set`` of string stock codes
             (``individual_stock`` only).
@@ -113,10 +272,6 @@ def ingest_directory(
         One result dict per ZIP (see :func:`ingest_single_zip`); a failed ZIP
         contributes ``{"zip_path": ..., "error": ...}`` instead.
     """
-    if max_workers > _MAX_WORKERS:
-        logger.warning("max_workers=%d exceeds cap of %d, limiting to %d", max_workers, _MAX_WORKERS, _MAX_WORKERS)
-        max_workers = _MAX_WORKERS
-
     in_path = Path(input_dir)
     if not in_path.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
@@ -125,29 +280,35 @@ def ingest_directory(
     total = len(zip_files)
     results: list[dict] = []
 
-    def _process(zf: Path) -> dict:
-        try:
-            return ingest_single_zip(str(zf), output_dir, data_type=data_type, language=language, ticker_filter=ticker_filter)
-        except OneShotMemoryError:
-            raise  # a one-shot OOM aborts loudly; never record it as a skipped zip
-        except Exception as exc:
-            return {"zip_path": str(zf), "error": str(exc)}
+    # RAM-aware worker cap: a flat-directory worker holds one ZIP's frame. Estimate per
+    # worker from the largest ZIP (full-frame individual_stock) and clamp to cores + RAM.
+    max_workers = _cap_workers(
+        max_workers,
+        per_worker_gb=_estimate_worker_gb(
+            [(zf.name, [zf]) for zf in zip_files], data_type, ticker_filter
+        ),
+    )
 
-    if max_workers > 1:
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_process, zf): zf for zf in zip_files}
-            done = 0
-            for future in as_completed(futures):
-                done += 1
-                meta = future.result()
-                results.append(meta)
-                if progress:
-                    fname = Path(meta.get("zip_path", "")).name
-                    rows = meta.get("rows", "error")
-                    logger.info("[%d/%d] %s -> %s rows", done, total, fname, rows)
+    if max_workers > 1 and total > 1:
+        with _bounded_polars_threads(max_workers, total):
+            with ProcessPoolExecutor(max_workers=max_workers, mp_context=_MP_SPAWN) as executor:
+                futures = {
+                    executor.submit(_ingest_single_zip_safe, zf, output_dir,
+                                    data_type, language, ticker_filter): zf
+                    for zf in zip_files
+                }
+                done = 0
+                for future in as_completed(futures):
+                    done += 1
+                    meta = future.result()  # a one-shot OOM propagates and aborts
+                    results.append(meta)
+                    if progress:
+                        fname = Path(meta.get("zip_path", "")).name
+                        rows = meta.get("rows", "error")
+                        logger.info("[%d/%d] %s -> %s rows", done, total, fname, rows)
     else:
         for i, zf in enumerate(zip_files, 1):
-            meta = _process(zf)
+            meta = _ingest_single_zip_safe(zf, output_dir, data_type, language, ticker_filter)
             results.append(meta)
             if progress:
                 fname = Path(meta.get("zip_path", "")).name
@@ -179,7 +340,9 @@ def ingest_year(
         year: Era year (also selects era-specific parsing).
         data_type: One of the four NEEDS types.
         language: Output column-name language (``"en"`` / ``"jp"``).
-        max_workers: Reserved for parallel ingestion.
+        max_workers: This flat-directory path is serial; pass a structured NEEDS root
+            to :func:`ingest_period` / :func:`ingest_year_from_root` for parallel
+            per-date ingestion. ``>1`` here logs a warning instead of silently no-op'ing.
         ticker_filter: Optional ``set`` of string stock codes
             (``individual_stock`` only).
 
@@ -188,6 +351,13 @@ def ingest_year(
         contributes ``{"zip_path": ..., "error": ...}`` instead.
     """
     validate_data_type(data_type)
+
+    if max_workers > 1:
+        logger.warning(
+            "ingest_year runs the flat-directory path serially; max_workers=%d is "
+            "ignored. Use ingest_period / ingest_year_from_root (a structured root) for "
+            "parallel per-date ingestion.", max_workers,
+        )
 
     in_path = Path(input_dir)
     if not in_path.exists():
@@ -216,6 +386,13 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     concatenated before writing — otherwise later parts get skipped (resume) or
     overwrite earlier ones.
     """
+    # Prune the day's parts to the requested ticker(s) HERE, not on the parent, so
+    # pruning stays interleaved with this date's write (issue #39: a partition lands
+    # per day and a resumed run prunes only the dates it ingests) and, under
+    # parallelism, each worker prunes its own date concurrently. `_prune_parts_by_ticker`
+    # groups by day internally, so per-date pruning selects the identical parts.
+    if ticker_filter and data_type == "individual_stock":
+        zip_paths = _prune_parts_by_ticker(zip_paths, ticker_filter)
     parts: list = []
     for zp in zip_paths:
         try:
@@ -244,6 +421,11 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
         gc.collect()
         return {"date": date_str, "parts": len(zip_paths), "rows": 0, "output_path": None}
     combined = pl.concat(parts, how="vertical")
+    # Keep the per-date gc.collect() (issue #43 proposed removing them as "pure waste"):
+    # a full-frame individual_stock day holds every part of the day at once and peaks
+    # within ~0.6 GB of the RAM ceiling on a 34 GB box (measured; HEAD OOM-crashes there
+    # too), so prompt collection between the concat and the write gives real headroom at
+    # a cost dwarfed by the multi-second-per-day I/O. `del` drops the reference first.
     del parts
     gc.collect()
     rows = len(combined)
@@ -253,11 +435,21 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     return {"date": date_str, "parts": len(zip_paths), "rows": rows, "output_path": out_path}
 
 
-def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter):
+def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter,
+                    max_workers=1):
     """Group ZIP parts by date and ingest each date as a unit (all parts → write once).
 
     Resume is keyed per-date (a date is written atomically), so later parts of a
     date are never skipped or overwritten — fixing the multi-part data loss.
+
+    Each date is a fully independent unit (read its parts → concat → clean → write one
+    ``date=`` partition), so with ``max_workers > 1`` the per-date units run across a
+    process pool (issue #43); ``max_workers=1`` is serial. Only the cheap resume-skip
+    stays on the parent; each date's part-prune (issue #39) runs inside
+    :func:`_ingest_date_group` so it remains interleaved with that date's write (and, in
+    parallel, happens in the worker). Store bytes are identical to the serial path (each
+    date writes its own dir); the results list is sorted by date so its order is
+    deterministic regardless of worker completion order.
     """
     output_root_path = Path(output_dir) / data_type
     groups: dict = {}
@@ -267,28 +459,52 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
             continue
         groups.setdefault(tok, []).append(zp)
 
-    # Part-pruning runs per date INSIDE the loop, after the resume-skip check
-    # (issue #39): a ticker-filtered individual_stock ingest opens only the
-    # contiguous run of parts holding the ticker(s) for that day. Doing it per date
-    # rather than for the whole period upfront means (a) a partition lands after each
-    # day's short prune instead of only after the entire period is pruned (~80 min
-    # for a year, with no partition and no checkpoint written), and (b) a resumed run
-    # prunes only the dates it actually ingests, not every date it is about to skip.
-    # `_prune_parts_by_ticker` groups by day internally, so per-date pruning selects
-    # the identical parts per day — the store contents are unchanged.
-    prune = bool(ticker_filter) and data_type == "individual_stock"
-
-    results: list[dict] = []
+    # Build the per-date task list on the parent applying only the cheap resume-skip
+    # (a stat on the date dir) so a resumed run neither re-dispatches nor re-prunes an
+    # already-written date. The expensive per-date part-prune (issue #39) is done inside
+    # _ingest_date_group so it stays interleaved with each day's write — a partition
+    # lands per day (incremental progress) rather than the whole period being pruned
+    # before the first write — and, under parallelism, each worker prunes its own date.
+    tasks: list = []
     for date_str, parts in groups.items():
         if resume and output_root_path.exists():
             date_dir = output_root_path / f"date={date_str}"
             if date_dir.exists() and any(date_dir.glob("ticker=*.parquet")):
                 continue
-        if prune:
-            parts = _prune_parts_by_ticker(parts, ticker_filter)
-        meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language, ticker_filter)
-        results.append(meta)
-        logger.info("  %s (%d parts) -> %s rows", date_str, meta["parts"], meta["rows"])
+        tasks.append((date_str, parts))
+
+    # RAM-aware: each worker holds one whole date's frame. Estimate the largest day's
+    # per-worker peak (from its part sizes for a full-frame individual_stock ingest; small
+    # for filtered / summary / index) and let _cap_workers clamp to what RAM allows.
+    workers = _cap_workers(
+        max_workers, per_worker_gb=_estimate_worker_gb(tasks, data_type, ticker_filter)
+    )
+
+    if workers <= 1 or len(tasks) <= 1:
+        results: list[dict] = []
+        for date_str, parts in tasks:
+            meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language, ticker_filter)
+            results.append(meta)
+            logger.info("  %s (%d parts) -> %s rows", date_str, meta["parts"], meta["rows"])
+        return results
+
+    results = []
+    with _bounded_polars_threads(workers, len(tasks)):
+        with ProcessPoolExecutor(max_workers=workers, mp_context=_MP_SPAWN) as executor:
+            futures = {
+                executor.submit(
+                    _ingest_date_group, date_str, parts, output_dir,
+                    data_type, year, language, ticker_filter,
+                ): date_str
+                for date_str, parts in tasks
+            }
+            for future in as_completed(futures):
+                # A one-shot OOM in any worker propagates here and aborts the whole
+                # ingest rather than silently leaving a partial period behind.
+                meta = future.result()
+                results.append(meta)
+                logger.info("  %s (%d parts) -> %s rows", meta["date"], meta["parts"], meta["rows"])
+    results.sort(key=lambda m: m["date"])
     return results
 
 
@@ -299,6 +515,7 @@ def ingest_year_from_root(
     data_type: str,
     language: str = "en",
     resume: bool = True,
+    max_workers: int = 1,
     ticker_filter: Optional[set] = None,
 ) -> list[dict]:
     """Ingest a whole ``year`` from a **structured** NEEDS root into the store.
@@ -314,6 +531,9 @@ def ingest_year_from_root(
         data_type: One of the four NEEDS types.
         language: Output column-name language (``"en"`` / ``"jp"``).
         resume: Skip dates already present in the store (default ``True``).
+        max_workers: Parallel worker processes for the independent per-date ingests;
+            ``1`` is serial. Capped by the machine's logical cores AND available RAM
+            (each worker holds a whole day's frame).
         ticker_filter: Optional ``set`` of stock/index codes to keep.
 
     Returns:
@@ -323,7 +543,9 @@ def ingest_year_from_root(
     validate_data_type(data_type)
 
     zip_paths = discover_zips(input_root, data_type, [year])
-    return _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter)
+    return _ingest_grouped(
+        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers
+    )
 
 
 def ingest_period(
@@ -351,7 +573,10 @@ def ingest_period(
         data_type: NEEDS type to ingest.
         language: Output column-name language (``"en"`` / ``"jp"``).
         resume: Skip dates whose Parquet output already exists (default ``True``).
-        max_workers: Reserved for parallel ingestion.
+        max_workers: Parallel worker processes for the independent per-date ingests;
+            ``1`` is serial. Capped by the machine's logical cores AND available RAM
+            (each worker holds a whole day's frame). Wired through every granularity
+            (year / month / date).
         ticker_filter: Optional ``set`` of string stock codes
             (``individual_stock`` only).
 
@@ -370,7 +595,8 @@ def ingest_period(
         for year in years:
             results.extend(
                 ingest_year_from_root(
-                    input_root, output_dir, year, data_type, language, resume, ticker_filter=ticker_filter
+                    input_root, output_dir, year, data_type, language, resume,
+                    max_workers=max_workers, ticker_filter=ticker_filter
                 )
             )
         return results
@@ -381,7 +607,8 @@ def ingest_period(
         for year, months in months_by_year.items():
             zip_paths = discover_zips(input_root, data_type, [year], months=list(months))
             results.extend(
-                _process_zips(zip_paths, output_dir, data_type, year, language, resume, ticker_filter=ticker_filter)
+                _process_zips(zip_paths, output_dir, data_type, year, language, resume,
+                              max_workers=max_workers, ticker_filter=ticker_filter)
             )
         return results
 
@@ -394,7 +621,8 @@ def ingest_period(
             year_months = sorted(set(int(d[4:6]) for d in year_dates))
             zip_paths = discover_zips(input_root, data_type, [year], months=year_months, dates=year_dates)
             results.extend(
-                _process_zips(zip_paths, output_dir, data_type, year, language, resume, ticker_filter=ticker_filter)
+                _process_zips(zip_paths, output_dir, data_type, year, language, resume,
+                              max_workers=max_workers, ticker_filter=ticker_filter)
             )
         return results
 
@@ -484,9 +712,12 @@ def _process_zips(
     year: int,
     language: str = "en",
     resume: bool = True,
+    max_workers: int = 1,
     ticker_filter: Optional[set] = None,
 ) -> list[dict]:
-    return _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter)
+    return _ingest_grouped(
+        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers
+    )
 
 
 def ingest_event_windows_period(
@@ -515,11 +746,19 @@ def ingest_event_windows_period(
             ``reaction_anchor_dt`` columns.
         window_minutes: Half-width of the window kept around each anchor.
         resume: Skip dates whose output file already exists (default ``True``).
-        max_workers: Reserved for parallel ingestion.
+        max_workers: The event-window builder runs serially; ``>1`` logs a warning
+            instead of silently no-op'ing (parallelising this path is out of scope of
+            the per-date ingest parallelism in :func:`ingest_period`).
 
     Returns:
         ``None`` — results are written to the store; progress goes to ``logging``.
     """
+    if max_workers > 1:
+        logger.warning(
+            "ingest_event_windows_period runs serially; max_workers=%d is ignored.",
+            max_workers,
+        )
+
     parsed = parse_period(period)
     granularity = parsed["granularity"]
     years = parsed["years"]
