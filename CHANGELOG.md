@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-09
+
+Parallel per-date ingest with a RAM-aware worker cap (#43) and a single-scan
+`extract_to_store` query (#44); output-preserving (same Parquet store, same queried rows).
+
 ### Performance
 - **Parallelized the per-date ingest loop and honored `max_workers` on the structured-root
   path (#43).** `ingest_period` / `ingest_year_from_root` (used by `extract_to_store` and
