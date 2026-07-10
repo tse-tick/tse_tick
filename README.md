@@ -15,7 +15,7 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 - **4 data types** — TICST120 (individual stock ticks, 95 cols), TICSS110 (daily stock summary, 82 cols), TICIT110 (index ticks, 10 cols), TICIS110 (daily index summary, 17 cols)
 - **Multi-era format support** — 2016 fixed-width (TICIT010/TICIS010) and 2017-2025 CSV, auto-detected from the ZIP filename
 - **Polars backend** — fast CSV parsing, vectorized cleaning, memory-efficient
-- **CLI batch ingestion** — `tse-tick ingest` converts entire years/months/date ranges to partitioned Parquet
+- **CLI batch ingestion** — `tse-tick ingest` converts entire years/months/date ranges to partitioned Parquet; `--parallel N` spreads independent trading days across a RAM-aware process pool
 - **Ticker filtering** (`--tickers`) — keep only specific stock codes at read time
 - **Event-window extraction** (`--filter-csv`) — extract ±N minute windows around corporate events with automatic after-hours reaction-anchor shifting
 - **Bilingual columns** — English and Japanese column names via `--language en|jp`
@@ -356,7 +356,7 @@ Event-window filtered ingest writes per-date files:
 | `--output-root` (required) | Root directory for Parquet output |
 | `--period` | Date range: `YYYY`, `YYYYMM-YYYYMM`, or `YYYYMMDD-YYYYMMDD` |
 | `--language` | Column name language: `en` (default) or `jp` |
-| `--parallel` | Parallel worker processes for **flat** ingest (default 1; the `--period`/`--year` path runs sequentially). Values above 8 are clamped to 8. |
+| `--parallel` | Parallel worker processes for per-date ingest (default 1 = serial). Applies to `--period`, `--year`, and `--flat`; not to `--filter-csv` event windows. Capped by the machine's logical cores **and** available RAM (each worker holds a whole trading day's frame). |
 | `--no-resume` | Disable resume (reprocess dates even if output exists) |
 | `--tickers` | Comma-separated codes or `@file.txt` with one per line. Keeps only these stocks. |
 | `--filter-csv` | Path to event filter CSV. Enables event-window mode. Overrides `--tickers`. |
@@ -427,32 +427,16 @@ Built-in protections for local data processing:
 | ZIP bomb detection (max decompressed) | 5 GB |
 | ZIP compression ratio cap | 100:1 |
 | Max ZIP entries | 5 |
-| Max parallel workers | 8 |
+| Parallel worker cap | RAM-aware: ≤ logical cores, and N × per-worker frame ≤ 70% of available RAM |
 | Query row limit | 10,000,000 |
 | Path traversal prevention | Resolved path validation |
 | SQL injection prevention | Identifier/date/time format validation |
 
 ---
 
-## What's New in 0.11.6
+## Release History
 
-`tse_tick` 0.11.6 — `pip install -U tse-tick`. Faster single-ticker reads + a one-call two-stage helper:
-
-- **Part-pruning for `individual_stock` single-ticker reads.** `read_ticks(...)` (and the ticker-filtered `ingest_*` / `tse-tick export`) now open only the contiguous run of numbered parts that hold the ticker — plus the day's trailing off-auction appendix part — instead of every part of the day. Validated **row-for-row identical** to a full scan across a 3-year Toyota (7203) sample (18/18 days), ~5-7× faster typically. Controlled by `read_ticks(..., prune_parts=True)` (default; set `False` to force a full scan); falls back to a full scan automatically if the ascending stock-code layout can't be confirmed.
-- **`extract_to_store(input_root, store, period, ticker, ...)`** — two-stage in one call: build a reusable, part-pruned Parquet store then return the queried DataFrame. The recommended path when you'll read the data more than once.
-- **`tse-tick export --store <dir>`** — build a reusable store while exporting (single `individual_stock` ticker).
-
-## What's New in 0.11.5
-
-`tse_tick` 0.11.5 — `pip install -U tse-tick`. Bug fixes from an alpha-test report:
-
-- **Large one-shot reads fail safely.** `create_df` / `read_ticks` now raise a catchable `OneShotMemoryError` (a `MemoryError`) — proactively when a multi-part day's decompressed size crosses a ceiling, or by converting a Polars OOM panic — instead of an uncatchable crash, and point you at the two-stage `ingest_*` → `query_ticks` path. New `max_oneshot_bytes=` tunes the ceiling (default 5 GB; `None` disables). The `ingest_*` functions re-raise it, so it can never silently write a partial day.
-- **`create_df` honors an explicit `year=` / `data_type=`** under the default `auto_detect=True` — a correctly-named ZIP in a folder whose path has no year now reads when you pass `year=`.
-- **`query_ticks` warns on truncation** (a capturable `TruncationWarning`) instead of silently returning exactly `limit` rows — and no longer false-warns on a result that exactly fills `limit`.
-
-Earlier highlights (0.11.4): single-sourced data-type classification (internal, no API change). (0.11.3): flat-folder day→month discovery fix; `get_info` / `get_supported_years` consistency. (0.11.2): `indices` column-subset projection no longer inflates rows. (0.11.1): a bare `ticker_filter` code is treated as a single code.
-
-See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for the full list.
+See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md) for what changed in each release.
 
 ---
 
@@ -536,7 +520,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **336 tests**. Without a local NEEDS store, **288 pass** and **48 skip**; with a complete NEEDS store, **all 336 pass**. Stage-1
+The suite collects **414 tests**. Without a local NEEDS store, **366 pass** and **48 skip**; with a complete NEEDS store, **all 414 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
@@ -544,9 +528,9 @@ feeding synthetic, obviously-fake `individual_stock` (TICST120) ZIPs through the
 real ingest pipeline (`tests/synthetic_data.py`, `tests/conftest.py`).
 
 The 48 skips load **real NEEDS files** from local paths
-(`test_real_data.py` and the real-ZIP cases in `test_ingest.py`), plus a handful
-of fixtures outside the synthetic store's scope. They run automatically once a
-local NEEDS store is present.
+(`test_real_data.py` and the real-ZIP cases in `test_ingest.py`). They run
+automatically once a local NEEDS store is present (override the default root
+with `TSE_TICK_DATA_ROOT`).
 
 ---
 
