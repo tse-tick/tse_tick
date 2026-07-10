@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.11.5 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.13.0 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
@@ -21,7 +21,7 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.11.5)
+├── CHANGELOG.md                     # version history (current: 0.13.0)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
@@ -50,19 +50,36 @@ tse_tick/                          # Project root
 │   │   └── translations.json        # translate() mapping tables (override: TSE_TICK_TRANSLATIONS)
 │   └── py.typed                     # PEP 561 marker
 │
-├── tests/                           # Test suite (pytest, 336 tests; 288 pass / 48 skip w/o data, 336/0 with a NEEDS store)
+├── tests/                           # Test suite (pytest, 414 tests; 366 pass / 48 skip w/o data — the skips are real-data-gated)
 │   ├── __init__.py
 │   ├── conftest.py                  # Session-scoped synthetic Parquet fixtures (stock_store, indices_store, events_df)
 │   ├── synthetic_data.py            # Generates obviously-fake NEEDS-format ZIPs feeding those fixtures
 │   ├── test_parquet.py              # 12 — Parquet I/O (synthetic)
 │   ├── test_parquet_io.py           # 14 — Parquet partition read/write (synthetic)
 │   ├── test_ingest.py               # 16 — batch ingestion (synthetic + real-ZIP cases, data-gated)
+│   ├── test_ingest_multipart.py     # 2  — every part of a multi-part day ingested, written once
+│   ├── test_ingest_parallel.py      # 8  — parallel per-date ingest: spawn pool, RAM-aware cap (0.13.0)
+│   ├── test_ingest_per_date_prune.py # 7 — per-date part-prune after the resume-skip (0.12.2)
+│   ├── test_extract_to_store.py     # 6  — one-call two-stage, single + multi ticker (0.11.6/0.12.0)
+│   ├── test_extract_batched_query.py # 10 — single-scan extract query ≡ per-ticker loop (0.13.0)
+│   ├── test_field5_filter.py        # 12 — vectorized field-5 ticker filter byte-identical (0.12.2)
+│   ├── test_partscan.py             # 10 — part probing / contiguous-run selection (0.11.6)
+│   ├── test_part_pruning.py         # 5  — pruned read ≡ full scan (0.11.6)
 │   ├── test_query.py                # 15 — DuckDB query layer (synthetic store)
 │   ├── test_features.py             # 20 — order-book features (synthetic store)
 │   ├── test_event_window.py         # 22 — event-window extraction (synthetic + real-data-gated)
-│   ├── test_cli.py                  # 13 — CLI end-to-end (synthetic)
+│   ├── test_cli.py                  # 15 — CLI end-to-end (synthetic), incl. the export verb
 │   ├── test_api_additions.py        # 13 — translate / DataType / Language / query_ticks str-int (synthetic)
-│   ├── test_read_ticks.py           # 14 — one-shot read_ticks: single ZIP / flat dir / structured root (synthetic)
+│   ├── test_read_ticks.py           # 16 — one-shot read_ticks: single ZIP / flat dir / structured root (synthetic)
+│   ├── test_translate_data.py       # 7  — file-driven translation tables + TSE_TICK_TRANSLATIONS override
+│   ├── test_alpha_fixes.py          # 19 — 0.11.5 alpha-report fixes (OOM guard, truncation warn, explicit year=)
+│   ├── test_consolidation.py        # 5  — single-sourced data-type classification invariants (0.11.4)
+│   ├── test_discovery.py            # 4  — nested NEEDS-layout discovery
+│   ├── test_locate.py               # 7  — data located at any NEEDS tree level
+│   ├── test_dtypes.py               # 1  — Float64 price/quote dtypes
+│   ├── test_empty_schema.py         # 6  — empty-but-typed frames
+│   ├── test_quiet_and_unicode.py    # 5  — logging-not-print, CJK-safe console
+│   ├── test_run4_fixes.py … test_run12_fixes.py  # 88 — regression suites from real-data QA runs 4-12 (no run 9 file)
 │   ├── test_paper_examples.py       # 5  — locks the paper's API listings
 │   ├── test_real_data.py            # 64 — real NEEDS files, all 4 types/eras (data-gated)
 │   ├── test_schemas.py              # STUB (1 line; schema coverage in test_real_data.py)
@@ -196,6 +213,29 @@ tse_tick/                          # Project root
 | Discovery fast path | `discover_zips` adds a `{yearmonth}/`-directly-under-root fast path (e.g. `…/TICST120`) before the recursive fallback; docstring corrected to match |
 | Docs | A single numbered ZIP holds only part of a day (filtering a lone part → 0 rows); pass the directory/root |
 | Tests | Suite **243** (`+6`: no-ZIPs empty+warn, `display`/Windows print, discovery fast-path) |
+
+### v0.13.0 — parallel per-date ingest (RAM-aware) + single-scan extract query (2026-07-09)
+
+| Change | Detail |
+|--------|--------|
+| Parallel per-date ingest (#43) | `ingest_period` / `ingest_year_from_root` (⇒ `extract_to_store`, CLI `--period`/`--year`) dispatch their independent per-date units across a **`spawn`-started** process pool when `max_workers > 1` (default 1 = serial; `spawn` avoids a `fork`-after-Polars deadlock). `max_workers` / CLI `--parallel` was previously a **silent no-op** on the structured-root path. Store byte-identical to serial; results sorted by date. Measured 2.3× (4 workers) / 3.6× (8 workers) on a ticker-filtered multi-day ingest |
+| RAM-aware worker cap (#43) | `_cap_workers`: never more workers than logical cores, AND N × per-worker-frame ≤ **70% of available RAM** (`_RAM_SAFETY_FRACTION`); per-worker estimated from the largest day's part bytes (× `_FULLFRAME_EXPANSION` = 8) for full-frame `individual_stock`, ~0.5 GB for ticker-filtered / summary / index. Each worker's Polars thread pool bounded to `cores // concurrency`. Remaining `max_workers` no-ops (flat `ingest_year`, event-window builder) now log a warning. Per-date `gc.collect()` kept (full-frame ingest peaks near the RAM ceiling on a 34 GB box) |
+| Single-scan extract query (#44) | `extract_to_store` Stage-2 no longer issues an N+1 per-ticker `query_ticks` loop (fresh DuckDB connection + full store re-glob per ticker; the `*_summary` types re-scanned the whole store N times). Now one connection, one store walk, one scan for all tickers (`query._query_extract_batch`); same row multiset in the same `(code, Data Date, effective-time)` order — tick-type order *within* a same-timestamp tie is arbitrary, as it already was (DuckDB parallel sort) |
+| `--flat --parallel` pickling fix | `ingest_directory(..., max_workers>1)` crashed (`Can't pickle local object`) under `spawn`; the pool task is now the module-level `_ingest_single_zip_safe` |
+
+### v0.12.2 — vectorized ticker filter + per-date pruning (2026-07-08)
+
+| Change | Detail |
+|--------|--------|
+| Vectorized field-5 filter (#38) | The `individual_stock` ticker fast path filtered raw lines with a pure-Python per-line loop; it now streams each part in bounded 16 MB blocks and extracts field 5 with a vectorized Polars filter — ~2× faster per opened part (183.5 s → 91.2 s on a real 13-part day), **byte-identical** kept-line set, bounded memory |
+| Per-date pruning (#39) | `ingest_period(..., ticker_filter=...)` pruned every day's parts up front (~80 min for a year before the first write; resume re-pruned everything). Pruning now runs per date inside the loop, **after** the resume-skip — a partition lands per day, resume prunes only what it ingests |
+
+### v0.12.1 — extract_to_store row-cap fix (2026-07-07)
+
+| Change | Detail |
+|--------|--------|
+| No 10M cap | `extract_to_store` queried via `query_ticks` with the default `limit=10_000_000`, capping a high-volume ticker-month (e.g. SoftBank 9984) at 10M rows. It now queries `limit=None` — all rows, matching the two-stage promise |
+| Notebooks | `01_basic_usage` / `02_evaluation` refreshed for 0.12.0 (part-pruning, multi-ticker `extract_to_store`) |
 
 ### v0.12.0 — multi-ticker `extract_to_store` (2026-07-07)
 
@@ -381,20 +421,24 @@ discover_zips(input_root, data_type, years=[2024], months=[2], dates=['20240201'
     → glob: ./2024/202402/HTICST120.20240201.*.zip
 ```
 
-`_process_zips()` is a shared helper that iterates discovered ZIPs, calls `ingest_single_zip()` per file, and respects the resume flag (skips dates with existing parquet output).
+`_process_zips()` is a thin wrapper over `_ingest_grouped()`, the shared engine behind every structured-root ingest (all three `--period` granularities and `--year`): it groups the discovered ZIPs **by date** and ingests each date as an atomic unit — read all of the day's parts → concat → clean → write one `date=` partition — with resume keyed per date (the cheap skip check stays on the parent; the expensive per-date part-prune runs inside the unit, so a partition lands after each day). With `max_workers > 1` the independent per-date units are dispatched across a **`spawn`-started** `ProcessPoolExecutor` (`fork` would deadlock Polars); `_cap_workers()` clamps the worker count to the machine's logical cores AND available RAM (see §11), and each worker's Polars thread pool is bounded to `cores // concurrency` so N processes don't oversubscribe. The store is byte-identical to a serial run; the results list is sorted by date.
 
-### 5.3 Batch Ingestion: `ingest_year_from_root()` (legacy)
+### 5.3 Batch Ingestion: `ingest_year_from_root()` → `_ingest_grouped()`
 
 ```
-ingest_year_from_root(input_root, output_dir, year, data_type)
+ingest_year_from_root(input_root, output_dir, year, data_type, max_workers=1)
     │
     ├─ discover_zips(input_root, data_type, [year])
     │   └─ glob: {root}/{year}/{yearmonth}/{CODEMAP[data_type]}.*.zip
     │      (e.g., {root}/2022/202201/HTICST120.20220104.1.zip)
     │
-    ├─ For each ZIP:
-    │   ├─ Resume check: if output/type/date=YYYYMMDD/ticker=*.parquet exists → skip
-    │   └─ ingest_single_zip() → create_df() → write_partitioned_parquet()
+    ├─ _ingest_grouped(): group ZIPs by date → one task per date
+    │   ├─ Resume check (parent, cheap): date=YYYYMMDD dir with ticker=*.parquet → skip
+    │   ├─ Worker count: _cap_workers(max_workers) — ≤ logical cores AND RAM-fitted (§11)
+    │   └─ Per date (serial, or spawn-pool worker when workers > 1):
+    │       ├─ part-prune to ticker_filter (individual_stock; inside the unit, #39)
+    │       ├─ create_df() per part → concat → write_partitioned_parquet()
+    │       └─ del + gc.collect() between concat and write (full-frame RAM headroom)
     │
     └─ Output layout:
         {output}/individual_stock/date=YYYYMMDD/ticker=NNNN.parquet
@@ -522,7 +566,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Tool | Config |
 |------|--------|
-| **Build** | setuptools>=77 + wheel; static `version = "0.11.5"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
+| **Build** | setuptools>=77 + wheel; static `version = "0.13.0"`; `license-files = ["LICENSE"]` (PEP 639); `packages.find` include=`tse_tick*` |
 | **CLI** | `tse-tick = "tse_tick.cli:main"` |
 | **Extras** | `query` (duckdb), `test` (pandas/pytest/pytest-cov), `dev` (test + black/flake8/mypy/jupyter), `docs` |
 | **Black** | line-length=100, target Python 3.9–3.12 |
@@ -555,19 +599,21 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**336 tests.** Without proprietary data (the CI profile): **288 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 336 pass**.
+**414 tests.** Without proprietary data (the CI profile): **366 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 414 pass**.
 
 | Area | Coverage |
 |------|----------|
-| Stage-1 (ingest) | `test_ingest` (16), `test_parquet` (12), `test_parquet_io` (14) — synthetic + real-ZIP cases |
+| Stage-1 (ingest) | `test_ingest` (16), `test_parquet` (12), `test_parquet_io` (14), `test_ingest_multipart` (2) — synthetic + real-ZIP cases; every ZIP part of a day collected and written once |
+| Ingest performance (0.11.6–0.13.0) | `test_ingest_parallel` (8: spawn pool ≡ serial store, RAM-aware cap), `test_ingest_per_date_prune` (7: prune after resume-skip), `test_partscan` (10), `test_part_pruning` (5: pruned ≡ full scan), `test_field5_filter` (12: vectorized filter byte-identical) |
 | Stage-2 (query / features / event-window from Parquet) | `test_query` (15), `test_features` (20), `test_event_window` (22) — run against a **synthetic Hive-Parquet store** built by the real ingest pipeline (`conftest.py` + `synthetic_data.py`), so they need no proprietary data |
-| CLI | `test_cli` (14) — end-to-end on synthetic data, incl. the `export` verb |
+| Two-stage extraction | `test_extract_to_store` (6: single + multi ticker), `test_extract_batched_query` (10: single-scan query ≡ per-ticker loop) |
+| CLI | `test_cli` (15) — end-to-end on synthetic data, incl. the `export` verb |
 | Additive API | `test_api_additions` (13), `test_read_ticks` (16), `test_translate_data` (7) — `translate` / enums / `query_ticks` str-int ticker, the one-shot `read_ticks`, and the file-driven translation tables + `TSE_TICK_TRANSLATIONS` override, all on synthetic data |
-| Clean-room fixes | `test_quiet_and_unicode` (3), `test_discovery` (3), `test_dtypes` (1), `test_empty_schema` (3) — logging/no-crash on CJK paths, nested-layout discovery, Float64 dtypes, empty-but-typed frames |
-| Multi-part ingest + locate | `test_ingest_multipart` (2), `test_locate` (7) — every ZIP part of a day is collected and written once (BUG 1+2), and data is located at any NEEDS tree level |
+| Robustness fixes | `test_alpha_fixes` (19: OOM guard, truncation warn, explicit `year=`), `test_consolidation` (5: single-sourced type classification), `test_quiet_and_unicode` (5), `test_discovery` (4), `test_dtypes` (1), `test_empty_schema` (6), `test_locate` (7) |
+| Real-data QA regression suites | `test_run4_fixes` … `test_run12_fixes` (88 across 8 files; no run-9 file) — each locks the fixes from one real-data QA run |
 | Paper examples | `test_paper_examples` (5) — locks the technical paper's API listings |
-| Real data | `test_real_data` (64) + real-ZIP cases in `test_ingest` — all 4 types across the 2016 fixed-width and 2017+ CSV eras; **gated on local NEEDS files** (these are the 48 no-data skips) |
+| Real data | `test_real_data` (64) + real-ZIP cases in `test_ingest` — all 4 types across the 2016 fixed-width and 2017+ CSV eras; **gated on local NEEDS files** (these are the 48 no-data skips: 40 + 8) |
 
 `test_core.py` and `test_schemas.py` are 1-line stubs — cleaning and schema
 correctness are exercised by `test_real_data.py` and the synthetic-fixture
@@ -581,7 +627,7 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 |------------|----------|-----------|
 | ZIP bomb | `enhanced.py` | Max 5 GB decompressed, 5 entries, 100:1 ratio |
 | Path traversal | `query.py` | Resolved path prefix validation in `_resolve_type_dir()` |
-| Parallel cap | `ingest.py` | `_MAX_WORKERS = 8`, enforced in `ingest_directory()` |
+| Parallel cap | `ingest.py` | `_cap_workers()`: ≤ logical cores AND N × per-worker frame ≤ 70% of available RAM (`_RAM_SAFETY_FRACTION`); per-worker sized from the largest day's part bytes for full-frame `individual_stock`; pools are `spawn`-started, per-worker Polars threads bounded |
 | Query overflow | `query.py` | Default `LIMIT 10_000_000` on `query_ticks()` |
 | SQL injection | `query.py` | Column identifiers screened by a character **blocklist** (rejects `"` `\` `;` backticks, CR/LF/TAB, NUL — but allows spaces in NEEDS column names); dates `^\d{8}$`, times `^\d{2}:\d{2}:\d{2}$`; `ticker` normalized to an alphanumeric token |
 | Traceback leak | `ingest.py` | `traceback.print_exc()` → `logger.error(exc_info=True)` |
@@ -594,12 +640,12 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 | ID | Rule | Enforced in |
 |----|------|-------------|
 | C1 | ZIPs read in-memory, never extracted to disk | `enhanced.py` (io.BytesIO) |
-| C2 | One raw DataFrame in memory at a time | `ingest.py` loops + `del` + `gc.collect()` |
+| C2 | One raw DataFrame in memory per worker (serial default: one total) | `ingest.py` loops + `del` + `gc.collect()`; parallel workers each hold one date's frame, count RAM-capped (C9) |
 | C4 | Partitioned Parquet output, never single monolithic file | `io/parquet.py` |
 | C5 | Corrupt ZIPs logged and skipped (not fatal) | `ingest.py`, `scripts/ingest_event_windows.py` |
 | C6 | JST timezone on all timestamp comparisons | `event_window.py` |
 | C8 | ZIP bomb guard | `enhanced.py` (checked before decompression) |
-| C9 | Max parallel workers: 8 | `ingest.py` |
+| C9 | Parallel workers RAM-aware: ≤ logical cores, N × per-worker frame ≤ 70% of available RAM | `ingest.py` (`_cap_workers`) |
 | C10 | Query row limit: 10M | `query.py` |
 
 ---
