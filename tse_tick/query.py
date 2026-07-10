@@ -1,5 +1,6 @@
 # tse_tick/query.py
 import re
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Optional, Union
@@ -17,6 +18,27 @@ from .enhanced import TruncationWarning
 # every real column; block the dangerous characters instead.
 _FORBIDDEN_IDENTIFIER_CHARS = frozenset('"\\;`\r\n\t\x00')
 _MAX_QUERY_ROWS = 10_000_000
+
+
+def _duckdb_connect() -> "duckdb.DuckDBPyConnection":
+    """An in-memory DuckDB connection with its spill directory pointed at the
+    system temp dir.
+
+    An in-memory DuckDB spills large sorts to a ``.tmp/`` folder **in the
+    caller's working directory** by default — a whole-store ``query_ticks``
+    was observed dumping 31 GB there and leaving it orphaned when interrupted
+    (audit finding B3). The system temp dir is the right home for scratch
+    files; configuring it is best-effort (an old DuckDB without the setting
+    still works, just with its default spill location)."""
+    con = duckdb.connect()
+    try:
+        spill = Path(tempfile.gettempdir()) / "tse_tick_duckdb_spill"
+        spill.mkdir(parents=True, exist_ok=True)
+        escaped = str(spill).replace("'", "''")
+        con.execute(f"SET temp_directory = '{escaped}'")
+    except Exception:
+        pass
+    return con
 
 
 def _resolve_type_dir(data_dir: str, data_type: str) -> Path:
@@ -224,7 +246,7 @@ def query_ticks(
         f"{limit_clause}"
     )
 
-    con = duckdb.connect()
+    con = _duckdb_connect()
     try:
         df = con.execute(sql).pl()
     finally:
@@ -251,7 +273,8 @@ def _query_extract_batch(
     data_dir: str,
     data_type: str,
     tickers,
-    date: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     start_time: Optional[str] = None,
     end_time: Optional[str] = None,
 ) -> pl.DataFrame:
@@ -276,6 +299,12 @@ def _query_extract_batch(
 
     Fixed to ``limit=None`` — extract_to_store's mode. Do NOT use for general
     :func:`query_ticks`, whose finite ``limit`` is a per-call total, not a whole-result cap.
+
+    ``date_from`` / ``date_to`` are inclusive ``YYYYMMDD`` bounds: extract_to_store
+    passes its period's bounds so a REUSED store returns exactly the requested
+    period, not every stored day (audit finding B5). For the tick types the bounds
+    prune the per-ticker file list (each file is one date); for the date-partitioned
+    summary types they become a SQL condition on the Hive ``date`` column.
     """
     validate_data_type(data_type)
     type_dir = _resolve_type_dir(data_dir, data_type)
@@ -295,10 +324,12 @@ def _query_extract_batch(
     else:
         time_expr = '"Execution Time"'
 
+    if date_from is not None:
+        _validate_date(date_from)
+    if date_to is not None:
+        _validate_date(date_to)
+
     conditions: list[str] = []
-    if date is not None:
-        _validate_date(date)
-        conditions.append(f"date = '{date}'")
     if start_time is not None:
         _validate_time(start_time)
         conditions.append(f"{time_expr} >= '{start_time.replace(':', '')}'")
@@ -319,13 +350,19 @@ def _query_extract_batch(
         code_sql = f'substr("{code_col}", 1, 4)'
         in_list = ", ".join(f"'{c}'" for c in ordered_codes)
         conds = conditions + [f"{code_sql} IN ({in_list})"]
+        # Summary partitions are one file per date with the Hive `date` column
+        # carrying YYYYMMDD — bound it to the requested period (B5).
+        if date_from is not None:
+            conds.append(f"date >= '{date_from}'")
+        if date_to is not None:
+            conds.append(f"date <= '{date_to}'")
         glob_pattern = str(type_dir / "**" / "*.parquet").replace("\\", "/")
         sql = (
             f"SELECT * FROM read_parquet('{glob_pattern}', hive_partitioning=true) "
             f"WHERE {' AND '.join(conds)} "
             f'ORDER BY {code_sql}, "Data Date"'
         )
-        con = duckdb.connect()
+        con = _duckdb_connect()
         try:
             return con.execute(sql).pl()
         finally:
@@ -347,6 +384,15 @@ def _query_extract_batch(
     # (file columns + the Hive `date`), with no `filename`/`_code` artifact.
     files_by_code: dict[str, list[str]] = {}
     for p in type_dir.glob("**/ticker=*.parquet"):
+        # Each per-ticker file holds exactly one date (its date= parent dir), so
+        # the period bounds prune here — a reused store's out-of-period days are
+        # never even opened (B5).
+        if date_from is not None or date_to is not None:
+            fdate = p.parent.name[len("date="):]
+            if (date_from is not None and fdate < date_from) or (
+                date_to is not None and fdate > date_to
+            ):
+                continue
         files_by_code.setdefault(p.stem[len("ticker="):], []).append(
             str(p).replace("\\", "/")
         )
@@ -374,7 +420,7 @@ def _query_extract_batch(
         f"{where_clause} "
         f"ORDER BY {', '.join(order_cols)}"
     )
-    con = duckdb.connect()
+    con = _duckdb_connect()
     try:
         return con.execute(sql).pl()
     finally:
@@ -400,7 +446,7 @@ def query_sql(
 
     glob_pattern = str(type_dir / "**" / "*.parquet").replace("\\", "/")
 
-    con = duckdb.connect()
+    con = _duckdb_connect()
     try:
         con.execute(
             f"CREATE VIEW ticks AS "

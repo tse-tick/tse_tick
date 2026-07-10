@@ -132,7 +132,7 @@ tse_tick/                          # Project root
 |--------|--------|
 | ZIP bomb protection | Max 5 GB decompressed, max 5 entries, 100:1 compression ratio cap |
 | Path traversal prevention | `_resolve_type_dir()` validates resolved paths stay within data root |
-| Worker cap | `max_workers` clamped to 8 |
+| Worker cap | `max_workers` clamped to 8 *(historical — replaced in 0.13.0 by the RAM-aware cores+RAM cap, see §11)* |
 | Query limit | 10M default LIMIT on `query_ticks()` |
 | Traceback leak fix | `traceback.print_exc()` → `logger.error(exc_info=True)` |
 | SQL injection guard | Regex validation on identifiers, dates, time strings in `query_ticks()` |
@@ -555,8 +555,8 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**336 tests.** Without proprietary data (the CI profile): **288 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 336 pass**.
+**430 tests.** Without proprietary data (the CI profile): **382 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 430 pass**.
 
 | Area | Coverage |
 |------|----------|
@@ -581,7 +581,7 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 |------------|----------|-----------|
 | ZIP bomb | `enhanced.py` | Max 5 GB decompressed, 5 entries, 100:1 ratio |
 | Path traversal | `query.py` | Resolved path prefix validation in `_resolve_type_dir()` |
-| Parallel cap | `ingest.py` | `_MAX_WORKERS = 8`, enforced in `ingest_directory()` |
+| Parallel cap | `ingest.py` | `_cap_workers()` clamps `max_workers` to the machine's logical cores, then to a RAM budget (`_RAM_SAFETY_FRACTION` = 70% of available RAM ÷ an estimated per-worker frame). The flat `_MAX_WORKERS = 8` constant was removed in 0.13.0 |
 | Query overflow | `query.py` | Default `LIMIT 10_000_000` on `query_ticks()` |
 | SQL injection | `query.py` | Column identifiers screened by a character **blocklist** (rejects `"` `\` `;` backticks, CR/LF/TAB, NUL — but allows spaces in NEEDS column names); dates `^\d{8}$`, times `^\d{2}:\d{2}:\d{2}$`; `ticker` normalized to an alphanumeric token |
 | Traceback leak | `ingest.py` | `traceback.print_exc()` → `logger.error(exc_info=True)` |
@@ -599,8 +599,10 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 | C5 | Corrupt ZIPs logged and skipped (not fatal) | `ingest.py`, `scripts/ingest_event_windows.py` |
 | C6 | JST timezone on all timestamp comparisons | `event_window.py` |
 | C8 | ZIP bomb guard | `enhanced.py` (checked before decompression) |
-| C9 | Max parallel workers: 8 | `ingest.py` |
+| C9 | Parallel workers capped by logical cores AND a RAM budget (`_cap_workers`) | `ingest.py` |
 | C10 | Query row limit: 10M | `query.py` |
+| C11 | Partition writes are atomic (hidden temp file + `os.replace`); resume validates Parquet footer magic before skipping a date | `io/parquet.py`, `ingest.py` |
+| C12 | Parallel ingest pools use the `spawn` start method (never `fork`); a user's `max_workers>1` script call must sit under `if __name__ == "__main__":` (an unguarded top-level call gets an actionable `RuntimeError`) | `ingest.py` |
 
 ---
 

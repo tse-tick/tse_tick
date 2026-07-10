@@ -104,6 +104,7 @@ from .enhanced import (
     read_ticks,
     NoDataWarning,
     TruncationWarning,
+    LargeResultWarning,
     OneShotMemoryError,
 )
 
@@ -175,6 +176,7 @@ __all__ = [
     "parse_period",
     "NoDataWarning",
     "TruncationWarning",
+    "LargeResultWarning",
     "OneShotMemoryError",
     "get_schema_individual_stock_95",
     "get_schema_summary_83",
