@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-11
+
 Fixes for the 11 findings of the 0.13.0 two-stage extraction audit (TYO:7203,
 2021–2023, `benchmark_extraction_7203/run_7203_2021-2023_twostage_v0.13.0/`):
 data-corruption resume (B11), the unguarded-spawn crash (B1), `extract_to_store`
