@@ -121,6 +121,7 @@ technical_paper/
 
 # Local agent settings
 .claude/
+CLAUDE.md
 
 # Benchmarks: scripts, ENVIRONMENT.md, and aggregate results CSVs are tracked
 # (re-included below; they contain timings only, never raw NEEDS data).
