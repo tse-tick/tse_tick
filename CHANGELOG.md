@@ -45,6 +45,17 @@ Fixes for the ingest / raw-parse audit findings (H1–H2 high, M1–M4 medium) o
   top of it) parses every file member of a ZIP; previously only
   `namelist()[0]` was read even though up to 5 members pass the entry guard, so
   members 2–5 were silently dropped.
+- **`read_ticks` warns on an exact-fit row cap with data left unread (L1).**
+  The ZIP loop broke at `total >= rows` but the `TruncationWarning` fired only
+  when the result exceeded the cap, so a total landing exactly on `rows` with
+  ZIPs still unread returned silently incomplete data. The loop now reads one
+  row past the cap (the same overflow-by-one detection `query_ticks` uses) and
+  warns whenever it stopped early; a genuine exact fit still does not warn.
+- **Malformed dates no longer create an invisible `date=None` partition (L2).**
+  A raw `Data Date` that `clean_data`'s non-strict parse nulled used to be
+  filed under `date=None/` — unreachable by every date-scoped query and treated
+  as a real date by resume. Both Parquet writers now drop such rows before
+  partitioning and log a warning with the dropped-row count.
 
 ## [0.13.1] - 2026-07-11
 

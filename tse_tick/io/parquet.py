@@ -1,5 +1,6 @@
 # tse_tick/io/parquet.py
 import datetime
+import logging
 import os
 import re
 from pathlib import Path
@@ -10,6 +11,8 @@ import polars as pl
 import pyarrow.dataset as ds
 
 from tse_tick.constants import INDEX_TYPES, validate_data_type
+
+logger = logging.getLogger(__name__)
 
 # Tick types partition by (date, code): each ticker-day holds thousands of ticks,
 # so a per-ticker file is large and prunes well. The two *daily-aggregate* summary
@@ -75,6 +78,25 @@ def _partition_value(raw_value: object, code_lookup: Optional[dict[str, str]]):
         return int(value)
     except ValueError:
         return value
+
+
+def _drop_null_date_rows(df: pl.DataFrame, date_col: str) -> pl.DataFrame:
+    """Drop rows whose derived ``_date_str`` partition key is null, with a warning.
+
+    A null key comes from a raw ``Data Date`` that ``clean_data``'s non-strict
+    parse could not read — garbage rows with no date to file under. Left in,
+    they would be written to a ``date=None/`` partition that no date-scoped
+    query ever matches (audit finding L2).
+    """
+    null_count = df["_date_str"].null_count()
+    if null_count:
+        logger.warning(
+            "Dropping %d row(s) with an unparseable %r before the partitioned "
+            "write — they would land in an unqueryable date=None partition.",
+            null_count, date_col,
+        )
+        df = df.filter(pl.col("_date_str").is_not_null())
+    return df
 
 
 def _coerce_time_cols(df: pl.DataFrame) -> pl.DataFrame:
@@ -143,6 +165,12 @@ def write_partitioned_parquet(
         df = df.with_columns(
             pl.col(date_col).cast(pl.String).str.replace_all("-", "", literal=True).alias("_date_str")
         )
+
+    # clean_data parses dates non-strictly, so a malformed raw Data Date is null
+    # here; its group key would stringify to "None" and write an unqueryable
+    # date=None/ partition that resume then treats as a real date (audit finding
+    # L2). Drop such rows loudly instead of hiding them in a dead partition.
+    df = _drop_null_date_rows(df, date_col)
 
     grouped = df.group_by("_date_str", maintain_order=True)
     for (date_str,), date_group in grouped:
@@ -282,6 +310,10 @@ def write_event_window_parquet(df: pl.DataFrame, output_dir: str) -> None:
         )
 
     df = df.with_columns(date_strs.alias("_date_str"))
+
+    # Same null-date guard as write_partitioned_parquet (audit finding L2): a
+    # malformed Data Date must not create a dead year=/month= partition.
+    df = _drop_null_date_rows(df, "Data Date")
 
     grouped = df.group_by("_date_str", maintain_order=True)
     for (date_str,), group in grouped:

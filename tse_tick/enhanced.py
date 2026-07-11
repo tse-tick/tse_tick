@@ -1302,7 +1302,10 @@ def read_ticks(
         columns: Column projection; ``None`` selects all columns.
         rows: Cap on returned rows (default 10,000,000). On hitting the cap the
             result is truncated **and a** :class:`TruncationWarning` **is
-            emitted** (capturable via ``warnings``). A whole **month** of a couple
+            emitted** (capturable via ``warnings``) — including when the total
+            lands exactly on the cap with ZIPs still unread (detected by reading
+            one row past the cap, as :func:`tse_tick.query_ticks` does); an
+            exact-fit result with nothing left unread does not warn. A whole **month** of a couple
             of *active* tickers can exceed 10M (e.g. 7203 + 9984 for one January is
             ~25M rows), so a single monthly call would stop partway. To read it all,
             use the two-stage ``ingest_period`` -> :func:`tse_tick.query_ticks` path
@@ -1395,6 +1398,7 @@ def read_ticks(
 
     parts: List[pl.DataFrame] = []
     total = 0
+    truncated = False
     cumulative_bytes = 0
     schema_frame: Optional[pl.DataFrame] = None
     for zip_path in zips:
@@ -1434,7 +1438,13 @@ def read_ticks(
             del df
             gc.collect()
 
-        if rows is not None and total >= rows:
+        # Strictly-greater, mirroring query_ticks's LIMIT+1 trick: keep reading
+        # until the cap is EXCEEDED by at least one row, so an exact-fit total
+        # with ZIPs still unread can't masquerade as a complete result — the old
+        # `>= rows` break dropped the remaining ZIPs with no TruncationWarning
+        # (audit finding L1). Costs at most one extra ZIP on an exact boundary.
+        if rows is not None and total > rows:
+            truncated = True
             break
 
     if parts:
@@ -1479,7 +1489,10 @@ def read_ticks(
             "end_time)."
         )
 
-    if rows is not None and result.height > rows:
+    # Warn on `truncated` too, not just on the final height: the day-prune /
+    # column filters above can shrink an early-broken result back under the cap,
+    # but ZIPs were still left unread — coverage is incomplete either way (L1).
+    if rows is not None and (truncated or result.height > rows):
         warnings.warn(
             f"read_ticks: row cap ({rows}) reached; result truncated. "
             "Build a Parquet store (ingest_*) and use query_ticks for full coverage.",

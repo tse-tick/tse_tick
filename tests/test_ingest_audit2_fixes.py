@@ -18,7 +18,13 @@ M3 - the Stock Code suffix decode ("72031" -> "72031New Shares") plus the [:4]
      file, same tmp name, crash (or silent mislabeling).
 M4 - only zf.namelist()[0] was parsed although up to 5 members are allowed:
      members 2..5 were silently dropped.
+L1 - read_ticks' row cap broke the ZIP loop at total >= rows but warned only on
+     result.height > rows: an exact-fit total with ZIPs still unread returned
+     silently incomplete data.
+L2 - a raw Data Date that clean_data's non-strict parse nulled was written to an
+     unqueryable date=None/ partition instead of being dropped loudly.
 """
+import warnings
 import zipfile
 
 import polars as pl
@@ -26,6 +32,7 @@ import pytest
 
 import tse_tick
 from tse_tick.ingest import ingest_directory, ingest_year
+from tse_tick.io.parquet import write_partitioned_parquet
 from tests.synthetic_data import individual_stock_csv, write_zip
 
 DATE = "20240104"
@@ -340,3 +347,91 @@ def test_multi_member_zip_reads_all_members(tmp_path):
     codes = set(df["Stock Code"].str.strip_chars().unique().to_list())
     assert codes == {"1301", "7203"}, "member 2 was dropped"
     assert df.height == 8
+
+
+# --------------------------------------------------------------------------
+# L1 - read_ticks exact-fit row cap silently dropped remaining ZIPs
+# --------------------------------------------------------------------------
+
+
+def test_read_ticks_exact_fit_cap_with_unread_zips_warns(tmp_path):
+    """A total landing exactly on the cap with more ZIPs unread must emit a
+    TruncationWarning — the old `>= rows` break dropped them silently (L1)."""
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    for day in (DATE, "20240105"):
+        write_zip(flat / f"HTICST120.{day}.1.zip", f"HTICST120.{day}.1.csv",
+                  individual_stock_csv(day, ["1301"], rows_per_ticker=4))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df = tse_tick.read_ticks(str(flat), rows=4)
+
+    assert df.height == 4
+    assert any(issubclass(w.category, tse_tick.TruncationWarning) for w in caught), \
+        "exact-fit truncation must warn, not silently drop the second ZIP"
+
+
+def test_read_ticks_exact_fit_cap_with_nothing_left_stays_silent(tmp_path):
+    """An exact-fit result with NO data left unread is complete — no warning."""
+    z = tmp_path / f"HTICST120.{DATE}.1.zip"
+    write_zip(z, f"HTICST120.{DATE}.1.csv",
+              individual_stock_csv(DATE, ["1301"], rows_per_ticker=4))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        df = tse_tick.read_ticks(str(z), rows=4)
+
+    assert df.height == 4
+    assert not any(issubclass(w.category, tse_tick.TruncationWarning) for w in caught)
+
+
+# --------------------------------------------------------------------------
+# L2 - null Data Date rows landed in an unqueryable date=None partition
+# --------------------------------------------------------------------------
+
+
+def test_null_data_date_rows_are_dropped_not_written_to_date_none(tmp_path, caplog):
+    """Rows whose Data Date failed the non-strict parse must be dropped with a
+    warning, not filed under date=None/ where no date query finds them (L2)."""
+    import logging
+
+    z = tmp_path / f"HTICST120.{DATE}.1.zip"
+    write_zip(z, f"HTICST120.{DATE}.1.csv",
+              individual_stock_csv(DATE, ["1301"], rows_per_ticker=8))
+    df = tse_tick.create_df(str(z), auto_detect=False,
+                            data_type="individual_stock", year=2024)
+    df = df.with_columns(
+        pl.when(pl.int_range(pl.len()) < 2)
+        .then(pl.lit(None, dtype=df.schema["Data Date"]))
+        .otherwise(pl.col("Data Date"))
+        .alias("Data Date")
+    )
+    store = tmp_path / "store"
+
+    with caplog.at_level(logging.WARNING):
+        write_partitioned_parquet(df, str(store), "individual_stock")
+
+    assert not (store / "individual_stock" / "date=None").exists()
+    assert _rows(store, DATE, 1301) == 6  # the 6 good rows still land
+    assert any("date=None" in r.message for r in caplog.records), \
+        "dropped rows must be reported, not silent"
+
+
+def test_malformed_raw_date_never_creates_date_none_partition(tmp_path):
+    """End-to-end: a raw line with a corrupt Data Date field must not surface as
+    a date=None partition in an ingested store (L2)."""
+    src = tmp_path / "src"
+    leaf = src / DATE[:4] / DATE[:6]
+    leaf.mkdir(parents=True)
+    payload = individual_stock_csv(DATE, ["1301"], rows_per_ticker=8)
+    # First occurrence of the quoted date in a row is its Data Date field.
+    payload = payload.replace(f'"{DATE}"'.encode("ascii"), b'"2024XX04"', 1)
+    write_zip(leaf / f"HTICST120.{DATE}.1.zip", f"HTICST120.{DATE}.1.csv", payload)
+    store = tmp_path / "store"
+
+    results = tse_tick.ingest_period(str(src), str(store), DATE, "individual_stock")
+
+    assert not list((store / "individual_stock").glob("date=None*"))
+    assert _rows(store, DATE, 1301) == 7  # the corrupt-date row is dropped
+    assert all("error" not in m for m in results), results
