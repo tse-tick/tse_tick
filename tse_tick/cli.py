@@ -229,7 +229,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Date range to process: YYYY (entire year), "
+            "Date range to process: YYYY (entire year), YYYY-YYYY (year range), "
             "YYYYMM-YYYYMM (month range), or YYYYMMDD-YYYYMMDD (day range). "
             "Takes precedence over --years/--year."
         ),

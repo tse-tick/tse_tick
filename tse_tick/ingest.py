@@ -8,21 +8,23 @@ the functions re-exported at the top level: :func:`ingest_period` (a structured
 :func:`ingest_event_windows_period` (the event-window store) — e.g. call
 ``tse_tick.ingest_period(...)``, not ``tse_tick.ingest(...)``.
 """
+import calendar
 import gc
 import glob as _glob
 import logging
 import multiprocessing
 import os
 import sys
+import warnings
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Optional, Union
+from typing import Iterable, Optional, Union, cast
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, OneShotMemoryError
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, LargeResultWarning, OneShotMemoryError
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -40,6 +42,7 @@ _MP_SPAWN = multiprocessing.get_context("spawn")
 _RAM_SAFETY_FRACTION = 0.7   # use at most this fraction of available RAM for worker frames
 _FILTERED_WORKER_GB = 0.5    # ticker-filtered / summary / index: a small per-worker frame
 _FULLFRAME_EXPANSION = 8.0   # compressed part bytes -> peak per-worker RAM (full-frame day)
+_LARGE_EXTRACT_ROWS = 10_000_000  # extract_to_store warns before materializing more rows
 
 
 def _cpu_cap() -> int:
@@ -140,6 +143,49 @@ def _cap_workers(requested: int, per_worker_gb: Optional[float] = None) -> int:
                 workers, per_worker_gb,
             )
     return workers
+
+
+def _reject_bootstrap_reimport() -> None:
+    """Fail fast, with an actionable message, when an ingest entry point is
+    re-executed by a spawn worker that is still bootstrapping.
+
+    Parallel ingest starts workers with the ``spawn`` method (deliberate — ``fork``
+    deadlocks Polars), and spawn re-imports the caller's script in every worker. If
+    the user's ingest call sits at module top level (no ``__main__`` guard), each
+    worker re-runs it during bootstrap: without this check that surfaces as the
+    stdlib's cryptic ``freeze_support`` / "bootstrapping phase" ``RuntimeError``
+    (audit finding B1) — and a serial top-level call would silently re-ingest in
+    every worker. ``_inheriting`` is the same signal the stdlib's own guard checks.
+    """
+    if getattr(multiprocessing.current_process(), "_inheriting", False):
+        raise RuntimeError(
+            "A tse_tick ingest call was re-executed inside a spawn worker process "
+            "while it was starting up. Your ingest_* / extract_to_store call runs "
+            "at module top level; parallel ingest (max_workers > 1) starts worker "
+            "processes with the 'spawn' method, which re-imports your script in "
+            "every worker. Wrap the call in a main guard:\n\n"
+            '    if __name__ == "__main__":\n'
+            "        ...your ingest call...\n"
+        )
+
+
+def _valid_parquet_file(path: Path) -> bool:
+    """True if ``path`` looks like a complete Parquet file (magic bytes at both ends).
+
+    A write killed partway (crash, OOM, Ctrl-C, a reaped job) used to leave a
+    truncated final file with no footer; an existence-only resume then skipped —
+    and permanently trusted — that corrupt partition (audit finding B11, observed
+    live). Writes are atomic now, but stores written by older versions (or hit by
+    external truncation) still need the resume-side check. This probes only the
+    8 magic bytes — cheap enough to run per file on every resume."""
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(4) != b"PAR1":
+                return False
+            fh.seek(-4, os.SEEK_END)
+            return fh.read(4) == b"PAR1"
+    except OSError:
+        return False
 
 
 @contextmanager
@@ -264,6 +310,9 @@ def ingest_directory(
         language: Output column-name language (``"en"`` / ``"jp"``).
         max_workers: Parallel worker processes; ``1`` is serial. Capped by the machine's
             logical cores AND available RAM (each worker holds one ZIP's frame).
+            **When calling with ``max_workers > 1`` from a script, the call must be
+            inside ``if __name__ == "__main__":`` — workers are started with the
+            ``spawn`` method, which re-imports your script in every worker.**
         progress: Log a per-ZIP progress line.
         ticker_filter: Optional ``set`` of string stock codes
             (``individual_stock`` only).
@@ -272,6 +321,8 @@ def ingest_directory(
         One result dict per ZIP (see :func:`ingest_single_zip`); a failed ZIP
         contributes ``{"zip_path": ..., "error": ...}`` instead.
     """
+    _reject_bootstrap_reimport()  # actionable error for an unguarded top-level call (B1)
+
     in_path = Path(input_dir)
     if not in_path.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
@@ -451,6 +502,8 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
     date writes its own dir); the results list is sorted by date so its order is
     deterministic regardless of worker completion order.
     """
+    _reject_bootstrap_reimport()  # actionable error for an unguarded top-level call (B1)
+
     output_root_path = Path(output_dir) / data_type
     groups: dict = {}
     for zp in zip_paths:
@@ -468,8 +521,27 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
     tasks: list = []
     for date_str, parts in groups.items():
         if resume and output_root_path.exists():
+            # Skip a date only if its partition files exist AND all pass the
+            # Parquet footer probe — an interrupted older-version write leaves a
+            # truncated file that a bare existence check would trust forever
+            # (audit finding B11). Invalid files are deleted (they are unreadable
+            # by any Parquet reader) and the date re-ingested. `*.parquet` also
+            # matches the summary types' `<date>.parquet` files, which the old
+            # `ticker=*.parquet` glob missed (their daily-token dates never
+            # resume-skipped).
             date_dir = output_root_path / f"date={date_str}"
-            if date_dir.exists() and any(date_dir.glob("ticker=*.parquet")):
+            existing = list(date_dir.glob("*.parquet")) if date_dir.exists() else []
+            invalid = [p for p in existing if not _valid_parquet_file(p)]
+            for p in invalid:
+                logger.warning(
+                    "Resume: %s is not a complete Parquet file (interrupted write?) — "
+                    "deleting it and re-ingesting date %s", p, date_str,
+                )
+                try:
+                    p.unlink()
+                except OSError as exc:
+                    logger.warning("Resume: could not delete %s: %s", p, exc)
+            if existing and not invalid:
                 continue
         tasks.append((date_str, parts))
 
@@ -530,10 +602,16 @@ def ingest_year_from_root(
         year: Year to ingest.
         data_type: One of the four NEEDS types.
         language: Output column-name language (``"en"`` / ``"jp"``).
-        resume: Skip dates already present in the store (default ``True``).
+        resume: Skip dates already present in the store (default ``True``). A date
+            is skipped only if its Parquet files pass a footer integrity probe;
+            a truncated partition (interrupted write) is deleted and re-ingested.
         max_workers: Parallel worker processes for the independent per-date ingests;
             ``1`` is serial. Capped by the machine's logical cores AND available RAM
-            (each worker holds a whole day's frame).
+            (each worker holds a whole day's frame). **When calling with
+            ``max_workers > 1`` from a script, the call must be inside
+            ``if __name__ == "__main__":`` — worker processes are started with the
+            ``spawn`` method (a Polars ``fork`` deadlock workaround), which
+            re-imports your script in every worker.**
         ticker_filter: Optional ``set`` of stock/index codes to keep.
 
     Returns:
@@ -568,15 +646,21 @@ def ingest_period(
         input_root: Root of the ``{year}/{yearmonth}/`` NEEDS hierarchy.
         output_dir: Store root to write under.
         period: ``"YYYY"``, a single ``"YYYYMM"`` or ``"YYYYMMDD"``, or a
-            ``"YYYYMM-YYYYMM"`` / ``"YYYYMMDD-YYYYMMDD"`` range (the same forms
-            :func:`tse_tick.parse_period` accepts).
+            ``"YYYY-YYYY"`` / ``"YYYYMM-YYYYMM"`` / ``"YYYYMMDD-YYYYMMDD"`` range
+            (the same forms :func:`tse_tick.parse_period` accepts).
         data_type: NEEDS type to ingest.
         language: Output column-name language (``"en"`` / ``"jp"``).
         resume: Skip dates whose Parquet output already exists (default ``True``).
+            A date is skipped only if its Parquet files pass a footer integrity
+            probe; a truncated partition (interrupted write) is deleted and
+            re-ingested.
         max_workers: Parallel worker processes for the independent per-date ingests;
             ``1`` is serial. Capped by the machine's logical cores AND available RAM
             (each worker holds a whole day's frame). Wired through every granularity
-            (year / month / date).
+            (year / month / date). **When calling with ``max_workers > 1`` from a
+            script, the call must be inside ``if __name__ == "__main__":`` — worker
+            processes are started with the ``spawn`` method (a Polars ``fork``
+            deadlock workaround), which re-imports your script in every worker.**
         ticker_filter: Optional ``set`` of string stock codes
             (``individual_stock`` only).
 
@@ -629,6 +713,29 @@ def ingest_period(
     raise ValueError(f"Unknown granularity: {granularity}")
 
 
+def _period_date_bounds(period: str) -> "tuple[str, str]":
+    """Inclusive ``(first, last)`` ``YYYYMMDD`` bounds of a period string.
+
+    ``parse_period`` only produces contiguous ranges, so a pair of bounds
+    represents any accepted period form exactly. Used to scope
+    :func:`extract_to_store`'s Stage-2 query to ``period`` on a reused store
+    (audit finding B5: it used to return every stored day).
+    """
+    parsed = parse_period(period)
+    granularity = parsed["granularity"]
+    if granularity == "year":
+        years = cast("list[int]", parsed["years"])
+        return f"{min(years)}0101", f"{max(years)}1231"
+    if granularity == "month":
+        months_by_year = cast("dict[int, list[int]]", parsed["months_by_year"])
+        pairs = [(y, m) for y, months in months_by_year.items() for m in months]
+        y0, m0 = min(pairs)
+        y1, m1 = max(pairs)
+        return f"{y0}{m0:02d}01", f"{y1}{m1:02d}{calendar.monthrange(y1, m1)[1]:02d}"
+    dates = cast("list[str]", parsed["dates"])
+    return min(dates), max(dates)
+
+
 def extract_to_store(
     input_root: str,
     output_dir: str,
@@ -640,6 +747,7 @@ def extract_to_store(
     end_time: Optional[str] = None,
     language: str = "en",
     resume: bool = True,
+    max_workers: int = 1,
 ) -> "pl.DataFrame":
     """Two-stage extraction in ONE call: ingest one or more tickers for a period
     into a reusable Parquet store, then return the queried DataFrame.
@@ -663,17 +771,29 @@ def extract_to_store(
             the two ``*_summary`` types are daily aggregates and raise if given).
         end_time: Optional intraday upper bound ``"HH:MM:SS"``.
         language: Output column-name language (``"en"`` / ``"jp"``).
-        resume: Skip dates already in the store (default ``True``).
+        resume: Skip dates already in the store (default ``True``); truncated
+            partitions (interrupted writes) are detected and re-ingested.
+        max_workers: Parallel worker processes for the Stage-1 per-date ingests;
+            ``1`` is serial. Capped by the machine's logical cores AND available
+            RAM. **When calling with ``max_workers > 1`` from a script, the call
+            must be inside ``if __name__ == "__main__":`` — workers are started
+            with the ``spawn`` method, which re-imports your script in every
+            worker.**
 
     Returns:
         The queried Polars DataFrame for the requested ticker(s) — columns match
         :func:`tse_tick.query_ticks` (the read columns plus a ``date`` column). With
         several tickers the per-ticker frames are concatenated (in sorted code
-        order). **All** matching rows are returned — this queries with ``limit=None``,
-        so unlike a bare :func:`query_ticks` call it is not subject to the default
-        10M-row cap (a whole month of a very active ticker exceeds it). A multi-day
-        ``period`` returns every stored day for those tickers; build into a fresh
-        ``output_dir`` to get exactly ``period``.
+        order). **All** matching rows are returned as ONE in-memory DataFrame —
+        this queries with ``limit=None``, so unlike a bare :func:`query_ticks` call
+        it is not subject to the default 10M-row cap (a whole month of a very
+        active ticker exceeds it). The flip side: a long period of an active
+        ticker can be tens of GB in RAM. Past ~10M rows a capturable
+        :class:`tse_tick.LargeResultWarning` is emitted first — the store is
+        already built at that point, so the memory-safe pattern is to ignore the
+        returned frame and read the store in bounded :func:`tse_tick.query_ticks`
+        slices (per day / per month). The result is scoped to ``period`` even when
+        ``output_dir`` is a reused store holding other days.
 
     Requires the optional ``[query]`` extra (DuckDB). Example::
 
@@ -690,18 +810,48 @@ def extract_to_store(
     ingest_period(
         input_root, output_dir, period, data_type,
         language=language, resume=resume, ticker_filter=tickers,
+        max_workers=max_workers,
     )
     # Stage 2 — one DuckDB connection and one scan for ALL tickers (issue #44), replacing
     # the per-ticker query_ticks(limit=None) loop + concat (and, for the two summary types,
     # N full-store scans with one). Returns the same multiset of rows in the same
-    # (code, Data Date, time) order; the summary types are byte-identical. A fresh store
-    # holds exactly (tickers, period), so scope to the day only when period is a single
-    # day. limit is None — extract returns ALL rows (a whole month of a very active ticker
-    # exceeds query_ticks' default 10M exploratory cap).
-    query_date = period if (period.isdigit() and len(period) == 8) else None
+    # (code, Data Date, time) order; the summary types are byte-identical. The query is
+    # scoped to period's date bounds so a REUSED store returns exactly `period`, not every
+    # stored day (audit finding B5). limit is None — extract returns ALL rows (a whole
+    # month of a very active ticker exceeds query_ticks' default 10M exploratory cap).
+    date_from, date_to = _period_date_bounds(period)
+
+    # The result is materialized as ONE in-memory frame; past the threshold, warn
+    # first (audit finding B2). The per-ticker-day row counts come free from the
+    # Parquet footers of the files the query is about to read.
+    if data_type == "individual_stock" or data_type == "indices":
+        import pyarrow.parquet as pq
+
+        type_dir = Path(output_dir) / data_type
+        total_rows = 0
+        if type_dir.exists():
+            for code in tickers:
+                for f in type_dir.glob(f"date=*/ticker={code}.parquet"):
+                    if date_from <= f.parent.name[len("date="):] <= date_to:
+                        try:
+                            total_rows += pq.ParquetFile(f).metadata.num_rows
+                        except Exception:  # unreadable file: the query itself will surface it
+                            continue
+        if total_rows > _LARGE_EXTRACT_ROWS:
+            warnings.warn(
+                f"extract_to_store is about to return ~{total_rows:,} rows as one "
+                f"in-memory DataFrame. The Parquet store at {output_dir!r} is already "
+                f"built — for large periods, ignore the returned frame and read the "
+                f"store in bounded query_ticks(...) slices (per day / per month) "
+                f"instead.",
+                LargeResultWarning,
+                stacklevel=2,
+            )
+
     return _query_extract_batch(
         output_dir, data_type, tickers,
-        date=query_date, start_time=start_time, end_time=end_time,
+        date_from=date_from, date_to=date_to,
+        start_time=start_time, end_time=end_time,
     )
 
 
@@ -741,7 +891,7 @@ def ingest_event_windows_period(
         input_root: Root of the ``{year}/{yearmonth}/`` NEEDS hierarchy.
         output_dir: Root of the event-window store to write.
         period: ``"YYYY"``, single ``"YYYYMM"`` / ``"YYYYMMDD"``, or a
-            ``"YYYYMM-YYYYMM"`` / ``"YYYYMMDD-YYYYMMDD"`` range.
+            ``"YYYY-YYYY"`` / ``"YYYYMM-YYYYMM"`` / ``"YYYYMMDD-YYYYMMDD"`` range.
         filter_csv: CSV of events with ``zip_date``, ``event_date``, ``ticker`` and
             ``reaction_anchor_dt`` columns.
         window_minutes: Half-width of the window kept around each anchor.

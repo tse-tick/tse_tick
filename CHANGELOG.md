@@ -2,6 +2,72 @@
 
 ## [Unreleased]
 
+Fixes for the 11 findings of the 0.13.0 two-stage extraction audit (TYO:7203,
+2021–2023, `benchmark_extraction_7203/run_7203_2021-2023_twostage_v0.13.0/`):
+data-corruption resume (B11), the unguarded-spawn crash (B1), `extract_to_store`
+ergonomics (B2/B4/B5), DuckDB temp spill (B3), `YYYY-YYYY` periods (B8), and doc
+drift (B3/B6/B9/B10 + stale test counts).
+
+### Added
+- **`extract_to_store(..., max_workers=N)` (B4).** The recommended two-stage one-liner
+  can now use 0.13.0's parallel per-date ingest; it was pinned serial because the
+  parameter was never passed through (~9.3 h serial vs ~79 min at 8 workers for a
+  3-year single-ticker ingest, per the audit's measurements).
+- **`parse_period` accepts `YYYY-YYYY` year ranges (B8).** `"2021-2023"` now works
+  everywhere a period is accepted (`ingest_period`, `extract_to_store`, the CLI
+  `--period`); previously the intuitive 3-year form raised `ValueError`.
+- **`tse_tick.LargeResultWarning` (B2).** `extract_to_store` deliberately returns all
+  rows (no cap — that stays); past ~10M rows it now emits this capturable warning
+  before materializing, pointing at bounded `query_ticks` slices of the just-built
+  store (a 3-year active-ticker frame is tens of GB and can OOM the machine).
+
+### Fixed
+- **Interrupted ingest can no longer corrupt a partition that `resume=True` then
+  trusts forever (B11 — observed live as an unreadable `date=20220511` partition).**
+  Partition writes are now atomic: every file is written to a hidden temp name and
+  `os.replace()`d into place, per-date as a unit (a multi-file date installs all
+  files or none). The resume check additionally validates the Parquet footer magic
+  of existing partition files and deletes + re-ingests a truncated one instead of
+  skipping it. The event-window writer (which rewrites a date file to append) is
+  atomic too, so an interruption no longer destroys previously accumulated rows.
+- **Unguarded top-level parallel ingest now fails with an actionable error (B1).**
+  `max_workers > 1` uses `spawn` workers (deliberate — `fork` deadlocks Polars),
+  which re-import the calling script; an `ingest_*` / `extract_to_store` call at
+  module top level re-ran itself in every worker and died with the cryptic stdlib
+  `freeze_support` RuntimeError. The re-execution is now detected and raises a
+  RuntimeError that shows the required `if __name__ == "__main__":` guard, which is
+  also documented in the `max_workers` docstrings, README, ARCHITECTURE, and the
+  evaluation notebook.
+- **`extract_to_store` on a reused store returns exactly `period` (B5).** Its Stage-2
+  query ran with `date=None` for any multi-day period, silently returning every day
+  the store held (e.g. 2021+2022 after two consecutive yearly extracts). The query is
+  now scoped to the period's inclusive date bounds.
+- **Summary-type dates now resume-skip.** The resume check only globbed
+  `ticker=*.parquet`, which the date-partitioned summary stores don't contain, so
+  their (daily-token) dates re-ingested on every resumed run (found while fixing B11).
+- **DuckDB spill moved out of the working directory (B3).** Query connections set
+  `temp_directory` to `<system temp>/tse_tick_duckdb_spill`; a whole-store
+  `query_ticks` was observed spilling 31 GB into an orphaned `./.tmp/` in the
+  caller's cwd when interrupted.
+- **Notebook `02_evaluation` no longer aborts on a stale editable install (B7).** The
+  SETUP cell warns (RuntimeWarning) on a `__version__` vs dist-metadata mismatch
+  instead of raising before any check runs.
+
+### Changed
+- **README/ARCHITECTURE corrections (B3/B6/B9/B10).** The "no row cap" claim is scoped
+  to `extract_to_store` only (`query_ticks` defaults to the 10M cap and warns — the
+  cap warning box now names both `read_ticks` and `query_ticks`); the two-stage README
+  example shows guarded `max_workers`; the CLI `--parallel` row and the security
+  tables reflect the 0.13.0 cores+RAM worker cap (the flat "8" is gone); test counts
+  updated (430 collected; 382 pass / 48 data-gated skips without data).
+
+### Tests
+- `tests/test_audit_fixes.py` (+16): planted-truncation resume recovery, atomic /
+  all-or-nothing writes, event-window write safety, spawn-bootstrap detection (unit +
+  end-to-end subprocess), `extract_to_store` passthrough / period scoping / warning,
+  `YYYY-YYYY` parsing and end-to-end multi-year ingest, DuckDB temp-directory config,
+  summary resume-skip. Full suite: 430 with-data / 382+48-skip without.
+
 ## [0.13.0] - 2026-07-09
 
 Parallel per-date ingest with a RAM-aware worker cap (#43) and a single-scan

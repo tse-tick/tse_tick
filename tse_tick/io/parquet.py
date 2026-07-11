@@ -1,5 +1,6 @@
 # tse_tick/io/parquet.py
 import datetime
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -144,17 +145,40 @@ def write_partitioned_parquet(
         date_dir = type_dir / f"date={date_str_val}"
         date_dir.mkdir(parents=True, exist_ok=True)
 
-        if ticker_col is not None:
-            ticker_groups = date_group.group_by(ticker_col, maintain_order=True)
-            for (ticker_val,), ticker_group in ticker_groups:
-                out_df = ticker_group.drop(["_date_str"])
-                ticker_int = _partition_value(ticker_val, code_lookup)
-                fpath = date_dir / f"ticker={ticker_int}.parquet"
-                out_df.write_parquet(fpath, compression="snappy")
-        else:
-            out_df = date_group.drop(["_date_str"])
-            fpath = date_dir / f"{date_str_val}.parquet"
-            out_df.write_parquet(fpath, compression="snappy")
+        # Two-phase write per date: every file goes to a hidden temp name first,
+        # then each is os.replace()d into place (atomic on Windows and POSIX). A
+        # process killed mid-write can no longer leave a truncated final file —
+        # or, for a multi-file date, a partial subset of final files — that the
+        # existence-keyed resume would then trust forever (audit finding B11,
+        # observed live as an unreadable partition). Temp names start with "."
+        # so `*.parquet` globs and pyarrow/DuckDB dataset scans never see them;
+        # the PID suffix keeps concurrent flat-path writers apart.
+        pending: list[tuple[Path, Path]] = []
+        try:
+            if ticker_col is not None:
+                ticker_groups = date_group.group_by(ticker_col, maintain_order=True)
+                for (ticker_val,), ticker_group in ticker_groups:
+                    out_df = ticker_group.drop(["_date_str"])
+                    ticker_int = _partition_value(ticker_val, code_lookup)
+                    fpath = date_dir / f"ticker={ticker_int}.parquet"
+                    tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
+                    pending.append((tmp, fpath))
+                    out_df.write_parquet(tmp, compression="snappy")
+            else:
+                out_df = date_group.drop(["_date_str"])
+                fpath = date_dir / f"{date_str_val}.parquet"
+                tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
+                pending.append((tmp, fpath))
+                out_df.write_parquet(tmp, compression="snappy")
+            for tmp, fpath in pending:
+                os.replace(tmp, fpath)
+        except BaseException:
+            for tmp, _ in pending:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
 
     return str(type_dir.resolve())
 
@@ -258,7 +282,20 @@ def write_event_window_parquet(df: pl.DataFrame, output_dir: str) -> None:
             existing = pl.read_parquet(fpath)
             out_df = pl.concat([existing, out_df], how="vertical")
 
-        out_df.write_parquet(fpath, compression="snappy")
+        # This writer REWRITES an existing date file to append rows, so a death
+        # mid-write would otherwise destroy everything accumulated so far. Write
+        # to a hidden temp and os.replace() it into place (atomic; see B11 note
+        # in write_partitioned_parquet).
+        tmp = part_dir / f".{fpath.name}.{os.getpid()}.tmp"
+        try:
+            out_df.write_parquet(tmp, compression="snappy")
+            os.replace(tmp, fpath)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
 
 def read_partitioned_parquet(

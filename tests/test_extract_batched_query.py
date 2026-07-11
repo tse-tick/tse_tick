@@ -35,11 +35,15 @@ def _oracle(store, data_type, tickers, **kw):
     return non_empty[0] if len(non_empty) == 1 else pl.concat(non_empty, how="vertical")
 
 
-def _identical(store, data_type, tickers, **kw):
-    oracle = _oracle(store, data_type, tickers, **kw)
-    batch = _query_extract_batch(store, data_type, set(tickers), **kw)
+def _identical(store, data_type, tickers, day=None, **kw):
+    """`day` maps to the oracle's query_ticks(date=day) and the batch's inclusive
+    (date_from, date_to) bounds — the same single-day filter in both dialects."""
+    oracle = _oracle(store, data_type, tickers, **({"date": day} if day else {}), **kw)
+    bounds = {"date_from": day, "date_to": day} if day else {}
+    batch = _query_extract_batch(store, data_type, set(tickers), **bounds, **kw)
     assert batch.equals(oracle), (
-        f"{data_type} tickers={tickers} kw={kw}: batch {batch.shape} != oracle {oracle.shape}"
+        f"{data_type} tickers={tickers} day={day} kw={kw}: "
+        f"batch {batch.shape} != oracle {oracle.shape}"
     )
     return batch
 
@@ -101,7 +105,7 @@ def test_stock_all_absent_shape(stock_store):
 
 
 def test_stock_single_day(stock_store):
-    _identical(stock_store, "individual_stock", ["7203", "6758"], date="20240105")
+    _identical(stock_store, "individual_stock", ["7203", "6758"], day="20240105")
 
 
 def test_stock_time_window(stock_store):
@@ -139,4 +143,4 @@ def test_summary_multi_and_absent(summary_store):
 
 
 def test_summary_single_day(summary_store):
-    _identical(summary_store, "stock_summary", ["7203", "6758"], date="20240104")
+    _identical(summary_store, "stock_summary", ["7203", "6758"], day="20240104")

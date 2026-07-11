@@ -149,7 +149,7 @@ tse_tick/                          # Project root
 |--------|--------|
 | ZIP bomb protection | Max 5 GB decompressed, max 5 entries, 100:1 compression ratio cap |
 | Path traversal prevention | `_resolve_type_dir()` validates resolved paths stay within data root |
-| Worker cap | `max_workers` clamped to 8 |
+| Worker cap | `max_workers` clamped to 8 *(historical — replaced in 0.13.0 by the RAM-aware cores+RAM cap, see §11)* |
 | Query limit | 10M default LIMIT on `query_ticks()` |
 | Traceback leak fix | `traceback.print_exc()` → `logger.error(exc_info=True)` |
 | SQL injection guard | Regex validation on identifiers, dates, time strings in `query_ticks()` |
@@ -599,8 +599,8 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**414 tests.** Without proprietary data (the CI profile): **366 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 414 pass**.
+**430 tests.** Without proprietary data (the CI profile): **382 pass / 48 skip**.
+With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 430 pass**.
 
 | Area | Coverage |
 |------|----------|
@@ -608,6 +608,7 @@ With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 414 pass**.
 | Ingest performance (0.11.6–0.13.0) | `test_ingest_parallel` (8: spawn pool ≡ serial store, RAM-aware cap), `test_ingest_per_date_prune` (7: prune after resume-skip), `test_partscan` (10), `test_part_pruning` (5: pruned ≡ full scan), `test_field5_filter` (12: vectorized filter byte-identical) |
 | Stage-2 (query / features / event-window from Parquet) | `test_query` (15), `test_features` (20), `test_event_window` (22) — run against a **synthetic Hive-Parquet store** built by the real ingest pipeline (`conftest.py` + `synthetic_data.py`), so they need no proprietary data |
 | Two-stage extraction | `test_extract_to_store` (6: single + multi ticker), `test_extract_batched_query` (10: single-scan query ≡ per-ticker loop) |
+| 0.13.0 two-stage audit fixes (B1–B11) | `test_audit_fixes` (16) — atomic partition write + footer-validated resume (B11), spawn-bootstrap guard error (B1), `extract_to_store` max_workers / period-scoped query / `LargeResultWarning` (B4/B5/B2), DuckDB `temp_directory` (B3), `YYYY-YYYY` periods (B8) |
 | CLI | `test_cli` (15) — end-to-end on synthetic data, incl. the `export` verb |
 | Additive API | `test_api_additions` (13), `test_read_ticks` (16), `test_translate_data` (7) — `translate` / enums / `query_ticks` str-int ticker, the one-shot `read_ticks`, and the file-driven translation tables + `TSE_TICK_TRANSLATIONS` override, all on synthetic data |
 | Robustness fixes | `test_alpha_fixes` (19: OOM guard, truncation warn, explicit `year=`), `test_consolidation` (5: single-sourced type classification), `test_quiet_and_unicode` (5), `test_discovery` (4), `test_dtypes` (1), `test_empty_schema` (6), `test_locate` (7) |
@@ -647,6 +648,8 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 | C8 | ZIP bomb guard | `enhanced.py` (checked before decompression) |
 | C9 | Parallel workers RAM-aware: ≤ logical cores, N × per-worker frame ≤ 70% of available RAM | `ingest.py` (`_cap_workers`) |
 | C10 | Query row limit: 10M | `query.py` |
+| C11 | Partition writes are atomic (hidden temp file + `os.replace`); resume validates Parquet footer magic before skipping a date | `io/parquet.py`, `ingest.py` |
+| C12 | Parallel ingest pools use the `spawn` start method (never `fork`); a user's `max_workers>1` script call must sit under `if __name__ == "__main__":` (an unguarded top-level call gets an actionable `RuntimeError`) | `ingest.py` |
 
 ---
 

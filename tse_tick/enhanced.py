@@ -56,6 +56,20 @@ class TruncationWarning(UserWarning):
     """
 
 
+class LargeResultWarning(UserWarning):
+    """Warned when :func:`extract_to_store` is about to materialize a very large
+    result (past ~10M rows) as one in-memory DataFrame.
+
+    ``extract_to_store`` deliberately returns **all** matching rows (no cap — a
+    whole month of an active ticker exceeds ``query_ticks``'s default 10M), so a
+    multi-year period can be tens of GB in RAM. The store is already built by the
+    time this warns; the memory-safe pattern is to ignore the returned frame and
+    read the store in bounded slices with :func:`tse_tick.query_ticks` (per day /
+    per month). Capturable with ``warnings.catch_warnings()``, silenceable with
+    ``warnings.filterwarnings("ignore", category=tse_tick.LargeResultWarning)``.
+    """
+
+
 class OneShotMemoryError(MemoryError):
     """Raised when a one-shot read (:func:`create_df` / :func:`read_ticks`) would
     exhaust memory — either the cumulative decompressed size crossed the ceiling,
@@ -150,7 +164,7 @@ def _expand_month_range(from_str: str, to_str: str) -> List[Tuple[int, int]]:
 # forms the code accepts and read_ticks documents).
 _PERIOD_FORMATS_HELP = (
     "Expected YYYY, a single YYYYMM or YYYYMMDD, or a "
-    "YYYYMM-YYYYMM / YYYYMMDD-YYYYMMDD range"
+    "YYYY-YYYY / YYYYMM-YYYYMM / YYYYMMDD-YYYYMMDD range"
 )
 
 
@@ -161,6 +175,7 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
         YYYY                         -> entire year
         YYYYMM                       -> a single month
         YYYYMMDD                     -> a single trading day
+        YYYY-YYYY                    -> all years from start year to end year
         YYYYMM-YYYYMM                -> all trading days from start month to end month
         YYYYMMDD-YYYYMMDD            -> all trading days from start date to end date
 
@@ -194,6 +209,12 @@ def parse_period(period_str: str) -> Dict[str, Union[str, List[int], Dict[int, L
                 months_by_year[y].append(m)
             years = sorted(months_by_year.keys())
             return {"granularity": "month", "years": years, "months_by_year": dict(months_by_year)}
+
+        elif len(from_part) == 4 and len(to_part) == 4 and from_part.isdigit() and to_part.isdigit():
+            from_year, to_year = int(from_part), int(to_part)
+            if from_year > to_year:
+                raise ValueError(f"Start year {from_part} is after end year {to_part}")
+            return {"granularity": "year", "years": list(range(from_year, to_year + 1))}
 
         else:
             raise ValueError(f"Invalid period format: {period_str!r}. {_PERIOD_FORMATS_HELP}")

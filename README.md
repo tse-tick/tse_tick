@@ -194,17 +194,25 @@ features = tse_tick.compute_all_features(df)
 ```python
 import tse_tick
 
-# Build a reusable store for one or several tickers and get the DataFrame back —
-# in one call. No 10M-row cap, so a whole month of active tickers comes back complete.
-df = tse_tick.extract_to_store(
-    "/path/to/TSE_DATA",          # a .zip, flat folder, or ANY folder above the data
-    "/path/to/PARQUET_STORE",     # reusable store (built once; resume-safe, part-pruned)
-    "202402",                     # a day, month, year, or range
-    ["7203", "9984"],             # one code, or a list — Toyota + SoftBank
-)
-# ...every later read of the store is sub-second:
-df = tse_tick.query_ticks("/path/to/PARQUET_STORE", data_type="individual_stock",
-                          ticker=7203, date="20240201")
+# The if __name__ == "__main__": guard is REQUIRED for max_workers > 1 when this
+# runs as a .py script: parallel ingest starts 'spawn' worker processes, which
+# re-import the script — an unguarded top-level call would re-run itself in every
+# worker (tse_tick raises an explanatory error if you forget).
+if __name__ == "__main__":
+    # Build a reusable store for one or several tickers and get the DataFrame back —
+    # in one call. No 10M-row cap, so a whole month of active tickers comes back
+    # complete (past ~10M rows a capturable LargeResultWarning fires — for multi-year
+    # periods, ignore the returned frame and read the store in query_ticks slices).
+    df = tse_tick.extract_to_store(
+        "/path/to/TSE_DATA",          # a .zip, flat folder, or ANY folder above the data
+        "/path/to/PARQUET_STORE",     # reusable store (built once; resume-safe, part-pruned)
+        "202402",                     # a day, month, year, or range (e.g. "2021-2023")
+        ["7203", "9984"],             # one code, or a list — Toyota + SoftBank
+        max_workers=8,                # parallel per-date ingest (capped by cores + RAM)
+    )
+    # ...every later read of the store is sub-second:
+    df = tse_tick.query_ticks("/path/to/PARQUET_STORE", data_type="individual_stock",
+                              ticker=7203, date="20240201")
 ```
 
 2. **One-shot (quick, targeted exploration).** `read_ticks(...)` reads straight from raw ZIPs to a ticker/time-filtered DataFrame with no store to build first. For `individual_stock` + a ticker filter it is **part-pruned** — it opens only the small run of numbered parts that hold the ticker (not every part of the day), so a single-ticker read is several times faster while returning **identical** rows (pass `prune_parts=False` to force a full scan). Accepts a **date range** (`date="20240201-20240205"`); best for one or a few tickers over a bounded window. The `tse-tick export` CLI wraps it to CSV/Parquet for non-coders.
@@ -223,19 +231,26 @@ df = tse_tick.read_ticks(
 )
 ```
 
-> **⚠️ Reading a lot at once? Mind the 10M-row cap.** `read_ticks` returns at most
-> **10,000,000 rows** per call — on hitting it, the result is truncated and a capturable
-> `tse_tick.TruncationWarning` is emitted. A whole **month** of a couple of *active*
-> tickers can exceed this: e.g. Toyota (7203) + SoftBank (9984) for one January is
-> ~25M rows, so a single `read_ticks(..., date="202201")` stops at ~10M (about 10 of
-> 19 days). To get **everything**, pick one:
+> **⚠️ Reading a lot at once? Mind the 10M-row cap.** `read_ticks` **and** `query_ticks`
+> both return at most **10,000,000 rows** per call by default — on hitting it, the
+> result is truncated and a capturable `tse_tick.TruncationWarning` is emitted. A whole
+> **month** of a couple of *active* tickers can exceed this: e.g. Toyota (7203) +
+> SoftBank (9984) for one January is ~25M rows, so a single
+> `read_ticks(..., date="202201")` stops at ~10M (about 10 of 19 days). To get
+> **everything**, pick one:
 >
-> - **Two-stage (recommended for scale)** — `ingest_period(...)` → `query_ticks(...)`,
->   or `extract_to_store(...)` for a single ticker. No row cap; the store is reusable.
+> - **Two-stage (recommended for scale)** — `ingest_period(...)` → `query_ticks(...)`
+>   in bounded slices (per day / per month; pass `limit=None` per slice for the full
+>   rows). The store is reusable and every slice read is sub-second.
+> - **`extract_to_store(...)`** — the only call with **no row cap**: it builds the
+>   store and returns the whole period as ONE in-memory DataFrame. Past ~10M rows a
+>   capturable `tse_tick.LargeResultWarning` fires first — for multi-year periods of
+>   an active ticker, ignore the returned frame and read the store in `query_ticks`
+>   slices instead (the frame can be tens of GB).
 > - **Loop per day** — call `read_ticks(..., date=day)` for each trading day and
 >   `pl.concat(...)`; each day stays well under the cap.
-> - **Lift the cap** — `read_ticks(..., rows=None)` (or a higher `rows=`) reads it all
->   in one shot, bounded only by memory.
+> - **Lift the cap** — `read_ticks(..., rows=None)` / `query_ticks(..., limit=None)`
+>   reads it all in one shot, bounded only by memory.
 >
 > If a one-shot read might be large, check for a `TruncationWarning` (it's the signal
 > to switch to the two-stage store):
@@ -354,7 +369,7 @@ Event-window filtered ingest writes per-date files:
 | `--data-type` (required) | `individual_stock`, `stock_summary`, `indices`, or `indices_summary` |
 | `--input-root` (required) | Root directory with NEEDS ZIPs in `{year}/{yearmonth}/` layout |
 | `--output-root` (required) | Root directory for Parquet output |
-| `--period` | Date range: `YYYY`, `YYYYMM-YYYYMM`, or `YYYYMMDD-YYYYMMDD` |
+| `--period` | Date range: `YYYY`, `YYYY-YYYY`, `YYYYMM-YYYYMM`, or `YYYYMMDD-YYYYMMDD` |
 | `--language` | Column name language: `en` (default) or `jp` |
 | `--parallel` | Parallel worker processes for per-date ingest (default 1 = serial). Applies to `--period`, `--year`, and `--flat`; not to `--filter-csv` event windows. Capped by the machine's logical cores **and** available RAM (each worker holds a whole trading day's frame). |
 | `--no-resume` | Disable resume (reprocess dates even if output exists) |
@@ -412,9 +427,9 @@ One-shot read: raw NEEDS ZIPs → a ticker/time-filtered DataFrame, no store.
 - `date` — a day `"YYYYMMDD"`, month `"YYYYMM"`, year `"YYYY"`, or a `"start-end"` range
 - `prune_parts` — for `individual_stock` + a `ticker_filter`, open only the contiguous run of numbered parts that hold the ticker (plus the day's trailing appendix part) instead of every part. Falls back to a full scan if the ascending-code layout can't be confirmed, so results are identical — only faster. Default `True`; set `False` to force a full scan.
 
-### `extract_to_store(input_root, output_dir, period, ticker, *, data_type="individual_stock", start_time=None, end_time=None, language="en", resume=True)`
+### `extract_to_store(input_root, output_dir, period, ticker, *, data_type="individual_stock", start_time=None, end_time=None, language="en", resume=True, max_workers=1)`
 
-Two-stage in one call: ingest `ticker` for `period` into a reusable, part-pruned Parquet store (`output_dir`), then return the queried DataFrame. `ticker` accepts **one code or an iterable** (`"7203"` or `["7203", "9984"]`); several tickers are ingested in one pass and returned concatenated. Prefer it over `read_ticks` when the data will be read more than once — the raw scan is paid once, later `query_ticks` reads are sub-second, and there's no 10M-row cap. Requires the `[query]` extra (DuckDB).
+Two-stage in one call: ingest `ticker` for `period` into a reusable, part-pruned Parquet store (`output_dir`), then return the queried DataFrame. `ticker` accepts **one code or an iterable** (`"7203"` or `["7203", "9984"]`); several tickers are ingested in one pass and returned concatenated. Prefer it over `read_ticks` when the data will be read more than once — the raw scan is paid once, later `query_ticks` reads are sub-second, and there's no 10M-row cap. The result is scoped to `period` even on a reused store holding other days. `max_workers>1` parallelizes the per-date ingest (from a script, the call must sit inside `if __name__ == "__main__":` — spawn workers re-import your script). Everything is returned as ONE in-memory DataFrame — past ~10M rows a capturable `LargeResultWarning` fires; for big periods read the built store in `query_ticks` slices instead. Requires the `[query]` extra (DuckDB).
 
 ---
 
@@ -481,6 +496,10 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
   or silence it with `warnings.filterwarnings("ignore", category=tse_tick.NoDataWarning)`. The `rows=`
   cap likewise emits a capturable `tse_tick.TruncationWarning` when it truncates a result (the signal to
   build a store and use `query_ticks`).
+- **Big queries spill to system temp.** DuckDB-backed queries (`query_ticks`, `query_sql`,
+  `extract_to_store`'s Stage-2) spill large sorts to `<system temp>/tse_tick_duckdb_spill`
+  rather than a `.tmp/` folder in your working directory. An interrupted query can leave
+  files there; they are safe to delete.
 - **Summary stores are compact (date-partitioned).** The two daily-aggregate types (`stock_summary`,
   `indices_summary`) write **one Parquet file per date** with the code kept as a column — not one tiny
   file per (date × ticker), which previously blew a 15 MB month up to a 2.4 GB store of ~87k files.
@@ -520,7 +539,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **414 tests**. Without a local NEEDS store, **366 pass** and **48 skip**; with a complete NEEDS store, **all 414 pass**. Stage-1
+The suite collects **430 tests**. Without a local NEEDS store, **382 pass** and **48 skip**; with a complete NEEDS store, **all 430 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
