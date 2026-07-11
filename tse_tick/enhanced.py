@@ -83,6 +83,18 @@ class OneShotMemoryError(MemoryError):
     """
 
 
+class SuspiciousZipError(ValueError):
+    """Raised when a ZIP trips one of the zip-bomb guards: too many members, an
+    implausible compression ratio, or an oversized decompressed member.
+
+    Subclasses :class:`ValueError` (what these guards historically raised) but is
+    re-raised past :func:`get_1y_dataframe`'s per-ZIP skip-and-continue handler —
+    the generic ``except Exception`` used to catch the guards' own errors two
+    lines below where they were raised, silently turning "abort a suspicious ZIP"
+    into "skip it and keep going" (audit finding M1).
+    """
+
+
 _MAX_DECOMPRESSED_BYTES = 5 * 1024 * 1024 * 1024
 _MAX_ZIP_ENTRIES = 5
 
@@ -560,6 +572,76 @@ def _read_individual_stock_matches(
     return bytes(out)
 
 
+def _read_zip_member(
+    zf: "zipfile.ZipFile",
+    file_name: str,
+    year: int,
+    kind: str,
+    rows_to_read: Optional[int],
+    ticker_filter: Optional[set],
+    schema_override: dict,
+) -> pl.DataFrame:
+    """Parse one ZIP member into a raw string-typed frame (era/type dispatch).
+
+    The member-parsing body of :func:`get_1y_dataframe`, factored out so the ZIP
+    loop can read every file member of a ZIP rather than only ``namelist()[0]``
+    (audit finding M4). ``rows_to_read`` caps the rows taken from this member;
+    ``None`` reads it whole.
+    """
+    with zf.open(file_name) as f:
+        if (year == 2016) and (kind == "indices_summary"):
+            parsed_rows = []
+            n_lines = 0
+            for line in f:
+                if rows_to_read is not None and n_lines >= rows_to_read:
+                    break
+                parsed_rows.append(parse_line(line))
+                n_lines += 1
+            return _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
+
+        if (year == 2016) and (kind == "indices"):
+            parsed_rows = []
+            n_lines = 0
+            for line in f:
+                if rows_to_read is not None and n_lines >= rows_to_read:
+                    break
+                parsed_rows.append(parse_line(line, kind="indices"))
+                n_lines += 1
+            return _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
+
+        if ticker_filter and kind == "individual_stock":
+            # Vectorized field-5 filter (issue #38): byte-identical
+            # kept-line set to the old ``extract_stock_code`` per-line
+            # loop, ~2x faster per part, and still bounded-memory (only
+            # matching lines are handed to Polars, never a full part).
+            raw_bytes = _read_individual_stock_matches(f, ticker_filter)
+            if not raw_bytes:
+                return pl.DataFrame()
+            df_chunk = _guard_polars_oom(
+                lambda: pl.read_csv(
+                    io.BytesIO(raw_bytes),
+                    has_header=False,
+                    schema_overrides=schema_override,
+                    truncate_ragged_lines=True,
+                )
+            )
+            if rows_to_read is not None:
+                df_chunk = df_chunk.slice(0, rows_to_read)
+            return df_chunk
+
+        df_chunk = _guard_polars_oom(
+            lambda: pl.read_csv(
+                f,
+                has_header=False,
+                schema_overrides=schema_override,
+                truncate_ragged_lines=True,
+            )
+        )
+        if rows_to_read is not None:
+            df_chunk = df_chunk.slice(0, rows_to_read)
+        return df_chunk
+
+
 def get_1y_dataframe(
     folder_path: str,
     year: int,
@@ -600,105 +682,65 @@ def get_1y_dataframe(
     for zip_file in zip_files:
         try:
             with zipfile.ZipFile(zip_file, "r") as zf:
-                if len(zf.namelist()) > _MAX_ZIP_ENTRIES:
-                    raise ValueError(
-                        f"ZIP has {len(zf.namelist())} entries, max {_MAX_ZIP_ENTRIES}"
+                # Read EVERY file member, not just namelist()[0]: the entry cap
+                # admits up to _MAX_ZIP_ENTRIES members, and only parsing the
+                # first silently dropped the rest (audit finding M4). Directory
+                # entries (trailing "/") carry no data and are skipped.
+                member_names = [n for n in zf.namelist() if not n.endswith("/")]
+                if len(member_names) > _MAX_ZIP_ENTRIES:
+                    raise SuspiciousZipError(
+                        f"ZIP has {len(member_names)} entries, max {_MAX_ZIP_ENTRIES}"
                     )
-                file_name = zf.namelist()[0]
-                info = zf.getinfo(file_name)
-                decompressed_size = info.file_size
-                compressed_size = info.compress_size
-                if compressed_size > 0 and decompressed_size / compressed_size > 100:
-                    raise ValueError(
-                        f"Suspicious compression ratio ({decompressed_size / compressed_size:.0f}:1) "
-                        f"in {zip_file}"
-                    )
-                if decompressed_size > _MAX_DECOMPRESSED_BYTES:
-                    raise ValueError(
-                        f"ZIP entry decompressed size ({decompressed_size:,} bytes) "
-                        f"exceeds max ({_MAX_DECOMPRESSED_BYTES:,} bytes)"
-                    )
-                # Cumulative across parts: the per-entry guard above can't see
-                # memory accumulating over a day's many numbered ZIPs. Stop with a
-                # clear, catchable error *before* the load rather than letting the
-                # concat OOM-panic uncatchably.
-                if guard_bytes is not None:
-                    cumulative_decompressed += decompressed_size
-                    if cumulative_decompressed > guard_bytes:
-                        raise OneShotMemoryError(
-                            _oneshot_limit_message(cumulative_decompressed, guard_bytes)
+                if not member_names:
+                    logger.warning("No file members in %s; skipping", zip_file)
+                    continue
+                for file_name in member_names:
+                    info = zf.getinfo(file_name)
+                    decompressed_size = info.file_size
+                    compressed_size = info.compress_size
+                    if compressed_size > 0 and decompressed_size / compressed_size > 100:
+                        raise SuspiciousZipError(
+                            f"Suspicious compression ratio ({decompressed_size / compressed_size:.0f}:1) "
+                            f"in {zip_file}"
                         )
-                with zf.open(file_name) as f:
+                    if decompressed_size > _MAX_DECOMPRESSED_BYTES:
+                        raise SuspiciousZipError(
+                            f"ZIP entry decompressed size ({decompressed_size:,} bytes) "
+                            f"exceeds max ({_MAX_DECOMPRESSED_BYTES:,} bytes)"
+                        )
+                    # Cumulative across parts: the per-entry guard above can't see
+                    # memory accumulating over a day's many numbered ZIPs. Stop with a
+                    # clear, catchable error *before* the load rather than letting the
+                    # concat OOM-panic uncatchably.
+                    if guard_bytes is not None:
+                        cumulative_decompressed += decompressed_size
+                        if cumulative_decompressed > guard_bytes:
+                            raise OneShotMemoryError(
+                                _oneshot_limit_message(cumulative_decompressed, guard_bytes)
+                            )
                     rows_to_read = None
                     if rows is not None:
                         remaining_rows = rows - total_rows_read
                         if remaining_rows <= 0:
                             break
                         rows_to_read = remaining_rows
-
-                    if (year == 2016) and (kind == "indices_summary"):
-                        parsed_rows = []
-                        n_lines = 0
-                        for line in f:
-                            if rows_to_read is not None and n_lines >= rows_to_read:
-                                break
-                            parsed_rows.append(parse_line(line))
-                            n_lines += 1
-                        df_chunk = _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
-
-                    elif (year == 2016) and (kind == "indices"):
-                        parsed_rows = []
-                        n_lines = 0
-                        for line in f:
-                            if rows_to_read is not None and n_lines >= rows_to_read:
-                                break
-                            parsed_rows.append(parse_line(line, kind="indices"))
-                            n_lines += 1
-                        df_chunk = _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
-
-                    elif ticker_filter and kind == "individual_stock":
-                        # Vectorized field-5 filter (issue #38): byte-identical
-                        # kept-line set to the old ``extract_stock_code`` per-line
-                        # loop, ~2x faster per part, and still bounded-memory (only
-                        # matching lines are handed to Polars, never a full part).
-                        raw_bytes = _read_individual_stock_matches(f, ticker_filter)
-                        if raw_bytes:
-                            df_chunk = _guard_polars_oom(
-                                lambda: pl.read_csv(
-                                    io.BytesIO(raw_bytes),
-                                    has_header=False,
-                                    schema_overrides=schema_override,
-                                    truncate_ragged_lines=True,
-                                )
-                            )
-                            if rows_to_read is not None:
-                                df_chunk = df_chunk.slice(0, rows_to_read)
-                        else:
-                            df_chunk = pl.DataFrame()
-
-                    else:
-                        df_chunk = _guard_polars_oom(
-                            lambda: pl.read_csv(
-                                f,
-                                has_header=False,
-                                schema_overrides=schema_override,
-                                truncate_ragged_lines=True,
-                            )
-                        )
-                        if rows_to_read is not None:
-                            df_chunk = df_chunk.slice(0, rows_to_read)
+                    df_chunk = _read_zip_member(
+                        zf, file_name, year, kind, rows_to_read,
+                        ticker_filter, schema_override,
+                    )
 
                     if not df_chunk.is_empty():
                         dfs.append(df_chunk)
                         total_rows_read += len(df_chunk)
 
-                    if rows is not None and total_rows_read >= rows:
-                        break
+                if rows is not None and total_rows_read >= rows:
+                    break
 
-        except (zipfile.BadZipFile, EOFError, OneShotMemoryError):
+        except (zipfile.BadZipFile, EOFError, OneShotMemoryError, SuspiciousZipError):
             # OneShotMemoryError (the cumulative guard and converted Polars panics)
-            # propagates; an incidental plain MemoryError still falls through to the
-            # skip-and-continue below, as it did before (alpha-review finding 11).
+            # and the zip-bomb guards' SuspiciousZipError propagate; an incidental
+            # plain MemoryError still falls through to the skip-and-continue below,
+            # as it did before (alpha-review finding 11).
             raise
         except Exception as e:
             logger.warning("Error reading %s: %s", zip_file, e)
@@ -1260,7 +1302,10 @@ def read_ticks(
         columns: Column projection; ``None`` selects all columns.
         rows: Cap on returned rows (default 10,000,000). On hitting the cap the
             result is truncated **and a** :class:`TruncationWarning` **is
-            emitted** (capturable via ``warnings``). A whole **month** of a couple
+            emitted** (capturable via ``warnings``) — including when the total
+            lands exactly on the cap with ZIPs still unread (detected by reading
+            one row past the cap, as :func:`tse_tick.query_ticks` does); an
+            exact-fit result with nothing left unread does not warn. A whole **month** of a couple
             of *active* tickers can exceed 10M (e.g. 7203 + 9984 for one January is
             ~25M rows), so a single monthly call would stop partway. To read it all,
             use the two-stage ``ingest_period`` -> :func:`tse_tick.query_ticks` path
@@ -1353,6 +1398,7 @@ def read_ticks(
 
     parts: List[pl.DataFrame] = []
     total = 0
+    truncated = False
     cumulative_bytes = 0
     schema_frame: Optional[pl.DataFrame] = None
     for zip_path in zips:
@@ -1392,7 +1438,13 @@ def read_ticks(
             del df
             gc.collect()
 
-        if rows is not None and total >= rows:
+        # Strictly-greater, mirroring query_ticks's LIMIT+1 trick: keep reading
+        # until the cap is EXCEEDED by at least one row, so an exact-fit total
+        # with ZIPs still unread can't masquerade as a complete result — the old
+        # `>= rows` break dropped the remaining ZIPs with no TruncationWarning
+        # (audit finding L1). Costs at most one extra ZIP on an exact boundary.
+        if rows is not None and total > rows:
+            truncated = True
             break
 
     if parts:
@@ -1437,7 +1489,10 @@ def read_ticks(
             "end_time)."
         )
 
-    if rows is not None and result.height > rows:
+    # Warn on `truncated` too, not just on the final height: the day-prune /
+    # column filters above can shrink an early-broken result back under the cap,
+    # but ZIPs were still left unread — coverage is incomplete either way (L1).
+    if rows is not None and (truncated or result.height > rows):
         warnings.warn(
             f"read_ticks: row cap ({rows}) reached; result truncated. "
             "Build a Parquet store (ingest_*) and use query_ticks for full coverage.",

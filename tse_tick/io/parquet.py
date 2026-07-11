@@ -1,5 +1,6 @@
 # tse_tick/io/parquet.py
 import datetime
+import logging
 import os
 import re
 from pathlib import Path
@@ -10,6 +11,8 @@ import polars as pl
 import pyarrow.dataset as ds
 
 from tse_tick.constants import INDEX_TYPES, validate_data_type
+
+logger = logging.getLogger(__name__)
 
 # Tick types partition by (date, code): each ticker-day holds thousands of ticks,
 # so a per-ticker file is large and prunes well. The two *daily-aggregate* summary
@@ -53,8 +56,11 @@ def _partition_value(raw_value: object, code_lookup: Optional[dict[str, str]]):
     """Resolve the partition filename value for one ticker/index group.
 
     For index data types the group value is the decoded display name; map it back
-    to the raw code (handling ``Unknown (NNN)`` too). For stock data types the
-    code is not decoded, so the existing first-4-characters behaviour applies.
+    to the raw code (handling ``Unknown (NNN)`` too), truncated to the 4-char code
+    width. Stock codes are kept **whole**: truncating to 4 chars made a suffixed
+    5-char code (e.g. New Shares ``"72031"``) collide with its parent (``"7203"``)
+    — two groups then targeted the same ticker= file, crashing the write's replace
+    loop (or silently mislabelling the suffixed rows as the parent).
     """
     text = str(raw_value).strip()
     if code_lookup is not None:
@@ -65,11 +71,32 @@ def _partition_value(raw_value: object, code_lookup: Optional[dict[str, str]]):
                 mapped = unknown.group(1).strip()
         if mapped is not None:
             text = mapped
-    value = text[:4]
+        value = text[:4]
+    else:
+        value = text
     try:
         return int(value)
     except ValueError:
         return value
+
+
+def _drop_null_date_rows(df: pl.DataFrame, date_col: str) -> pl.DataFrame:
+    """Drop rows whose derived ``_date_str`` partition key is null, with a warning.
+
+    A null key comes from a raw ``Data Date`` that ``clean_data``'s non-strict
+    parse could not read — garbage rows with no date to file under. Left in,
+    they would be written to a ``date=None/`` partition that no date-scoped
+    query ever matches (audit finding L2).
+    """
+    null_count = df["_date_str"].null_count()
+    if null_count:
+        logger.warning(
+            "Dropping %d row(s) with an unparseable %r before the partitioned "
+            "write — they would land in an unqueryable date=None partition.",
+            null_count, date_col,
+        )
+        df = df.filter(pl.col("_date_str").is_not_null())
+    return df
 
 
 def _coerce_time_cols(df: pl.DataFrame) -> pl.DataFrame:
@@ -139,6 +166,12 @@ def write_partitioned_parquet(
             pl.col(date_col).cast(pl.String).str.replace_all("-", "", literal=True).alias("_date_str")
         )
 
+    # clean_data parses dates non-strictly, so a malformed raw Data Date is null
+    # here; its group key would stringify to "None" and write an unqueryable
+    # date=None/ partition that resume then treats as a real date (audit finding
+    # L2). Drop such rows loudly instead of hiding them in a dead partition.
+    df = _drop_null_date_rows(df, date_col)
+
     grouped = df.group_by("_date_str", maintain_order=True)
     for (date_str,), date_group in grouped:
         date_str_val = str(date_str)
@@ -156,11 +189,23 @@ def write_partitioned_parquet(
         pending: list[tuple[Path, Path]] = []
         try:
             if ticker_col is not None:
+                # Merge groups whose resolved partition value coincides (e.g. two
+                # display forms of one index code) BEFORE writing: duplicate
+                # targets used to share one tmp name, and the second os.replace
+                # of the same tmp crashed the whole date write.
+                by_target: dict[str, list[pl.DataFrame]] = {}
+                target_order: list[str] = []
                 ticker_groups = date_group.group_by(ticker_col, maintain_order=True)
                 for (ticker_val,), ticker_group in ticker_groups:
-                    out_df = ticker_group.drop(["_date_str"])
-                    ticker_int = _partition_value(ticker_val, code_lookup)
-                    fpath = date_dir / f"ticker={ticker_int}.parquet"
+                    key = str(_partition_value(ticker_val, code_lookup))
+                    if key not in by_target:
+                        by_target[key] = []
+                        target_order.append(key)
+                    by_target[key].append(ticker_group.drop(["_date_str"]))
+                for key in target_order:
+                    frames = by_target[key]
+                    out_df = frames[0] if len(frames) == 1 else pl.concat(frames, how="vertical")
+                    fpath = date_dir / f"ticker={key}.parquet"
                     tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
                     pending.append((tmp, fpath))
                     out_df.write_parquet(tmp, compression="snappy")
@@ -265,6 +310,10 @@ def write_event_window_parquet(df: pl.DataFrame, output_dir: str) -> None:
         )
 
     df = df.with_columns(date_strs.alias("_date_str"))
+
+    # Same null-date guard as write_partitioned_parquet (audit finding L2): a
+    # malformed Data Date must not create a dead year=/month= partition.
+    df = _drop_null_date_rows(df, "Data Date")
 
     grouped = df.group_by("_date_str", maintain_order=True)
     for (date_str,), group in grouped:
