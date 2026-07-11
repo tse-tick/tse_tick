@@ -11,6 +11,7 @@ the functions re-exported at the top level: :func:`ingest_period` (a structured
 import calendar
 import gc
 import glob as _glob
+import json
 import logging
 import multiprocessing
 import os
@@ -24,7 +25,7 @@ from typing import Iterable, Optional, Union, cast
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, LargeResultWarning, OneShotMemoryError
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, LargeResultWarning, OneShotMemoryError
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -188,6 +189,91 @@ def _valid_parquet_file(path: Path) -> bool:
         return False
 
 
+# Per-date coverage marker: records WHICH coverage (full / which tickers) produced
+# a date partition, so resume can tell "this date is done for THIS request" apart
+# from "some files exist here". Named with a leading underscore so pyarrow dataset
+# discovery ignores it and no `*.parquet` glob ever matches it.
+_COVERAGE_MARKER = "_ingest_coverage.json"
+
+
+def _read_coverage_marker(date_dir: Path) -> Optional[dict]:
+    """The parsed coverage marker of a date partition, or ``None`` when absent
+    or unreadable (a legacy pre-marker partition)."""
+    try:
+        with open(Path(date_dir) / _COVERAGE_MARKER, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_coverage_marker(date_dir, ticker_filter: Optional[set], complete: bool = True) -> None:
+    """Record the coverage a date partition was written with (atomically).
+
+    Coverage accumulates: a completed prior marker's coverage is merged in, since
+    re-ingesting with a different ``ticker_filter`` only ADDS that filter's
+    ``ticker=`` files — the previously written ones remain valid. A prior marker
+    flagged incomplete (a day that lost parts, audit finding M1) is NOT merged:
+    its files may be partial, so only the current write's coverage is trusted.
+    ``complete=False`` records that THIS write lost parts, which keeps the date
+    resume-eligible.
+    """
+    date_dir = Path(date_dir)
+    if not date_dir.exists():
+        return
+    tickers = {str(t).strip() for t in ticker_filter} if ticker_filter else None
+    full = tickers is None
+    prior = _read_coverage_marker(date_dir)
+    if prior is not None and prior.get("complete", True):
+        if prior.get("full"):
+            full = True
+        elif not full:
+            tickers |= {str(t) for t in (prior.get("tickers") or [])}
+    payload = {
+        "full": full,
+        "tickers": [] if full else sorted(tickers),
+        "complete": bool(complete),
+    }
+    tmp = date_dir / f".{_COVERAGE_MARKER}.{os.getpid()}.tmp"
+    try:
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, date_dir / _COVERAGE_MARKER)
+    except OSError as exc:  # a failed marker only costs a re-ingest, never data
+        logger.warning("Could not write coverage marker in %s: %s", date_dir, exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _coverage_satisfied(date_dir: Path, ticker_filter: Optional[set]) -> bool:
+    """True when a date partition's recorded coverage includes this request.
+
+    Existence of files alone is NOT coverage: a store built for ticker A used to
+    resume-skip a later request for ticker B, silently returning an empty/partial
+    result (audit finding H2). With a marker: a complete full ingest satisfies
+    everything; a complete filtered ingest satisfies subsets of its tickers; an
+    incomplete day (lost parts) satisfies nothing. Without a marker (a legacy
+    store): a full request keeps the old skip-on-existence semantics, and a
+    filtered request is satisfied only when every requested code already has its
+    ``ticker=`` file — an absent file is ambiguous (never traded vs. never
+    ingested), so the date is re-ingested once and the marker written.
+    """
+    wanted = {str(t).strip() for t in ticker_filter} if ticker_filter else None
+    marker = _read_coverage_marker(date_dir)
+    if marker is None:
+        if wanted is None:
+            return True
+        return all((Path(date_dir) / f"ticker={t}.parquet").exists() for t in wanted)
+    if not marker.get("complete", True):
+        return False
+    if marker.get("full"):
+        return True
+    if wanted is None:
+        return False
+    return wanted <= {str(t) for t in (marker.get("tickers") or [])}
+
+
 @contextmanager
 def _bounded_polars_threads(workers: int, n_tasks: int):
     """Cap each spawned worker's Polars thread pool for the lifetime of a pool.
@@ -225,6 +311,13 @@ def ingest_single_zip(
 
     Cleans the ZIP with :func:`tse_tick.create_df` and writes per-ticker Parquet
     files under ``output_dir/<data_type>/date=YYYYMMDD/ticker=NNNN.parquet``.
+
+    .. warning::
+        This writes ONE ZIP's rows, overwriting any existing per-ticker file for
+        the same date. NEEDS splits a trading day across numbered parts that
+        repeat tickers (the closing-appendix part especially), so calling this
+        per part loses data — use :func:`ingest_directory` /
+        :func:`ingest_period`, which ingest a whole day's parts as one unit.
 
     Args:
         zip_path: Path to the NEEDS ``.zip``.
@@ -287,6 +380,66 @@ def _ingest_single_zip_safe(zip_path, output_dir, data_type, language, ticker_fi
         return {"zip_path": str(zip_path), "error": str(exc)}
 
 
+def _flat_day_units(zip_files: list) -> "tuple[list, list]":
+    """Group a flat folder's ZIPs into per-day units: ``(day_units, singles)``.
+
+    ``day_units`` is a list of ``(date_token, [paths])`` — one unit per
+    (type-prefix, date token), the parts natural-sorted — so all numbered parts of
+    a trading day are ingested as ONE unit. ``singles`` are ZIPs whose filename
+    has no recognizable date token; they keep the old one-ZIP-one-write path.
+    """
+    groups: dict = {}
+    singles: list = []
+    for zf in sorted(zip_files, key=_zip_sort_key):
+        tok = _zip_date_token(Path(zf).name)
+        if tok is None:
+            singles.append(zf)
+        else:
+            prefix = Path(zf).name.split(".", 1)[0]
+            groups.setdefault((prefix, tok), []).append(zf)
+    day_units = [(tok, parts) for (_pfx, tok), parts in groups.items()]
+    return day_units, singles
+
+
+def _ingest_flat_day_safe(date_str, zip_paths, output_dir, data_type, language, ticker_filter):
+    """Module-level ingest-one-day task for ``ingest_directory``'s process pool.
+
+    All ZIP parts of the day are read and concatenated before the single write —
+    the same unit :func:`_ingest_date_group` gives the structured paths. The old
+    per-ZIP flat path wrote each part independently, so a later part (NEEDS'
+    closing-appendix part in particular, which repeats tickers from earlier
+    parts) overwrote the earlier parts' per-ticker files: the store kept only the
+    few appendix rows and silently lost the session (audit finding H1). Errors
+    are recorded, not raised, matching the flat path's per-unit error contract;
+    a one-shot OOM still aborts loudly.
+    """
+    try:
+        dtype = data_type or _detect_data_type_from_path(str(zip_paths[0]))
+        year = int(date_str[:4])
+        meta = _ingest_date_group(
+            date_str, zip_paths, output_dir, dtype, year, language, ticker_filter
+        )
+        meta["data_type"] = dtype
+        meta["year"] = year
+        meta["zip_paths"] = [str(Path(p).resolve()) for p in zip_paths]
+        return meta
+    except OneShotMemoryError:
+        raise
+    except Exception as exc:
+        return {
+            "date": date_str,
+            "zip_path": str(zip_paths[0]),
+            "zip_paths": [str(Path(p).resolve()) for p in zip_paths],
+            "error": str(exc),
+        }
+
+
+def _log_flat_progress(done: int, total: int, meta: dict) -> None:
+    label = meta.get("date") or Path(meta.get("zip_path", "")).name
+    rows = meta.get("rows", "error")
+    logger.info("[%d/%d] %s -> %s rows", done, total, label, rows)
+
+
 def ingest_directory(
     input_dir: str,
     output_dir: str,
@@ -298,28 +451,37 @@ def ingest_directory(
 ) -> list[dict]:
     """Ingest every ``.zip`` in a single flat directory into the Parquet store.
 
-    Cleans each ZIP with :func:`tse_tick.create_df` and writes per-ticker Parquet
-    files via :func:`ingest_single_zip`. Globs ``*.zip`` **directly** under
-    ``input_dir`` (non-recursive); for a structured ``{year}/{yearmonth}/`` NEEDS
-    root use :func:`ingest_period` / :func:`ingest_year_from_root` instead.
+    Globs ``*.zip`` **directly** under ``input_dir`` (non-recursive) and groups
+    the ZIPs by their filename date token, ingesting each trading day as ONE unit
+    (all numbered parts read and concatenated before the write, exactly like
+    :func:`ingest_period`) — NEEDS repeats tickers across a day's parts (the
+    closing-appendix part especially), so writing per ZIP silently overwrote
+    earlier parts' data. ZIPs with no recognizable date token fall back to the
+    per-ZIP path via :func:`ingest_single_zip`. For a structured
+    ``{year}/{yearmonth}/`` NEEDS root use :func:`ingest_period` /
+    :func:`ingest_year_from_root` instead.
 
     Args:
         input_dir: Directory containing the NEEDS ``.zip`` files.
         output_dir: Store root to write under.
-        data_type: NEEDS type; auto-detected per ZIP from the path when ``None``.
+        data_type: NEEDS type; auto-detected per day/ZIP from the filename when
+            ``None``.
         language: Output column-name language (``"en"`` / ``"jp"``).
         max_workers: Parallel worker processes; ``1`` is serial. Capped by the machine's
-            logical cores AND available RAM (each worker holds one ZIP's frame).
+            logical cores AND available RAM (each worker holds one day's frame).
             **When calling with ``max_workers > 1`` from a script, the call must be
             inside ``if __name__ == "__main__":`` — workers are started with the
             ``spawn`` method, which re-imports your script in every worker.**
-        progress: Log a per-ZIP progress line.
+        progress: Log a per-unit progress line.
         ticker_filter: Optional ``set`` of string stock codes
             (``individual_stock`` only).
 
     Returns:
-        One result dict per ZIP (see :func:`ingest_single_zip`); a failed ZIP
-        contributes ``{"zip_path": ..., "error": ...}`` instead.
+        One result dict per ingested **day** (``{"date", "parts", "rows",
+        "output_path", "data_type", "year", "zip_paths"}``, plus ``"errors"``
+        when parts failed) and one per date-token-less ZIP (see
+        :func:`ingest_single_zip`); a failed unit contributes
+        ``{"zip_path": ..., "error": ...}`` instead.
     """
     _reject_bootstrap_reimport()  # actionable error for an unguarded top-level call (B1)
 
@@ -327,44 +489,58 @@ def ingest_directory(
     if not in_path.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    zip_files = sorted(in_path.glob("*.zip"))
-    total = len(zip_files)
+    day_units, singles = _flat_day_units(list(in_path.glob("*.zip")))
+    total = len(day_units) + len(singles)
     results: list[dict] = []
 
-    # RAM-aware worker cap: a flat-directory worker holds one ZIP's frame. Estimate per
-    # worker from the largest ZIP (full-frame individual_stock) and clamp to cores + RAM.
+    # RAM-aware worker cap: a flat-directory worker holds one day's frame. Estimate
+    # per worker from the largest unit (full-frame individual_stock) and clamp to
+    # cores + RAM.
     max_workers = _cap_workers(
         max_workers,
         per_worker_gb=_estimate_worker_gb(
-            [(zf.name, [zf]) for zf in zip_files], data_type, ticker_filter
+            day_units + [(Path(zf).name, [zf]) for zf in singles],
+            data_type, ticker_filter,
         ),
     )
 
     if max_workers > 1 and total > 1:
         with _bounded_polars_threads(max_workers, total):
             with ProcessPoolExecutor(max_workers=max_workers, mp_context=_MP_SPAWN) as executor:
-                futures = {
-                    executor.submit(_ingest_single_zip_safe, zf, output_dir,
-                                    data_type, language, ticker_filter): zf
-                    for zf in zip_files
-                }
+                futures = {}
+                for tok, unit_parts in day_units:
+                    futures[executor.submit(
+                        _ingest_flat_day_safe, tok, unit_parts, output_dir,
+                        data_type, language, ticker_filter,
+                    )] = tok
+                for zf in singles:
+                    futures[executor.submit(
+                        _ingest_single_zip_safe, zf, output_dir,
+                        data_type, language, ticker_filter,
+                    )] = zf
                 done = 0
                 for future in as_completed(futures):
                     done += 1
                     meta = future.result()  # a one-shot OOM propagates and aborts
                     results.append(meta)
                     if progress:
-                        fname = Path(meta.get("zip_path", "")).name
-                        rows = meta.get("rows", "error")
-                        logger.info("[%d/%d] %s -> %s rows", done, total, fname, rows)
+                        _log_flat_progress(done, total, meta)
     else:
-        for i, zf in enumerate(zip_files, 1):
+        done = 0
+        for tok, unit_parts in day_units:
+            done += 1
+            meta = _ingest_flat_day_safe(
+                tok, unit_parts, output_dir, data_type, language, ticker_filter
+            )
+            results.append(meta)
+            if progress:
+                _log_flat_progress(done, total, meta)
+        for zf in singles:
+            done += 1
             meta = _ingest_single_zip_safe(zf, output_dir, data_type, language, ticker_filter)
             results.append(meta)
             if progress:
-                fname = Path(meta.get("zip_path", "")).name
-                rows = meta.get("rows", "error")
-                logger.info("[%d/%d] %s -> %s rows", i, total, fname, rows)
+                _log_flat_progress(done, total, meta)
 
     return results
 
@@ -381,9 +557,13 @@ def ingest_year(
     """Ingest every ``.zip`` for one ``year`` from a **flat** directory.
 
     Globs ``*.zip`` directly under ``input_dir`` (non-recursive) and keeps those
-    whose filename contains ``str(year)``, ingesting each via
-    :func:`ingest_single_zip`. For a structured ``{year}/{yearmonth}/`` NEEDS root
-    use :func:`ingest_year_from_root` (or :func:`ingest_period`) instead.
+    whose filename **date token** falls in ``year`` (a plain substring match used
+    to over-select — ``"20201207"`` contains ``"2012"``, so ``year=2012`` ingested
+    December-2020 files). The kept ZIPs are grouped by date token and each
+    trading day ingested as ONE unit (all numbered parts read and concatenated
+    before the write), so a day's later parts no longer overwrite the earlier
+    ones. For a structured ``{year}/{yearmonth}/`` NEEDS root use
+    :func:`ingest_year_from_root` (or :func:`ingest_period`) instead.
 
     Args:
         input_dir: Directory holding the NEEDS ``.zip`` files.
@@ -398,8 +578,9 @@ def ingest_year(
             (``individual_stock`` only).
 
     Returns:
-        One result dict per ZIP (see :func:`ingest_single_zip`); a failed ZIP
-        contributes ``{"zip_path": ..., "error": ...}`` instead.
+        One result dict per ingested **date** (``{"date", "parts", "rows",
+        "output_path"}``, plus ``"errors"`` when parts failed); a failed date
+        contributes ``{"date": ..., "error": ...}`` instead.
     """
     validate_data_type(data_type)
 
@@ -414,16 +595,26 @@ def ingest_year(
     if not in_path.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    year_zips = sorted(f for f in in_path.glob("*.zip") if str(year) in f.name)
+    year_zips = [
+        f for f in in_path.glob("*.zip")
+        if (_zip_date_token(f.name) or "")[:4] == str(year)
+    ]
+    day_units, _singles = _flat_day_units(year_zips)  # token filter leaves no singles
     results: list[dict] = []
 
-    for zf in year_zips:
+    for tok, unit_parts in day_units:
         try:
-            meta = ingest_single_zip(str(zf), output_dir, data_type=data_type, year=year, language=language, ticker_filter=ticker_filter)
+            meta = _ingest_date_group(
+                tok, unit_parts, output_dir, data_type, year, language, ticker_filter
+            )
         except OneShotMemoryError:
             raise
         except Exception as exc:
-            meta = {"zip_path": str(zf), "error": str(exc)}
+            meta = {
+                "date": tok,
+                "zip_paths": [str(p) for p in unit_parts],
+                "error": str(exc),
+            }
         results.append(meta)
 
     return results
@@ -445,6 +636,7 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     if ticker_filter and data_type == "individual_stock":
         zip_paths = _prune_parts_by_ticker(zip_paths, ticker_filter)
     parts: list = []
+    errors: list = []
     for zp in zip_paths:
         try:
             df = create_df(
@@ -453,6 +645,7 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
             )
         except (zipfile.BadZipFile, EOFError) as exc:
             logger.error("Corrupt zip %s: %s", Path(zp).name, exc)
+            errors.append({"zip_path": str(zp), "error": str(exc)})
             continue
         except OneShotMemoryError:
             # A one-shot OOM must abort the date group, not silently write a partial
@@ -460,6 +653,7 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
             raise
         except Exception as exc:
             logger.error("Error reading %s: %s", Path(zp).name, exc)
+            errors.append({"zip_path": str(zp), "error": str(exc)})
             continue
         # create_df's ticker_filter only drives the individual_stock raw-byte fast
         # path; for the other types prune here so ingest honors ticker_filter too.
@@ -470,7 +664,11 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
         del df
     if not parts:
         gc.collect()
-        return {"date": date_str, "parts": len(zip_paths), "rows": 0, "output_path": None}
+        meta = {"date": date_str, "parts": len(zip_paths), "rows": 0, "output_path": None}
+        if errors:
+            # Lost parts are recorded (audit finding M1), never silently dropped.
+            meta["errors"] = errors
+        return meta
     combined = pl.concat(parts, how="vertical")
     # Keep the per-date gc.collect() (issue #43 proposed removing them as "pure waste"):
     # a full-frame individual_stock day holds every part of the day at once and peaks
@@ -481,9 +679,21 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     gc.collect()
     rows = len(combined)
     out_path = write_partitioned_parquet(combined, output_dir, data_type)
+    # Record what this write covered (full or which tickers) so resume can skip
+    # only requests the partition actually satisfies (audit finding H2). A day
+    # that lost parts is marked incomplete so resume re-ingests it (finding M1)
+    # instead of trusting a permanently partial day.
+    _write_coverage_marker(
+        Path(output_dir) / data_type / f"date={date_str}",
+        ticker_filter,
+        complete=not errors,
+    )
     del combined
     gc.collect()
-    return {"date": date_str, "parts": len(zip_paths), "rows": rows, "output_path": out_path}
+    meta = {"date": date_str, "parts": len(zip_paths), "rows": rows, "output_path": out_path}
+    if errors:
+        meta["errors"] = errors
+    return meta
 
 
 def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter,
@@ -541,7 +751,12 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
                     p.unlink()
                 except OSError as exc:
                     logger.warning("Resume: could not delete %s: %s", p, exc)
-            if existing and not invalid:
+            # Files existing (and valid) is necessary but NOT sufficient: the
+            # partition must also have been written with coverage that includes
+            # THIS request's ticker_filter — a store built for ticker A used to
+            # resume-skip a later request for ticker B and silently return
+            # nothing for it (audit finding H2).
+            if existing and not invalid and _coverage_satisfied(date_dir, ticker_filter):
                 continue
         tasks.append((date_str, parts))
 

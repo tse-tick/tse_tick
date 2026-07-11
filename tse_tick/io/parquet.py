@@ -53,8 +53,11 @@ def _partition_value(raw_value: object, code_lookup: Optional[dict[str, str]]):
     """Resolve the partition filename value for one ticker/index group.
 
     For index data types the group value is the decoded display name; map it back
-    to the raw code (handling ``Unknown (NNN)`` too). For stock data types the
-    code is not decoded, so the existing first-4-characters behaviour applies.
+    to the raw code (handling ``Unknown (NNN)`` too), truncated to the 4-char code
+    width. Stock codes are kept **whole**: truncating to 4 chars made a suffixed
+    5-char code (e.g. New Shares ``"72031"``) collide with its parent (``"7203"``)
+    — two groups then targeted the same ticker= file, crashing the write's replace
+    loop (or silently mislabelling the suffixed rows as the parent).
     """
     text = str(raw_value).strip()
     if code_lookup is not None:
@@ -65,7 +68,9 @@ def _partition_value(raw_value: object, code_lookup: Optional[dict[str, str]]):
                 mapped = unknown.group(1).strip()
         if mapped is not None:
             text = mapped
-    value = text[:4]
+        value = text[:4]
+    else:
+        value = text
     try:
         return int(value)
     except ValueError:
@@ -156,11 +161,23 @@ def write_partitioned_parquet(
         pending: list[tuple[Path, Path]] = []
         try:
             if ticker_col is not None:
+                # Merge groups whose resolved partition value coincides (e.g. two
+                # display forms of one index code) BEFORE writing: duplicate
+                # targets used to share one tmp name, and the second os.replace
+                # of the same tmp crashed the whole date write.
+                by_target: dict[str, list[pl.DataFrame]] = {}
+                target_order: list[str] = []
                 ticker_groups = date_group.group_by(ticker_col, maintain_order=True)
                 for (ticker_val,), ticker_group in ticker_groups:
-                    out_df = ticker_group.drop(["_date_str"])
-                    ticker_int = _partition_value(ticker_val, code_lookup)
-                    fpath = date_dir / f"ticker={ticker_int}.parquet"
+                    key = str(_partition_value(ticker_val, code_lookup))
+                    if key not in by_target:
+                        by_target[key] = []
+                        target_order.append(key)
+                    by_target[key].append(ticker_group.drop(["_date_str"]))
+                for key in target_order:
+                    frames = by_target[key]
+                    out_df = frames[0] if len(frames) == 1 else pl.concat(frames, how="vertical")
+                    fpath = date_dir / f"ticker={key}.parquet"
                     tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
                     pending.append((tmp, fpath))
                     out_df.write_parquet(tmp, compression="snappy")

@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+Fixes for the ingest / raw-parse audit findings (H1–H2 high, M1–M4 medium) on the
+`individual_stock` ingest and raw-ZIP→DataFrame paths.
+
+### Fixed
+- **Flat-path ingest no longer overwrites multi-part days (H1, data loss).**
+  `ingest_directory` and `ingest_year` now group a flat folder's ZIPs by filename
+  date token and ingest each trading day as ONE unit (all parts read and
+  concatenated before the write), exactly like `ingest_period`. Previously each
+  ZIP wrote independently, so NEEDS' closing-appendix part (which repeats tickers
+  from earlier parts) clobbered each affected `ticker=` file down to its ~4 tail
+  rows — silently. Their result dicts are now per **day** (`{"date", "parts",
+  "rows", "output_path", ...}`); ZIPs with no date token keep the per-ZIP shape.
+  `ingest_single_zip`'s docstring now warns it is a single-part primitive.
+- **Resume is coverage-aware (H2, silent wrong results).** Each written date
+  partition now carries a `_ingest_coverage.json` marker recording whether it was
+  a full or ticker-filtered ingest (coverage accumulates across runs). Resume
+  skips a date only when its recorded coverage includes the current request — a
+  store built for ticker A no longer resume-skips (and silently returns nothing
+  for) a later `extract_to_store` / `ingest_period` request for ticker B, and a
+  full ingest over a previously filtered store now completes it. Legacy stores
+  without markers keep the old skip semantics for full requests; filtered
+  requests skip only when every requested `ticker=` file already exists.
+- **Per-part read errors are recorded and the day stays resume-eligible (M1).**
+  A date group that loses parts (corrupt ZIP, parse failure) now returns
+  `"errors": [...]` in its result dict and its coverage marker is flagged
+  incomplete, so `resume=True` re-ingests the day instead of trusting a
+  permanently partial one. The zip-bomb guards (entry count / compression ratio
+  / member size) now raise `SuspiciousZipError`, which propagates instead of
+  being logged-and-skipped by the generic per-ZIP handler two lines below.
+- **`ingest_year` no longer ingests wrong-year files (M2).** The year filter now
+  matches the filename date token's year; the old substring match let
+  `year=2012` pick up `HTICST120.20201207.*.zip` ("20201207" contains "2012").
+- **Suffixed stock codes no longer collide with their parent (M3).**
+  `clean_data` keeps `Stock Code` raw (no more `"72031"` → `"72031New Shares"`),
+  stock partition filenames use the full code (`ticker=72031.parquet` instead of
+  truncating to `ticker=7203.parquet`), and the partition writer merges groups
+  that resolve to the same target file — a parent + new-shares day used to crash
+  the whole ingest (double `os.replace` of one temp file) or silently mislabel
+  the suffixed rows as the parent.
+- **Multi-member ZIPs are read in full (M4).** `create_df` (and everything on
+  top of it) parses every file member of a ZIP; previously only
+  `namelist()[0]` was read even though up to 5 members pass the entry guard, so
+  members 2–5 were silently dropped.
+
 ## [0.13.1] - 2026-07-11
 
 Fixes for the 11 findings of the 0.13.0 two-stage extraction audit (TYO:7203,

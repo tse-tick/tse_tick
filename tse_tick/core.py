@@ -259,6 +259,12 @@ def clean_data(df, kind="individual_stock", language="en"):
         # types be joined, and avoids an "Unknown (NNN)" string for codes not in
         # the name table (e.g. 108).
         "Index Code",
+        # Keep Stock Code raw too. Appending the decoded suffix name to a 5-char
+        # code ("72031" -> "72031New Shares") made the partition writer's code
+        # value collide with the 4-char parent ("7203"): both groups targeted the
+        # same ticker= file, mixing (or crashing) the write, and the value no
+        # longer matched ticker_filter input or the partition filename.
+        "Stock Code",
     }
 
     for col in col_names:
@@ -296,21 +302,6 @@ def clean_data(df, kind="individual_stock", language="en"):
             if mapping_dict:
                 df_cleaned = df_cleaned.with_columns(
                     pl.col(col).replace(mapping_dict).alias(col)
-                )
-        elif col == "Stock Code":
-            for var in unique_vars:
-                if var is None or len(var) == 4:
-                    continue
-                suffix = var[-1]
-                suffix_mapping = schemas_categorical["Stock Code Suffix"].get(suffix)
-                if suffix_mapping is None:
-                    continue
-                var_schema = var + suffix_mapping[language]
-                df_cleaned = df_cleaned.with_columns(
-                    pl.when(pl.col(col) == var)
-                    .then(pl.lit(var_schema))
-                    .otherwise(pl.col(col))
-                    .alias(col)
                 )
         elif col == "Execution Type":
             if kind == "individual_stock":
