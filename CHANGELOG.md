@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+Fixes for the run14 real-data acceptance-test bug report — the analytics/export
+layer (the core read/ingest/query pipeline verified production-solid across all
+four types and both eras). No public API signatures change.
+
+### Fixed
+- **`compute_volatility` no longer returns NaN/inf on a standard `individual_stock`
+  frame (Finding 1, silent wrong results).** A liquid day is ~94% quote-only book
+  rows, which carry `Execution Price = 0`; the estimator took log-returns over
+  those zeros (`log(0)` → `-inf`/`NaN`) and the rolling window propagated the
+  poison, so a real 09:00–11:30 TYO:7203 frame (120,192 rows, 112,793 quote-only)
+  came back 112,793 NaN + 1,035 inf with only ~6,363 corrupted "finite" values.
+  `compute_volatility` (both `realized` and `garman_klass`) now excludes non-trade
+  rows (`Execution Price > 0` and a parseable time) before any log-return/OHLC; on
+  that same real frame it now yields all 7,399 trade-row values finite (0 NaN, 0
+  inf), identical to the trades-only reference. Propagates through
+  `compute_all_features`.
+- **Feature "undefined" values are `null`, never `NaN` (Finding 4).**
+  `compute_volatility` marked warm-up / undefined positions with `NaN`, so
+  `df.drop_nulls()` silently kept them (and they broke null-aware aggregations);
+  it now emits `null` for non-trade rows and windows with no realised return,
+  matching sibling `compute_spread` / `compute_flow_imbalance`. Its result is now
+  aligned to the input frame's rows (the documented `compute_spread` convention)
+  rather than an internal time-sorted order.
+- **`extract_event_window` no longer leaks a Polars `String → Date` deprecation
+  (Finding 2, forward-compat).** The `seconds_from_event` path fed a `"YYYY-MM-DD"`
+  string to the shared `_tick_datetime_expr`, whose `cast(pl.Date)` on a string is
+  deprecated (a hard error in Polars 2.0) and printed an un-suppressable warning
+  from Polars' worker threads to stderr. It now passes the event day as a `Date`
+  literal, so the cast is a no-op.
+- **`export_to_csv(language="jp")` writes UTF-8 with a BOM (Finding 3).** The JP
+  CSV was BOM-less UTF-8, which Excel on a Japanese Windows locale renders as
+  mojibake (`レコード種別` / `東証` → garbage); it is now written `utf-8-sig`. The
+  `en` export is ASCII and stays BOM-free; Polars/pandas readers strip the BOM
+  transparently.
+
 ## [0.13.2] - 2026-07-12
 
 Fixes for the ingest / raw-parse audit findings (H1–H2 high, M1–M4 medium) on the

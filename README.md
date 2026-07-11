@@ -416,7 +416,9 @@ Returns a Polars DataFrame with English or Japanese column names.
 
 ### `export_to_csv(folder_path, output_path=None, language="en", rows=None)`
 
-Load and export to CSV. If `output_path` is `None`, generates a filename.
+Load and export to CSV. If `output_path` is `None`, generates a filename. `language="jp"`
+is written as UTF-8 **with a BOM** (`utf-8-sig`) so Excel on a Japanese Windows locale opens it
+without mojibake; `language="en"` is ASCII and BOM-free.
 
 ### `read_ticks(source, *, data_type="individual_stock", ticker_filter=None, date=None, start_time=None, end_time=None, columns=None, rows=10_000_000, language="en", prune_parts=True, max_oneshot_bytes=...)`
 

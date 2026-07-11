@@ -1031,7 +1031,10 @@ def export_to_csv(
         folder_path: A ``.zip`` file, or a directory of NEEDS ZIPs.
         output_path: Destination ``.csv``; when ``None`` a name is derived as
             ``<data_type>_<year>_{en|jp}_cleaned.csv``.
-        language: Output column-name language, ``"en"`` or ``"jp"``.
+        language: Output column-name language, ``"en"`` or ``"jp"``. The ``"jp"``
+            file is written as UTF-8 **with a BOM** (``utf-8-sig``) so Excel on a
+            Japanese Windows locale renders it correctly instead of as mojibake;
+            ``"en"`` output is ASCII and stays BOM-free.
         rows: Optional cap on rows read.
 
     Returns:
@@ -1044,7 +1047,17 @@ def export_to_csv(
         lang_suffix = "_jp" if language == "jp" else "_en"
         output_path = f"{data_type}_{year}{lang_suffix}_cleaned.csv"
 
-    df.write_csv(output_path)
+    if language == "jp":
+        # Excel on a Japanese Windows locale defaults to Shift-JIS and shows
+        # BOM-less UTF-8 (レコード種別 / 東証 …) as mojibake; prepend a UTF-8 BOM so
+        # it opens correctly. Polars/pandas readers strip the BOM transparently
+        # (run14 Finding 3). Streamed via a binary handle so a large export is not
+        # materialised as a Python string.
+        with open(output_path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf")
+            df.write_csv(fh)
+    else:
+        df.write_csv(output_path)
     logger.info("Data exported to: %s", output_path)
     logger.debug("Shape: %s", df.shape)
 

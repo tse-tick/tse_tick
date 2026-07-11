@@ -531,7 +531,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 | `compute_spread()` | Series | `Sell Quote 1 Best - Buy Quote 1 Best` (NULL if either is 0/missing) |
 | `compute_depth(levels, side)` | DataFrame | Extracts Sell/Buy Quote Vol columns up to N levels |
 | `compute_flow_imbalance(window)` | Series | OFI = (buy_vol - sell_vol) / (buy_vol + sell_vol) over rolling window |
-| `compute_volatility(window, method)` | Series | "realized": sqrt(sum(log_returns²)); "garman_klass": sqrt(0.5*ln(H/L)² - (2ln2-1)*ln(C/O)²) |
+| `compute_volatility(window, method)` | Series | "realized": sqrt(sum(log_returns²)); "garman_klass": sqrt(0.5*ln(H/L)² - (2ln2-1)*ln(C/O)²). Trade rows only (Execution Price > 0); NULL for non-trade and warm-up rows, aligned to input rows |
 | `compute_all_features(levels, windows)` | DataFrame | Wraps all four above into one augmented DataFrame |
 
 ---
