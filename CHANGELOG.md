@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-07-12
+
 Fixes for the ingest / raw-parse audit findings (H1–H2 high, M1–M4 medium) on the
 `individual_stock` ingest and raw-ZIP→DataFrame paths.
 
