@@ -314,6 +314,7 @@ def ingest_single_zip(
     year: Optional[int] = None,
     language: str = "en",
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> dict:
     """Ingest one raw NEEDS ZIP into the Hive-partitioned Parquet store.
 
@@ -358,7 +359,7 @@ def ingest_single_zip(
             "rows": 0,
             "output_path": None,
         }
-    out_path = write_partitioned_parquet(df, output_dir, data_type)
+    out_path = write_partitioned_parquet(df, output_dir, data_type, compression=compression)
 
     return {
         "zip_path": str(path.resolve()),
@@ -369,7 +370,7 @@ def ingest_single_zip(
     }
 
 
-def _ingest_single_zip_safe(zip_path, output_dir, data_type, language, ticker_filter):
+def _ingest_single_zip_safe(zip_path, output_dir, data_type, language, ticker_filter, compression):
     """Module-level ingest-one-ZIP task for ``ingest_directory``'s process pool.
 
     A local closure cannot be pickled under the ``spawn`` start method (Windows/macOS),
@@ -380,7 +381,7 @@ def _ingest_single_zip_safe(zip_path, output_dir, data_type, language, ticker_fi
     try:
         return ingest_single_zip(
             str(zip_path), output_dir, data_type=data_type,
-            language=language, ticker_filter=ticker_filter,
+            language=language, ticker_filter=ticker_filter, compression=compression,
         )
     except OneShotMemoryError:
         raise
@@ -409,7 +410,7 @@ def _flat_day_units(zip_files: list) -> "tuple[list, list]":
     return day_units, singles
 
 
-def _ingest_flat_day_safe(date_str, zip_paths, output_dir, data_type, language, ticker_filter):
+def _ingest_flat_day_safe(date_str, zip_paths, output_dir, data_type, language, ticker_filter, compression):
     """Module-level ingest-one-day task for ``ingest_directory``'s process pool.
 
     All ZIP parts of the day are read and concatenated before the single write —
@@ -425,7 +426,8 @@ def _ingest_flat_day_safe(date_str, zip_paths, output_dir, data_type, language, 
         dtype = data_type or _detect_data_type_from_path(str(zip_paths[0]))
         year = int(date_str[:4])
         meta = _ingest_date_group(
-            date_str, zip_paths, output_dir, dtype, year, language, ticker_filter
+            date_str, zip_paths, output_dir, dtype, year, language, ticker_filter,
+            compression=compression,
         )
         meta["data_type"] = dtype
         meta["year"] = year
@@ -456,6 +458,7 @@ def ingest_directory(
     max_workers: int = 1,
     progress: bool = True,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     """Ingest every ``.zip`` in a single flat directory into the Parquet store.
 
@@ -519,12 +522,12 @@ def ingest_directory(
                 for tok, unit_parts in day_units:
                     futures[executor.submit(
                         _ingest_flat_day_safe, tok, unit_parts, output_dir,
-                        data_type, language, ticker_filter,
+                        data_type, language, ticker_filter, compression,
                     )] = tok
                 for zf in singles:
                     futures[executor.submit(
                         _ingest_single_zip_safe, zf, output_dir,
-                        data_type, language, ticker_filter,
+                        data_type, language, ticker_filter, compression,
                     )] = zf
                 done = 0
                 for future in as_completed(futures):
@@ -538,14 +541,14 @@ def ingest_directory(
         for tok, unit_parts in day_units:
             done += 1
             meta = _ingest_flat_day_safe(
-                tok, unit_parts, output_dir, data_type, language, ticker_filter
+                tok, unit_parts, output_dir, data_type, language, ticker_filter, compression
             )
             results.append(meta)
             if progress:
                 _log_flat_progress(done, total, meta)
         for zf in singles:
             done += 1
-            meta = _ingest_single_zip_safe(zf, output_dir, data_type, language, ticker_filter)
+            meta = _ingest_single_zip_safe(zf, output_dir, data_type, language, ticker_filter, compression)
             results.append(meta)
             if progress:
                 _log_flat_progress(done, total, meta)
@@ -561,6 +564,7 @@ def ingest_year(
     language: str = "en",
     max_workers: int = 1,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     """Ingest every ``.zip`` for one ``year`` from a **flat** directory.
 
@@ -613,7 +617,8 @@ def ingest_year(
     for tok, unit_parts in day_units:
         try:
             meta = _ingest_date_group(
-                tok, unit_parts, output_dir, data_type, year, language, ticker_filter
+                tok, unit_parts, output_dir, data_type, year, language, ticker_filter,
+                compression=compression,
             )
         except OneShotMemoryError:
             raise
@@ -628,7 +633,8 @@ def ingest_year(
     return results
 
 
-def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, language, ticker_filter):
+def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, language, ticker_filter,
+                       compression="zstd"):
     """Read every ZIP part of one date, concat, and write each ticker file once.
 
     This is the multi-part-per-day unit: NEEDS splits a trading day across parts
@@ -701,7 +707,7 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     del parts
     gc.collect()
     rows = len(combined)
-    out_path = write_partitioned_parquet(combined, output_dir, data_type)
+    out_path = write_partitioned_parquet(combined, output_dir, data_type, compression=compression)
     # Record what this write covered (full or which tickers) so resume can skip
     # only requests the partition actually satisfies (audit finding H2). A day
     # that lost parts is marked incomplete so resume re-ingests it (finding M1)
@@ -720,7 +726,7 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
 
 
 def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter,
-                    max_workers=1):
+                    max_workers=1, compression="zstd"):
     """Group ZIP parts by date and ingest each date as a unit (all parts → write once).
 
     Resume is keyed per-date (a date is written atomically), so later parts of a
@@ -802,7 +808,8 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
     if workers <= 1 or len(tasks) <= 1:
         results: list[dict] = []
         for date_str, parts in tasks:
-            meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language, ticker_filter)
+            meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language,
+                                      ticker_filter, compression=compression)
             results.append(meta)
             logger.info("  %s (%d parts) -> %s rows", date_str, meta["parts"], meta["rows"])
         return results
@@ -813,7 +820,7 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
             futures = {
                 executor.submit(
                     _ingest_date_group, date_str, parts, output_dir,
-                    data_type, year, language, ticker_filter,
+                    data_type, year, language, ticker_filter, compression,
                 ): date_str
                 for date_str, parts in tasks
             }
@@ -836,6 +843,7 @@ def ingest_year_from_root(
     resume: bool = True,
     max_workers: int = 1,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     """Ingest a whole ``year`` from a **structured** NEEDS root into the store.
 
@@ -869,7 +877,8 @@ def ingest_year_from_root(
 
     zip_paths = discover_zips(input_root, data_type, [year])
     return _ingest_grouped(
-        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers
+        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers,
+        compression=compression,
     )
 
 
@@ -882,6 +891,7 @@ def ingest_period(
     resume: bool = True,
     max_workers: int = 1,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     """Ingest a whole period from a structured NEEDS root into the Parquet store.
 
@@ -927,7 +937,8 @@ def ingest_period(
             results.extend(
                 ingest_year_from_root(
                     input_root, output_dir, year, data_type, language, resume,
-                    max_workers=max_workers, ticker_filter=ticker_filter
+                    max_workers=max_workers, ticker_filter=ticker_filter,
+                    compression=compression,
                 )
             )
         return results
@@ -939,7 +950,8 @@ def ingest_period(
             zip_paths = discover_zips(input_root, data_type, [year], months=list(months))
             results.extend(
                 _process_zips(zip_paths, output_dir, data_type, year, language, resume,
-                              max_workers=max_workers, ticker_filter=ticker_filter)
+                              max_workers=max_workers, ticker_filter=ticker_filter,
+                              compression=compression)
             )
         return results
 
@@ -953,7 +965,8 @@ def ingest_period(
             zip_paths = discover_zips(input_root, data_type, [year], months=year_months, dates=year_dates)
             results.extend(
                 _process_zips(zip_paths, output_dir, data_type, year, language, resume,
-                              max_workers=max_workers, ticker_filter=ticker_filter)
+                              max_workers=max_workers, ticker_filter=ticker_filter,
+                              compression=compression)
             )
         return results
 
@@ -995,6 +1008,7 @@ def extract_to_store(
     language: str = "en",
     resume: bool = True,
     max_workers: int = 1,
+    compression: str = "zstd",
 ) -> "pl.DataFrame":
     """Two-stage extraction in ONE call: ingest one or more tickers for a period
     into a reusable Parquet store, then return the queried DataFrame.
@@ -1074,7 +1088,7 @@ def extract_to_store(
     stage1_results = ingest_period(
         input_root, output_dir, period, data_type,
         language=language, resume=resume, ticker_filter=tickers,
-        max_workers=max_workers,
+        max_workers=max_workers, compression=compression,
     )
     # Stage 1 records lost parts / failed dates in its results instead of raising
     # (corrupt ZIPs are per-unit, not fatal) — but THIS call is about to return
@@ -1152,9 +1166,11 @@ def _process_zips(
     resume: bool = True,
     max_workers: int = 1,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     return _ingest_grouped(
-        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers
+        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers,
+        compression=compression,
     )
 
 
@@ -1166,6 +1182,7 @@ def ingest_event_windows_period(
     window_minutes: int = 120,
     resume: bool = True,
     max_workers: int = 1,
+    compression: str = "zstd",
 ) -> None:
     """Build the event-window Parquet store for a period from an events CSV.
 
@@ -1339,7 +1356,7 @@ def ingest_event_windows_period(
                 if internal_cols:
                     combined = combined.drop(internal_cols)
                 combined_rows = len(combined)
-                write_event_window_parquet(combined, output_dir)
+                write_event_window_parquet(combined, output_dir, compression=compression)
                 del combined
                 gc.collect()
                 logger.info("  %s: %s event-window ticks written", date_str, f"{combined_rows:,}")

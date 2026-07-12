@@ -130,6 +130,7 @@ def write_partitioned_parquet(
     output_dir: str,
     data_type: str,
     partition_cols: Optional[list[str]] = None,
+    compression: str = "zstd",
 ) -> str:
     """Write a cleaned frame to the Hive-partitioned Parquet store.
 
@@ -146,6 +147,11 @@ def write_partitioned_parquet(
         output_dir: Store root; ``<data_type>/`` is created under it.
         data_type: One of the four NEEDS types (selects the default partitioning).
         partition_cols: Override the default partition columns (advanced use).
+        compression: Parquet codec (default ``"zstd"`` — ~30% smaller and ~3x
+            faster to read than ``"snappy"`` on this data per the tracked format
+            benchmark; pass ``"snappy"`` to match pre-0.14 stores). The codec is
+            per-file Parquet metadata, so mixed-codec stores read fine — no
+            re-ingest needed.
 
     Returns:
         The absolute path of the ``<output_dir>/<data_type>`` directory.
@@ -217,13 +223,13 @@ def write_partitioned_parquet(
                     fpath = date_dir / f"ticker={key}.parquet"
                     tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
                     pending.append((tmp, fpath))
-                    out_df.write_parquet(tmp, compression="snappy")
+                    out_df.write_parquet(tmp, compression=compression)
             else:
                 out_df = date_group.drop(["_date_str"])
                 fpath = date_dir / f"{date_str_val}.parquet"
                 tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
                 pending.append((tmp, fpath))
-                out_df.write_parquet(tmp, compression="snappy")
+                out_df.write_parquet(tmp, compression=compression)
             for tmp, fpath in pending:
                 os.replace(tmp, fpath)
         except BaseException:
@@ -291,7 +297,9 @@ def read_parquet_partition(
     return df
 
 
-def write_event_window_parquet(df: pl.DataFrame, output_dir: str) -> None:
+def write_event_window_parquet(
+    df: pl.DataFrame, output_dir: str, compression: str = "zstd"
+) -> None:
     """Append event-window ticks to the **event-window** Parquet store.
 
     Writes the separate event-window store (laid out as
@@ -346,7 +354,7 @@ def write_event_window_parquet(df: pl.DataFrame, output_dir: str) -> None:
         # in write_partitioned_parquet).
         tmp = part_dir / f".{fpath.name}.{os.getpid()}.tmp"
         try:
-            out_df.write_parquet(tmp, compression="snappy")
+            out_df.write_parquet(tmp, compression=compression)
             os.replace(tmp, fpath)
         except BaseException:
             try:

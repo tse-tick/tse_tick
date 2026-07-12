@@ -90,6 +90,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 window_minutes=args.window,
                 resume=not args.no_resume,
                 max_workers=args.parallel,
+                compression=args.compression,
             )
             print("Done")
         else:
@@ -102,6 +103,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 resume=not args.no_resume,
                 max_workers=args.parallel,
                 ticker_filter=ticker_filter,
+                compression=args.compression,
             )
             success = sum(1 for r in results if "error" not in r)
             failed = sum(1 for r in results if "error" in r)
@@ -125,6 +127,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             language=args.language,
             max_workers=args.parallel,
             ticker_filter=ticker_filter,
+            compression=args.compression,
         )
         success = sum(1 for r in results if "error" not in r)
         failed = sum(1 for r in results if "error" in r)
@@ -144,6 +147,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 resume=not args.no_resume,
                 max_workers=args.parallel,
                 ticker_filter=ticker_filter,
+                compression=args.compression,
             )
             success = sum(1 for r in results if "error" not in r)
             failed = sum(1 for r in results if "error" in r)
@@ -174,6 +178,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             start_time=args.start_time,
             end_time=args.end_time,
             language=args.language,
+            compression=args.compression,
         )
     else:
         if store:
@@ -264,6 +269,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable resume (reprocess all files even if output exists)",
     )
     ingest_parser.add_argument(
+        "--compression",
+        default="zstd",
+        choices=["zstd", "snappy"],
+        help="Parquet codec for the store (default: zstd — smaller and faster to "
+             "read; snappy matches pre-0.14 stores). Mixed-codec stores read fine.",
+    )
+    ingest_parser.add_argument(
         "--flat",
         action="store_true",
         help="Input directory is a flat folder of ZIPs (no year/month structure)",
@@ -338,6 +350,12 @@ def _build_parser() -> argparse.ArgumentParser:
              "ticker, build a reusable, part-pruned store here then query it "
              "(two-stage) — best when you will read the data more than once. Omit "
              "for a one-off direct read (also part-pruned). Requires the [query] extra.",
+    )
+    export_parser.add_argument(
+        "--compression",
+        default="zstd",
+        choices=["zstd", "snappy"],
+        help="Parquet codec for the --store two-stage path (default: zstd).",
     )
     export_parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
