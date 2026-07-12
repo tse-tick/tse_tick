@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-07-12
+
 Fixes for the run14 real-data acceptance-test bug report — the analytics/export
 layer (the core read/ingest/query pipeline verified production-solid across all
 four types and both eras). No public API signatures change.
