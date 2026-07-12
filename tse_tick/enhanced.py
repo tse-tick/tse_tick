@@ -934,6 +934,36 @@ def _normalize_ticker_filter(ticker_filter) -> Optional[set]:
     return {str(t).strip() for t in ticker_filter}
 
 
+def _stock_family_roots(tickers) -> Optional[set]:
+    """Map each requested ``individual_stock`` code to its 4-char family root.
+
+    NEEDS appends a share-class digit to the parent's 4-char code (``"72031"`` =
+    Toyota New Shares), and the whole read path — the raw-byte field-5 filter,
+    the part probes, the store's coverage markers — operates on the first 4
+    chars. A raw 5-char request therefore used to match NOTHING (the filter
+    compared 4-char codes against the 5-char request). Rooting the requested
+    codes once here gives family semantics end-to-end: a 4-char code selects the
+    parent plus its share classes; a longer code selects its family. Codes of 4
+    chars or fewer (incl. alphanumeric like ``"130A"``) pass through unchanged.
+    ``individual_stock`` only — index display names must not be sliced.
+    """
+    if tickers is None:
+        return None
+    return {s[:4] if len(s) > 4 else s for s in (str(t).strip() for t in tickers)}
+
+
+def _code_matches_family(stem_code: str, requested: str) -> bool:
+    """True when a store file's ``ticker=`` code satisfies a requested code.
+
+    A 4-char request selects its whole share-class family (prefix match:
+    ``"7203"`` ⇒ ``7203``, ``72031``, …) — mirroring what Stage 1's field-5
+    filter ingests for that request, so no ingested file is unreachable. Any
+    other request length must match the stem exactly (the documented escape
+    hatch for reading a single share class off a built store).
+    """
+    return stem_code == requested or (len(requested) == 4 and stem_code[:4] == requested)
+
+
 def create_df(
     folder_path: str,
     language: Literal["en", "jp"] = "en",
@@ -1006,7 +1036,10 @@ def create_df(
         year,
         data_type,
         rows,
-        ticker_filter=ticker_filter if data_type == "individual_stock" else None,
+        # Root each requested code to its 4-char family (72031 -> 7203) so the
+        # field-5 fast path — which compares 4-char codes — matches it; a raw
+        # 5-char request used to silently return nothing.
+        ticker_filter=_stock_family_roots(ticker_filter) if data_type == "individual_stock" else None,
         max_oneshot_bytes=_resolve_oneshot_bytes(max_oneshot_bytes),
     )
 

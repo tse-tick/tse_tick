@@ -125,6 +125,36 @@ def test_stock_quote_only_update_time_fallback(tmp_path):
     _identical(str(store), "individual_stock", ["7203"], start_time="09:15:00", end_time="12:00:00")
 
 
+# --- suffixed share-class families -------------------------------------------
+@pytest.fixture
+def suffixed_store(tmp_path):
+    """A store holding a parent + suffixed share class, timestamps de-tied so the
+    oracle comparison is deterministic (DuckDB tie order is arbitrary)."""
+    store = tmp_path / "store"
+    for date in ("20240104", "20240105"):
+        zp = tmp_path / f"HTICST120.{date}.1.zip"
+        write_zip(zp, f"HTICST120.{date}.1.csv",
+                  individual_stock_csv(date, ["7203", "72031", "9984"], rows_per_ticker=8,
+                                       minute_offsets={"72031": 1, "9984": 2}))
+        ingest_single_zip(str(zp), str(store), data_type="individual_stock", year=2024)
+    return str(store)
+
+
+def test_suffixed_family_single(suffixed_store):
+    # query_ticks("7203") and the batch both select the whole family; the family
+    # is ONE (date, time)-ordered block in both.
+    df = _identical(suffixed_store, "individual_stock", ["7203"])
+    codes = set(df.select(pl.col("Stock Code").str.strip_chars().unique()).to_series().to_list())
+    assert codes == {"7203", "72031"}
+
+
+def test_suffixed_family_multi_and_windows(suffixed_store):
+    _identical(suffixed_store, "individual_stock", ["9984", "7203"])
+    _identical(suffixed_store, "individual_stock", ["7203"], day="20240105")
+    _identical(suffixed_store, "individual_stock", ["7203", "9984"],
+               start_time="09:30:00", end_time="13:30:00")
+
+
 # --- indices (tick) ----------------------------------------------------------
 def test_indices_multi_and_absent(indices_store):
     _identical(indices_store, "indices", ["113", "101"])

@@ -25,7 +25,7 @@ from typing import Iterable, Optional, Union, cast
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, LargeResultWarning, OneShotMemoryError
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, OneShotMemoryError
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -264,7 +264,15 @@ def _coverage_satisfied(date_dir: Path, ticker_filter: Optional[set]) -> bool:
     if marker is None:
         if wanted is None:
             return True
-        return all((Path(date_dir) / f"ticker={t}.parquet").exists() for t in wanted)
+        # Family matching: a filtered Stage 1 ingests the requested code's whole
+        # share-class family, and on a day the parent didn't trade only a
+        # suffixed class file may exist — that still covers the (rooted) request.
+        codes_present = {
+            p.stem[len("ticker="):] for p in Path(date_dir).glob("ticker=*.parquet")
+        }
+        return all(
+            any(_code_matches_family(c, t) for c in codes_present) for t in wanted
+        )
     if not marker.get("complete", True):
         return False
     if marker.get("full"):
@@ -628,6 +636,12 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     concatenated before writing — otherwise later parts get skipped (resume) or
     overwrite earlier ones.
     """
+    # Root the requested codes to their 4-char families (72031 -> 7203) so the
+    # filter, the prune, and the coverage marker all record the same family
+    # semantics (idempotent — the parent paths root too, but the flat path and a
+    # direct call reach here un-rooted).
+    if ticker_filter and data_type == "individual_stock":
+        ticker_filter = _stock_family_roots(ticker_filter)
     # Prune the day's parts to the requested ticker(s) HERE, not on the parent, so
     # pruning stays interleaved with this date's write (issue #39: a partition lands
     # per day and a resumed run prunes only the dates it ingests) and, under
@@ -713,6 +727,11 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
     deterministic regardless of worker completion order.
     """
     _reject_bootstrap_reimport()  # actionable error for an unguarded top-level call (B1)
+
+    # Family-root the request up front so the per-date resume check compares the
+    # same codes the coverage markers record (workers re-root; it is idempotent).
+    if ticker_filter and data_type == "individual_stock":
+        ticker_filter = _stock_family_roots(ticker_filter)
 
     output_root_path = Path(output_dir) / data_type
     groups: dict = {}
@@ -981,6 +1000,9 @@ def extract_to_store(
         period: ``"YYYY"``, ``"YYYYMM"``, ``"YYYYMMDD"``, or a ``"start-end"`` range.
         ticker: One code **or an iterable of codes**, e.g. ``"7203"`` (Toyota),
             ``["7203", "9984"]``, or ``"101"`` (Nikkei 225). ``int`` codes work too.
+            ``individual_stock`` codes select their whole share-class **family**:
+            ``"7203"`` (and equally ``"72031"``) extracts the parent plus its
+            suffixed classes — the same rows a filtered ingest has always stored.
         data_type: One of the four NEEDS types (default ``"individual_stock"``).
         start_time: Optional intraday lower bound ``"HH:MM:SS"`` (tick types only;
             the two ``*_summary`` types are daily aggregates and raise if given).
@@ -1020,6 +1042,12 @@ def extract_to_store(
     tickers = _normalize_ticker_filter(ticker)
     if not tickers:
         raise ValueError("extract_to_store: at least one ticker is required")
+    if data_type == "individual_stock":
+        # Family semantics: root each code to its 4-char family (72031 -> 7203) so
+        # Stage 1's filter, the resume coverage, and Stage 2's file selection all
+        # agree — Stage 1 has always ingested the whole family for a 4-char code,
+        # and Stage 2 used to silently drop the suffixed classes' rows.
+        tickers = _stock_family_roots(tickers)
 
     # Stage 1 — ingest every ticker in one part-pruned pass into the reusable store.
     ingest_period(
@@ -1046,7 +1074,11 @@ def extract_to_store(
         total_rows = 0
         if type_dir.exists():
             for code in tickers:
-                for f in type_dir.glob(f"date=*/ticker={code}.parquet"):
+                # ticker={code}* + the family predicate: count the suffixed
+                # share-class files the query below will read too.
+                for f in type_dir.glob(f"date=*/ticker={code}*.parquet"):
+                    if not _code_matches_family(f.stem[len("ticker="):], code):
+                        continue
                     if date_from <= f.parent.name[len("date="):] <= date_to:
                         try:
                             total_rows += pq.ParquetFile(f).metadata.num_rows
