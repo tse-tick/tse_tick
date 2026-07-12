@@ -174,3 +174,20 @@ def test_read_parquet_partition_data_date_is_datetime(stock_store):
     """
     result = read_parquet_partition(stock_store, "individual_stock", ticker=7203)
     assert result["Data Date"].dtype.is_temporal()
+
+
+def test_coerce_time_cols_passthrough_and_time_dtype():
+    """String columns pass through untouched (the pipeline stores times as
+    strings); a native pl.Time column is normalized to "HHMMSS" strings."""
+    import datetime
+
+    from tse_tick.io.parquet import _coerce_time_cols
+
+    strings = pl.DataFrame({"Execution Time": ["090000", None], "Stock Code": ["7203", "9984"]})
+    out = _coerce_time_cols(strings)
+    assert out.equals(strings)
+
+    timed = pl.DataFrame({"t": [datetime.time(9, 30, 5), None]})
+    out = _coerce_time_cols(timed)
+    assert out["t"].dtype == pl.String
+    assert out["t"].to_list() == ["093005", None]

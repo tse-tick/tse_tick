@@ -100,20 +100,29 @@ def _drop_null_date_rows(df: pl.DataFrame, date_col: str) -> pl.DataFrame:
 
 
 def _coerce_time_cols(df: pl.DataFrame) -> pl.DataFrame:
-    result = df.clone()
-    for col, dtype in zip(result.columns, result.dtypes):
-        if dtype == pl.String:
-            sample_vals = result[col].drop_nulls()
-            if len(sample_vals) > 0:
-                sample = sample_vals[0]
-                if isinstance(sample, datetime.time):
-                    result = result.with_columns(
-                        pl.col(col).map_elements(
-                            lambda t: t.strftime("%H%M%S") if isinstance(t, datetime.time) else t,
-                            return_dtype=pl.String,
-                        )
-                    )
-    return result
+    """Convert any ``datetime.time``-holding column to ``"HHMMSS"`` strings.
+
+    Only ``pl.Time`` (native) and ``pl.Object`` (opaque Python values) columns
+    can hold time-of-day values — a ``pl.String`` column holds ``str``, never
+    ``datetime.time``, so the old String-dtype guard could never fire, yet it
+    materialized a ``drop_nulls()`` copy of every String column (~90 for
+    ``individual_stock``) on every partition write. The pipeline stores times as
+    strings throughout, so this normally sees nothing to do.
+    """
+    exprs = []
+    for col, dtype in zip(df.columns, df.dtypes):
+        if dtype == pl.Time:
+            exprs.append(pl.col(col).dt.to_string("%H%M%S").alias(col))
+        elif dtype == pl.Object:
+            sample_vals = df[col].drop_nulls()
+            if len(sample_vals) > 0 and isinstance(sample_vals[0], datetime.time):
+                exprs.append(
+                    pl.col(col).map_elements(
+                        lambda t: t.strftime("%H%M%S") if isinstance(t, datetime.time) else t,
+                        return_dtype=pl.String,
+                    ).alias(col)
+                )
+    return df.with_columns(exprs) if exprs else df
 
 
 def write_partitioned_parquet(
