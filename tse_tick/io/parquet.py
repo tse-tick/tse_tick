@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +30,15 @@ _DEFAULT_PARTITION_COLS: dict[str, list[str]] = {
 
 _INDEX_DATA_TYPES = INDEX_TYPES
 _UNKNOWN_CODE_RE = re.compile(r"^Unknown \((.+)\)$")
+
+# Per-date ticker-file fan-out: write concurrently only when a date produces at
+# least this many files (a full-frame individual_stock day writes thousands;
+# tiny fan-outs would pay more in thread setup than they save). The thread
+# count is deliberately small and NOT scaled to os.cpu_count(): the writes
+# release the GIL in Polars' Rust writer, but per-date process workers may
+# already be running several of these loops at once.
+_PARALLEL_WRITE_MIN_FILES = 16
+_PARALLEL_WRITE_THREADS = 8
 
 
 def _index_code_lookup() -> dict[str, str]:
@@ -217,13 +227,33 @@ def write_partitioned_parquet(
                         by_target[key] = []
                         target_order.append(key)
                     by_target[key].append(ticker_group.drop(["_date_str"]))
+                tasks: list[tuple[pl.DataFrame, Path]] = []
                 for key in target_order:
                     frames = by_target[key]
                     out_df = frames[0] if len(frames) == 1 else pl.concat(frames, how="vertical")
                     fpath = date_dir / f"ticker={key}.parquet"
                     tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
                     pending.append((tmp, fpath))
-                    out_df.write_parquet(tmp, compression=compression)
+                    tasks.append((out_df, tmp))
+                # The per-file writes are independent and release the GIL in
+                # Polars' Rust writer, so a big fan-out (a full-frame day is
+                # thousands of ticker files) runs them across a small thread
+                # pool. Only the WRITES are concurrent; the commit loop below
+                # stays sequential, so the all-or-nothing cleanup contract is
+                # unchanged. Small fan-outs skip the pool (thread setup would
+                # dominate).
+                if len(tasks) >= _PARALLEL_WRITE_MIN_FILES:
+                    workers = min(_PARALLEL_WRITE_THREADS, len(tasks))
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        futures = [
+                            pool.submit(out_df.write_parquet, tmp, compression=compression)
+                            for out_df, tmp in tasks
+                        ]
+                        for f in futures:
+                            f.result()
+                else:
+                    for out_df, tmp in tasks:
+                        out_df.write_parquet(tmp, compression=compression)
             else:
                 out_df = date_group.drop(["_date_str"])
                 fpath = date_dir / f"{date_str_val}.parquet"
