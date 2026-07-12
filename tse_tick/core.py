@@ -141,11 +141,9 @@ def clean_data(df, kind="individual_stock", language="en"):
         # whole date group instead of becoming 0.
         int_list = [14, 18, 19, 21, 22, 24, 25, 27, 28, 30, 31, 33, 34, 36, 37, 39, 40, 42, 43, 45, 46, 48, 49, 51, 52, 54, 55, 57, 58, 60, 61, 63, 64, 66, 67, 69, 70, 72, 73, 75, 76, 78, 79, 81, 82, 84, 85, 87, 88, 90, 91, 93, 94]
         float_list = [11, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59, 62, 65, 68, 71, 74, 77, 80, 83, 86, 89, 92]
-        time_list = [6, 7, 8]
     elif kind in SUMMARY_TYPES:
         int_list = []
         float_list = []
-        time_list = [17, 22, 42, 47]
         if kind == "indices_summary":
             price_columns = [col for col in df.columns if "Price" in col]
             price_exprs = [(pl.col(c).cast(pl.Float64) * 0.01).alias(c) for c in price_columns]
@@ -169,7 +167,6 @@ def clean_data(df, kind="individual_stock", language="en"):
                 [pl.col(c).str.strip_chars().cast(pl.Float64, strict=False) for c in measure_cols]
             )
     elif (kind == "indices") and df_cleaned.height and (df_cleaned["Data Date"][0][:4] == "2016"):
-        time_list = []
         int_list = []
         float_list = []
         df_cleaned = df_cleaned.with_columns(
@@ -179,27 +176,24 @@ def clean_data(df, kind="individual_stock", language="en"):
     elif kind == "indices":
         int_list = []
         float_list = []
-        time_list = [6, 9]
         df_cleaned = df_cleaned.with_columns(
             (pl.col("Index Value").cast(pl.Float64) * 0.01).alias("Index Value"),
         )
     else:
         pass
 
-    for col_idx in time_list:
-        col = df_cleaned.columns[col_idx]
-        df_cleaned = df_cleaned.with_columns(pl.col(col).fill_null(pl.lit(None)))
-
-    for i in int_list:
-        col = df_cleaned.columns[i]
+    # One with_columns per cast family: Polars evaluates the expressions of a
+    # single call in parallel across cores, so the old ~80 one-expression calls
+    # ran these casts serially. (The old per-column fill_null(None) pass over
+    # the time columns was a no-op — filling nulls with null — and is gone.)
+    cols = df_cleaned.columns
+    if int_list:
         df_cleaned = df_cleaned.with_columns(
-            pl.col(col).fill_null(0).cast(pl.Int64)
+            [pl.col(cols[i]).fill_null(0).cast(pl.Int64) for i in int_list]
         )
-
-    for i in float_list:
-        col = df_cleaned.columns[i]
+    if float_list:
         df_cleaned = df_cleaned.with_columns(
-            pl.col(col).cast(pl.Float64, strict=False).fill_null(0.0)
+            [pl.col(cols[i]).cast(pl.Float64, strict=False).fill_null(0.0) for i in float_list]
         )
 
     df_cleaned = df_cleaned.with_columns(
@@ -207,12 +201,12 @@ def clean_data(df, kind="individual_stock", language="en"):
     )
 
     if kind == "individual_stock":
-        for time_col in ["Execution Time", "Sell Quote Time", "Buy Quote Time"]:
-            df_cleaned = df_cleaned.with_columns(
-                pl.col(time_col).str.slice(0, 6).alias(time_col)
-            )
         df_cleaned = df_cleaned.with_columns(
-            pl.col("Update Time").str.slice(0, 12).alias("Update Time")
+            [
+                pl.col(c).str.slice(0, 6).alias(c)
+                for c in ("Execution Time", "Sell Quote Time", "Buy Quote Time")
+            ]
+            + [pl.col("Update Time").str.slice(0, 12).alias("Update Time")]
         )
 
     elif (kind == "indices") and df_cleaned.height and (df_cleaned["Data Date"][0].year == 2016):
@@ -238,8 +232,10 @@ def clean_data(df, kind="individual_stock", language="en"):
         df_cleaned = df_cleaned.with_columns(exprs)
 
     string_cols = [c for c, d in zip(df_cleaned.columns, df_cleaned.dtypes) if d == pl.String]
-    for col in string_cols:
-        df_cleaned = df_cleaned.with_columns(pl.col(col).str.strip_chars())
+    if string_cols:
+        df_cleaned = df_cleaned.with_columns(
+            [pl.col(c).str.strip_chars() for c in string_cols]
+        )
 
     schemas_categorical = get_schemas_categorical()
 
@@ -267,11 +263,35 @@ def clean_data(df, kind="individual_stock", language="en"):
         "Stock Code",
     }
 
+    def _decode_expr(col, table):
+        """One-pass categorical decode for one column: known raw codes map to the
+        display value, unknown non-null codes become "Unknown (code)", nulls stay
+        null. Replaces the old per-column unique().to_list() Python round-trip
+        plus one full-column when/then pass PER unknown value. The map is built
+        from the WHOLE schema table (a superset of the observed values decodes
+        identically); metadata entries (plain strings, or sub-dicts without the
+        language key) are skipped."""
+        full_map = {
+            raw: info[language]
+            for raw, info in table.items()
+            if isinstance(info, dict) and language in info
+        }
+        if not full_map:
+            return None
+        return (
+            pl.when(pl.col(col).is_null())
+            .then(pl.col(col))
+            .when(pl.col(col).is_in(list(full_map)))
+            .then(pl.col(col).replace(full_map))
+            .otherwise(pl.lit("Unknown (") + pl.col(col) + pl.lit(")"))
+            .alias(col)
+        )
+
+    decode_exprs = []
     for col in col_names:
         if col in skip_exact:
             continue
-        dtype = df_cleaned.schema[col]
-        if dtype == pl.Float64:
+        if df_cleaned.schema[col] == pl.Float64:
             continue
         if "Time" in col:
             continue
@@ -282,136 +302,38 @@ def clean_data(df, kind="individual_stock", language="en"):
         if ("Buy" in col) or ("Sell" in col):
             continue
 
-        unique_vars = df_cleaned[col].unique().to_list()
-
         if col == "Record Type" or col == "Exchange Code":
-            mapping_dict = {}
-            for var in unique_vars:
-                if var is None:
-                    continue
-                mapping = schemas_categorical[col]["all"].get(var)
-                if mapping is None:
-                    df_cleaned = df_cleaned.with_columns(
-                        pl.when(pl.col(col) == var)
-                        .then(pl.lit(f"Unknown ({var})"))
-                        .otherwise(pl.col(col))
-                        .alias(col)
-                    )
-                else:
-                    mapping_dict[var] = mapping[language]
-            if mapping_dict:
-                df_cleaned = df_cleaned.with_columns(
-                    pl.col(col).replace(mapping_dict).alias(col)
-                )
+            table = schemas_categorical[col]["all"]
         elif col == "Execution Type":
             if kind == "individual_stock":
-                schema_key = "Execution Type Stocks"
+                table = schemas_categorical["Execution Type Stocks"]
             elif kind == "indices":
-                schema_key = "Execution Type Indices"
+                table = schemas_categorical["Execution Type Indices"]
             else:
                 continue
-            mapping_dict = {}
-            for var in unique_vars:
-                if var is None:
-                    continue
-                mapping = schemas_categorical[schema_key].get(str(var))
-                if mapping is None:
-                    df_cleaned = df_cleaned.with_columns(
-                        pl.when(pl.col(col) == var)
-                        .then(pl.lit(f"Unknown ({var})"))
-                        .otherwise(pl.col(col))
-                        .alias(col)
-                    )
-                else:
-                    mapping_dict[var] = mapping[language]
-            if mapping_dict:
-                df_cleaned = df_cleaned.with_columns(
-                    pl.col(col).replace(mapping_dict).alias(col)
-                )
         elif col == "Ayumi Flag":
             if kind == "individual_stock":
-                schema_key = "Ayumi Flag Stocks"
+                table = schemas_categorical["Ayumi Flag Stocks"]
             elif kind == "indices":
-                schema_key = "Ayumi Flag Indices"
+                table = schemas_categorical["Ayumi Flag Indices"]
             else:
                 continue
-            mapping_dict = {}
-            for var in unique_vars:
-                if var is None:
-                    continue
-                mapping = schemas_categorical[schema_key].get(str(var))
-                if mapping is None:
-                    df_cleaned = df_cleaned.with_columns(
-                        pl.when(pl.col(col) == var)
-                        .then(pl.lit(f"Unknown ({var})"))
-                        .otherwise(pl.col(col))
-                        .alias(col)
-                    )
-                else:
-                    mapping_dict[var] = mapping[language]
-            if mapping_dict:
-                df_cleaned = df_cleaned.with_columns(
-                    pl.col(col).replace(mapping_dict).alias(col)
-                )
         elif col == "Volume Flag":
-            mapping_dict = {}
-            for var in unique_vars:
-                if var is None:
-                    continue
-                mapping = schemas_categorical["Volume Flag"].get(str(var))
-                if mapping is None:
-                    df_cleaned = df_cleaned.with_columns(
-                        pl.when(pl.col(col) == var)
-                        .then(pl.lit(f"Unknown ({var})"))
-                        .otherwise(pl.col(col))
-                        .alias(col)
-                    )
-                else:
-                    mapping_dict[var] = mapping[language]
-            if mapping_dict:
-                df_cleaned = df_cleaned.with_columns(
-                    pl.col(col).replace(mapping_dict).alias(col)
-                )
+            table = schemas_categorical["Volume Flag"]
         elif "Flag" in col:
-            mapping_dict = {}
-            for var in unique_vars:
-                if var is None:
-                    continue
-                mapping = schemas_categorical["Quote Flag"].get(str(var))
-                if mapping is None:
-                    df_cleaned = df_cleaned.with_columns(
-                        pl.when(pl.col(col) == var)
-                        .then(pl.lit(f"Unknown ({var})"))
-                        .otherwise(pl.col(col))
-                        .alias(col)
-                    )
-                else:
-                    mapping_dict[var] = mapping[language]
-            if mapping_dict:
-                df_cleaned = df_cleaned.with_columns(
-                    pl.col(col).replace(mapping_dict).alias(col)
-                )
+            table = schemas_categorical["Quote Flag"]
         else:
-            if col not in schemas_categorical:
+            table = schemas_categorical.get(col)
+            if table is None:
                 continue
-            mapping_dict = {}
-            for var in unique_vars:
-                if var is None:
-                    continue
-                mapping = schemas_categorical[col].get(str(var))
-                if mapping is None:
-                    df_cleaned = df_cleaned.with_columns(
-                        pl.when(pl.col(col) == var)
-                        .then(pl.lit(f"Unknown ({var})"))
-                        .otherwise(pl.col(col))
-                        .alias(col)
-                    )
-                else:
-                    mapping_dict[var] = mapping[language]
-            if mapping_dict:
-                df_cleaned = df_cleaned.with_columns(
-                    pl.col(col).replace(mapping_dict).alias(col)
-                )
+        expr = _decode_expr(col, table)
+        if expr is not None:
+            decode_exprs.append(expr)
+
+    # Each expression reads only its own column, so all the decodes run in ONE
+    # (core-parallel) with_columns pass instead of several passes per column.
+    if decode_exprs:
+        df_cleaned = df_cleaned.with_columns(decode_exprs)
 
     return df_cleaned
 

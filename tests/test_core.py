@@ -34,6 +34,35 @@ def test_malformed_buy_quote_best_becomes_zero_not_error(tmp_path):
     assert (col[1:] > 0).all()    # the intact cells
 
 
+def test_categorical_decode_known_unknown_null():
+    # Pins the single-pass decode's three cases: a known code maps to its display
+    # value, an unknown non-null code becomes "Unknown (code)", a null stays null.
+    from tse_tick.core import clean_data
+    from tse_tick.schemas import get_schema_individual_stock_95
+
+    schema = get_schema_individual_stock_95()
+    rows = []
+    for exchange in ("11", "77", None):
+        rows.append(
+            {
+                name: (
+                    exchange if name == "Exchange Code"
+                    else "20240104" if name == "Data Date"
+                    else "090000" if "Time" in name and name != "Update Time"
+                    else "090000000000" if name == "Update Time"
+                    else "0"
+                )
+                for name in schema
+            }
+        )
+    df = pl.DataFrame(rows, schema={name: pl.String for name in schema})
+    out = clean_data(df, kind="individual_stock")
+    got = out["Exchange Code"].to_list()
+    assert got[0] == "Tokyo Stock Exchange (TSE)"  # known code decoded
+    assert got[1] == "Unknown (77)"                # unknown code labeled in place
+    assert got[2] is None                          # null stays null
+
+
 def test_buy_quote_vol_dtype_unchanged(tmp_path):
     zp = tmp_path / "HTICST120.20240104.1.zip"
     write_zip(zp, "HTICST120.20240104.1.csv",
