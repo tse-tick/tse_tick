@@ -135,13 +135,13 @@ def clean_data(df, kind="individual_stock", language="en"):
     if kind == "individual_stock":
         # 15 (Volume Flag) intentionally omitted: kept as String so the
         # categorical decode below maps "0"/"128" → "Final"/"Estimated".
+        # "Buy Quote 1 Best" (idx 20) and "Buy Quote Vol 1" (idx 21) are covered
+        # by the float/int cast loops below like every sibling column; the strict
+        # pre-casts they used to get here made one malformed value abort the
+        # whole date group instead of becoming 0.
         int_list = [14, 18, 19, 21, 22, 24, 25, 27, 28, 30, 31, 33, 34, 36, 37, 39, 40, 42, 43, 45, 46, 48, 49, 51, 52, 54, 55, 57, 58, 60, 61, 63, 64, 66, 67, 69, 70, 72, 73, 75, 76, 78, 79, 81, 82, 84, 85, 87, 88, 90, 91, 93, 94]
         float_list = [11, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47, 50, 53, 56, 59, 62, 65, 68, 71, 74, 77, 80, 83, 86, 89, 92]
         time_list = [6, 7, 8]
-        df_cleaned = df_cleaned.with_columns(
-            pl.col("Buy Quote 1 Best").cast(pl.Float64),
-            pl.col("Buy Quote Vol 1").cast(pl.Float64),
-        )
     elif kind in SUMMARY_TYPES:
         int_list = []
         float_list = []

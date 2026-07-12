@@ -25,7 +25,7 @@ from typing import Iterable, Optional, Union, cast
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, OneShotMemoryError
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, OneShotMemoryError, PartialIngestWarning
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -1050,7 +1050,15 @@ def extract_to_store(
         >>> df = tse_tick.extract_to_store("G:/NEEDS", "toyota_sb_store",
         ...                                "202201", ["7203", "9984"])
     """
-    from tse_tick.query import _query_extract_batch
+    # Import (and so the DuckDB dependency check) stays FIRST: Stage 1 can run
+    # for hours, and a missing [query] extra must fail before it, not after.
+    try:
+        from tse_tick.query import _query_extract_batch
+    except ImportError as exc:
+        raise ImportError(
+            "extract_to_store requires DuckDB (Stage 2 queries the built store). "
+            "Install the query extra: pip install tse-tick[query]"
+        ) from exc
 
     tickers = _normalize_ticker_filter(ticker)
     if not tickers:
@@ -1063,11 +1071,31 @@ def extract_to_store(
         tickers = _stock_family_roots(tickers)
 
     # Stage 1 — ingest every ticker in one part-pruned pass into the reusable store.
-    ingest_period(
+    stage1_results = ingest_period(
         input_root, output_dir, period, data_type,
         language=language, resume=resume, ticker_filter=tickers,
         max_workers=max_workers,
     )
+    # Stage 1 records lost parts / failed dates in its results instead of raising
+    # (corrupt ZIPs are per-unit, not fatal) — but THIS call is about to return
+    # the queried frame as if it were complete, so surface the loss loudly. The
+    # affected days stay resume-eligible: fixing the raw files and re-running
+    # re-ingests exactly them.
+    lossy = sorted(
+        str(r.get("date") or r.get("zip_path", "?"))
+        for r in stage1_results
+        if r.get("error") or r.get("errors")
+    )
+    if lossy:
+        shown = ", ".join(lossy[:10]) + (", …" if len(lossy) > 10 else "")
+        warnings.warn(
+            f"extract_to_store: Stage 1 lost data on {len(lossy)} date(s) "
+            f"({shown}) — see the logged errors. The returned DataFrame may be "
+            f"missing those rows; the affected days remain resume-eligible, so "
+            f"re-running after fixing the raw files re-ingests exactly them.",
+            PartialIngestWarning,
+            stacklevel=2,
+        )
     # Stage 2 — one DuckDB connection and one scan for ALL tickers (issue #44), replacing
     # the per-ticker query_ticks(limit=None) loop + concat (and, for the two summary types,
     # N full-store scans with one). Returns the same multiset of rows in the same

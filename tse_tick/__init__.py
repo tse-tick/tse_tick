@@ -103,6 +103,7 @@ from .enhanced import (
     parse_period,
     read_ticks,
     NoDataWarning,
+    PartialIngestWarning,
     TruncationWarning,
     LargeResultWarning,
     OneShotMemoryError,
@@ -159,7 +160,8 @@ except ImportError:
 
     def _duckdb_unavailable(*args, **kwargs):
         raise ImportError(
-            "DuckDB is required for query functions. Install it with: pip install duckdb>=0.9.0"
+            "DuckDB is required for query functions. Install the query extra: "
+            "pip install tse-tick[query]  (or: pip install duckdb>=0.9.0)"
         )
 
     query_ticks = _duckdb_unavailable
@@ -175,6 +177,7 @@ __all__ = [
     "discover_zips",
     "parse_period",
     "NoDataWarning",
+    "PartialIngestWarning",
     "TruncationWarning",
     "LargeResultWarning",
     "OneShotMemoryError",

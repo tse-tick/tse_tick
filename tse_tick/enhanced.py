@@ -70,6 +70,19 @@ class LargeResultWarning(UserWarning):
     """
 
 
+class PartialIngestWarning(UserWarning):
+    """Warned when :func:`extract_to_store`'s Stage-1 ingest lost data on the way
+    to the store it is about to query — a corrupt/unreadable ZIP part or a whole
+    failed date — so the returned DataFrame may be missing those rows.
+
+    The affected dates are named in the message. Days that lost parts are left
+    resume-eligible (no coverage marker / an incomplete one), so re-running the
+    same call after fixing the raw files re-ingests exactly those days.
+    Capturable with ``warnings.catch_warnings()``, silenceable with
+    ``warnings.filterwarnings("ignore", category=tse_tick.PartialIngestWarning)``.
+    """
+
+
 class OneShotMemoryError(MemoryError):
     """Raised when a one-shot read (:func:`create_df` / :func:`read_ticks`) would
     exhaust memory — either the cumulative decompressed size crossed the ceiling,

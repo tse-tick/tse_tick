@@ -74,6 +74,31 @@ def test_extract_to_store_empty_tickers_raises(tmp_path):
         tse_tick.extract_to_store(src, store, "20240104", [])
 
 
+def test_extract_to_store_warns_on_lost_parts(tmp_path):
+    # A corrupt part is recorded (not fatal) by Stage 1 — but this call returns
+    # the queried frame as if complete, so it must surface the loss loudly.
+    _seed(tmp_path / "src", "20240104", {1: ["1301"], 2: ["7203"]})
+    leaf = tmp_path / "src" / "個別株式2024" / "TICST120" / "202401"
+    (leaf / "HTICST120.20240104.1.zip").write_bytes(b"not a zip")
+    with pytest.warns(tse_tick.PartialIngestWarning, match="20240104"):
+        df = tse_tick.extract_to_store(
+            str(tmp_path / "src"), str(tmp_path / "store"), "20240104", "7203"
+        )
+    assert df.height > 0  # the surviving part's rows still come back
+
+
+def test_extract_to_store_without_duckdb_fails_fast_and_guided(tmp_path, monkeypatch):
+    import sys
+
+    _seed(tmp_path / "src", "20240104", {1: ["7203"]})
+    monkeypatch.setitem(sys.modules, "duckdb", None)          # import duckdb -> ImportError
+    monkeypatch.delitem(sys.modules, "tse_tick.query", raising=False)  # drop the cached module
+    store = tmp_path / "store"
+    with pytest.raises(ImportError, match=r"tse-tick\[query\]"):
+        tse_tick.extract_to_store(str(tmp_path / "src"), str(store), "20240104", "7203")
+    assert not store.exists()  # failed BEFORE Stage 1 built anything
+
+
 def test_extract_to_store_uses_single_uncapped_scan(tmp_path, monkeypatch):
     """extract_to_store must query via the single-scan batch (issue #44): ONE call for
     all tickers (no per-ticker N+1) and no row cap — a very active ticker over a whole
