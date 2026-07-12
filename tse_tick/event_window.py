@@ -217,13 +217,16 @@ def extract_event_window(
         else:
             eff_time = pl.col("Execution Time")
 
-        # Build the timestamp from the known event_date (so it still works when a
+        # Build the timestamp from the known event day (so it still works when a
         # columns= projection drops Data Date) + the effective time, via the
-        # shared tick-timestamp parser.
-        date_str = f"{event_date[:4]}-{event_date[4:6]}-{event_date[6:]}"
+        # shared tick-timestamp parser. Pass the day as a Date literal (not a
+        # "YYYY-MM-DD" string): _tick_datetime_expr casts date_col to Date, which
+        # is a no-op on a Date but a deprecated (and Polars-2.0-fatal) String->Date
+        # cast on a string — the latter leaked an un-suppressable warning to stderr
+        # from Polars' worker threads (run14 Finding 2).
         df = df.with_columns(
             eff_time.alias("_eff_time"),
-            pl.lit(date_str).alias("_event_date"),
+            pl.lit(event_dt.date()).alias("_event_date"),
         )
         seconds = (
             (_tick_datetime_expr("_event_date", "_eff_time") - pl.lit(event_dt))

@@ -179,6 +179,15 @@ def compute_volatility(
     Expects **English** column names (uses ``Execution Price`` / ``Execution
     Time``).
 
+    Only real trades contribute. ``individual_stock`` frames carry
+    ``Execution Price = 0`` (and a blank ``Execution Time``) on quote-only book
+    rows — the vast majority of a liquid day — so those rows are excluded before
+    any log-return / OHLC is computed. A log-return taken over a zero price is
+    ``inf``/``NaN`` and would otherwise poison every rolling window it lands in,
+    inflating the finite outputs too. The result is aligned to ``df``'s rows (the
+    same convention as :func:`compute_spread`), with ``null`` — not ``NaN`` — for
+    non-trade rows and for warm-up positions whose window holds no return.
+
     Args:
         df: An ``individual_stock`` tick frame.
         window: Rolling window, e.g. ``"5min"``.
@@ -186,54 +195,72 @@ def compute_volatility(
             ``"garman_klass"`` (OHLC range estimator).
 
     Returns:
-        A ``Float64`` Series named ``"volatility"``.
+        A ``Float64`` Series named ``"volatility"``, aligned to ``df``'s rows.
     """
     if method not in ("realized", "garman_klass"):
         raise ValueError(f"method must be 'realized' or 'garman_klass', got {method!r}")
 
-    price = df["Execution Price"].cast(pl.Float64)
-    time_idx = _exec_time_index(df)
+    n = df.height
+    out = pl.Series("volatility", [None] * n, dtype=pl.Float64)
+    if n == 0:
+        return out
 
-    trade_df = pl.DataFrame({
-        "time": time_idx,
-        "price": price,
-    }).sort("time")
+    # Restrict to real trades (Execution Price > 0 and a parseable time), keeping
+    # each row's original position so the rolling result can be scattered back
+    # aligned to df. Quote-only book rows (price 0 / blank Execution Time) are
+    # dropped here rather than nulled later, so log-returns never see a zero price.
+    work = pl.DataFrame({
+        "__row": pl.int_range(0, n, eager=True),
+        "time": _exec_time_index(df),
+        "price": df["Execution Price"].cast(pl.Float64),
+    })
+    trades = work.filter((pl.col("price") > 0) & pl.col("time").is_not_null()).sort("time")
+    if trades.height == 0:
+        return out
+
+    period = _polars_period(window)
 
     if method == "realized":
-        trade_df = trade_df.with_columns(
+        trades = trades.with_columns(
             (pl.col("price") / pl.col("price").shift(1)).log().alias("log_ret")
         )
-        rolling = trade_df.rolling(index_column="time", period=_polars_period(window))
-        vol = rolling.agg(
-            (pl.col("log_ret").pow(2).sum().sqrt()).alias("volatility")
+        agg = trades.rolling(index_column="time", period=period).agg(
+            pl.col("log_ret").pow(2).sum().sqrt().alias("vol"),
+            pl.col("log_ret").count().alias("n_ret"),
         )
-        return vol["volatility"]
+        # A window with no realised return (the leading warm-up tick) is undefined
+        # -> null, consistent with compute_spread / compute_flow_imbalance.
+        vol = agg.select(
+            pl.when(pl.col("n_ret") > 0).then(pl.col("vol")).otherwise(None)
+        ).to_series()
+        return out.scatter(trades["__row"], vol)
 
-    rolling = trade_df.rolling(index_column="time", period=_polars_period(window))
-    hi = rolling.agg(pl.col("price").max().alias("high"))
-    lo = rolling.agg(pl.col("price").min().alias("low"))
-    op = rolling.agg(pl.col("price").first().alias("open"))
-    cl = rolling.agg(pl.col("price").last().alias("close"))
-
-    hi_vals = hi["high"].to_list()
-    lo_vals = lo["low"].to_list()
-    op_vals = op["open"].to_list()
-    cl_vals = cl["close"].to_list()
+    # garman_klass: OHLC range estimator over the same trade-only rolling windows.
+    agg = trades.rolling(index_column="time", period=period).agg(
+        pl.col("price").max().alias("high"),
+        pl.col("price").min().alias("low"),
+        pl.col("price").first().alias("open"),
+        pl.col("price").last().alias("close"),
+    )
 
     import math
 
     ln2 = math.log(2)
     gk_vals: list[float | None] = []
-    for h, l, o, c in zip(hi_vals, lo_vals, op_vals, cl_vals):
-        if None in (h, l, o, c) or l == 0 or o == 0:
+    for hi, lo, op, cl in zip(
+        agg["high"].to_list(),
+        agg["low"].to_list(),
+        agg["open"].to_list(),
+        agg["close"].to_list(),
+    ):
+        if None in (hi, lo, op, cl) or lo == 0 or op == 0:
             gk_vals.append(None)
         else:
-            hl_term = math.log(h / l) ** 2
-            oc_term = math.log(c / o) ** 2
-            gk = math.sqrt(max(0.0, 0.5 * hl_term - (2 * ln2 - 1) * oc_term))
-            gk_vals.append(gk)
+            hl_term = math.log(hi / lo) ** 2
+            oc_term = math.log(cl / op) ** 2
+            gk_vals.append(math.sqrt(max(0.0, 0.5 * hl_term - (2 * ln2 - 1) * oc_term)))
 
-    return pl.Series("volatility", gk_vals, dtype=pl.Float64)
+    return out.scatter(trades["__row"], pl.Series(gk_vals, dtype=pl.Float64))
 
 
 def compute_all_features(
