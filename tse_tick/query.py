@@ -502,7 +502,13 @@ def get_available_dates(
 
     dates = []
     for entry in type_dir.iterdir():
-        if entry.is_dir() and entry.name.startswith("date="):
+        # A date dir holding only the ingest coverage marker (a filtered day on
+        # which the ticker never traded) has no data — not a trading day here.
+        if (
+            entry.is_dir()
+            and entry.name.startswith("date=")
+            and next(entry.glob("*.parquet"), None) is not None
+        ):
             dates.append(entry.name[5:])
 
     return sorted(dates)

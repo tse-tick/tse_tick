@@ -681,7 +681,16 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
         meta = {"date": date_str, "parts": len(zip_paths), "rows": 0, "output_path": None}
         if errors:
             # Lost parts are recorded (audit finding M1), never silently dropped.
+            # No marker either: the day must stay fully re-ingestable.
             meta["errors"] = errors
+        else:
+            # A cleanly-read day that yielded no rows for this request (the
+            # filtered ticker never traded) is DONE for this coverage — record
+            # that in a marker so resume can skip it. Without one, every resumed
+            # run re-probed and re-scanned the day's parts forever.
+            date_dir = Path(output_dir) / data_type / f"date={date_str}"
+            date_dir.mkdir(parents=True, exist_ok=True)
+            _write_coverage_marker(date_dir, ticker_filter, complete=True)
         return meta
     combined = pl.concat(parts, how="vertical")
     # Keep the per-date gc.collect() (issue #43 proposed removing them as "pure waste"):
@@ -774,8 +783,12 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
             # partition must also have been written with coverage that includes
             # THIS request's ticker_filter — a store built for ticker A used to
             # resume-skip a later request for ticker B and silently return
-            # nothing for it (audit finding H2).
-            if existing and not invalid and _coverage_satisfied(date_dir, ticker_filter):
+            # nothing for it (audit finding H2). A marker ALONE (zero parquet
+            # files) also satisfies: a filtered day whose ticker never traded
+            # writes only the marker, and used to be re-scanned on every resume.
+            # A marker-less empty dir still re-ingests (legacy semantics).
+            has_marker = _read_coverage_marker(date_dir) is not None
+            if (existing or has_marker) and not invalid and _coverage_satisfied(date_dir, ticker_filter):
                 continue
         tasks.append((date_str, parts))
 
