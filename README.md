@@ -509,9 +509,10 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
 - **Empty results keep their schema and warn.** A read that matches nothing — a date with no ZIPs (e.g.
   a market holiday), an unknown ticker/index code, or an over-tight filter — returns an empty *but
   fully-typed* DataFrame (all columns present), so chained access like `df["Exchange Code"]` won't raise.
-  `read_ticks` also emits a capturable `tse_tick.NoDataWarning` (a `UserWarning`) for **every** zero-row
-  result across all four types, so "no data" is never silent — trap it with `warnings.catch_warnings()`
-  or silence it with `warnings.filterwarnings("ignore", category=tse_tick.NoDataWarning)`. The `rows=`
+  Both `read_ticks` and `query_ticks` emit a capturable `tse_tick.NoDataWarning` (a `UserWarning`) on
+  **every** zero-row result across all four types, so "no data" is never silent on either read path — trap
+  it with `warnings.catch_warnings()` or silence it with
+  `warnings.filterwarnings("ignore", category=tse_tick.NoDataWarning)`. The `rows=`
   cap likewise emits a capturable `tse_tick.TruncationWarning` when it truncates a result (the signal to
   build a store and use `query_ticks`).
 - **Big queries spill to system temp.** DuckDB-backed queries (`query_ticks`, `query_sql`,

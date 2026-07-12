@@ -15,7 +15,13 @@ from typing import Optional, Literal, Tuple, List, Dict, Union
 import polars as pl
 
 from .core import clean_data, parse_line, _tick_datetime_expr
-from .constants import INDEX_TYPES, SUMMARY_TYPES, validate_data_type
+from .constants import (
+    INDEX_TYPES,
+    SUMMARY_TYPES,
+    validate_data_type,
+    validate_language,
+    validate_time_filter_support,
+)
 from .schemas import (
     get_schema_individual_stock_95,
     get_schema_summary_83,
@@ -410,7 +416,9 @@ def discover_zips(
     already points at a ``.../TICST120`` type folder) — then, if neither matched,
     falls back to a recursive search that handles deeper real-world delivery
     trees such as ``個別株式{year}/TICST120/{yyyymm}/``. Uses the data type's
-    record prefix (e.g. ``HTICST120`` for ``individual_stock``).
+    record prefix (e.g. ``HTICST120`` for ``individual_stock``); for the two
+    index types both the current ``…110`` and the legacy 2016 ``…010``
+    record-code prefixes are searched, so pre-2017 index deliveries are found.
 
     Args:
         input_root: Root of (or a folder above) the NEEDS delivery tree.
@@ -1026,6 +1034,7 @@ def create_df(
         The cleaned DataFrame (empty if ``ticker_filter`` matched no rows).
     """
     ticker_filter = _normalize_ticker_filter(ticker_filter)
+    validate_language(language)
 
     # Explicit year/data_type always win; auto-detection (when on) only fills in
     # whichever was left as None. This lets a correctly-named ZIP in a year-less
@@ -1420,13 +1429,8 @@ def read_ticks(
         ...                 end_time="11:30:00")
     """
     validate_data_type(data_type)
-
-    is_summary = data_type in SUMMARY_TYPES
-    if (start_time is not None or end_time is not None) and is_summary:
-        raise ValueError(
-            f"read_ticks: start_time/end_time are not supported for {data_type!r} "
-            f"(daily aggregates have no Execution Time); filter on 'date' only"
-        )
+    validate_language(language)
+    validate_time_filter_support(data_type, start_time, end_time)
 
     norm_filter = _normalize_ticker_filter(ticker_filter)
 

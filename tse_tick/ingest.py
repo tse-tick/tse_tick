@@ -28,7 +28,7 @@ import polars as pl
 from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, NoDataWarning, OneShotMemoryError, PartialIngestWarning
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
-from tse_tick.constants import validate_data_type
+from tse_tick.constants import validate_data_type, validate_time_filter_support
 
 logger = logging.getLogger(__name__)
 
@@ -1217,6 +1217,13 @@ def extract_to_store(
             "extract_to_store requires DuckDB (Stage 2 queries the built store). "
             "Install the query extra: pip install tse-tick[query]"
         ) from exc
+
+    # Validate arguments UP FRONT — before the (potentially hours-long) Stage-1
+    # ingest — so a bad data_type or an unsupported summary time filter fails in
+    # 0.00 s with a clear ValueError instead of after a wasted ingest with a raw
+    # DuckDB bind error and a partial store on disk (round-16 finding 1).
+    validate_data_type(data_type)
+    validate_time_filter_support(data_type, start_time, end_time)
 
     max_workers = _resolve_max_workers(max_workers)
     tickers = _normalize_ticker_filter(ticker)
