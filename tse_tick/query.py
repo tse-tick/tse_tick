@@ -9,7 +9,7 @@ import polars as pl
 import duckdb
 
 from .constants import SUMMARY_TYPES, validate_data_type
-from .enhanced import TruncationWarning
+from .enhanced import TruncationWarning, _code_matches_family
 
 # Column names are interpolated as double-quoted identifiers (f'"{c}"'), so the
 # only injection risk is a character that closes the quote (") or escapes it
@@ -115,6 +115,9 @@ def query_ticks(
             ``"indices"``, ``"indices_summary"`` (a :class:`DataType` works too).
         ticker: Stock code (``individual_stock``) or index code (``indices``) as
             ``int`` or ``str`` — e.g. ``7203`` or ``"7203"``; ``None`` for all.
+            A 4-char stock code selects its whole share-class family (``"7203"``
+            also returns New Shares ``72031``, matching what a filtered ingest
+            stores for it); a 5-char code reads exactly that share class.
         date: Trading day as ``"YYYYMMDD"``; ``None`` for every stored date.
         start_time: Inclusive lower bound on time-of-day (``"HH:MM:SS"``). For
             ``individual_stock``, quote-only rows (blank ``Execution Time``) are
@@ -171,9 +174,14 @@ def query_ticks(
             source = f"'{glob_pattern}'"
             code_condition = f"substr(\"{code_col}\", 1, 4) = '{ticker_token}'"
         else:
+            # Family matching: a 4-char code also selects its suffixed share
+            # classes' files (ticker=72031.parquet for "7203") — the same rows
+            # Stage 1 ingests for that request. A longer code stays an exact
+            # match, so a single share class remains directly addressable.
             ticker_files = sorted(
                 str(p).replace("\\", "/")
-                for p in type_dir.glob(f"**/ticker={ticker_token}.parquet")
+                for p in type_dir.glob(f"**/ticker={ticker_token}*.parquet")
+                if _code_matches_family(p.stem[len("ticker="):], ticker_token)
             )
             if not ticker_files:
                 # Unknown ticker: return the store schema with 0 rows so chained
@@ -397,8 +405,22 @@ def _query_extract_batch(
             str(p).replace("\\", "/")
         )
     files: list[str] = []
+    seen: set[str] = set()
     for code in ordered_codes:
-        files.extend(sorted(files_by_code.get(code, [])))
+        # Family expansion: a 4-char code also collects its suffixed share-class
+        # files (Stage 1 ingests the whole family for such a request; keying on
+        # the exact stem silently dropped those rows). Dedupe defends a caller
+        # passing overlapping codes.
+        matched = sorted(
+            f
+            for stem, stem_files in files_by_code.items()
+            if _code_matches_family(stem, code)
+            for f in stem_files
+        )
+        for f in matched:
+            if f not in seen:
+                seen.add(f)
+                files.append(f)
     if not files:
         # Every requested ticker absent -> mirror query_ticks's tick all-absent shape
         # (store schema, 0 rows, WITHOUT the Hive date column).
@@ -408,7 +430,11 @@ def _query_extract_batch(
         return pl.read_parquet(any_file, n_rows=0)
 
     source = "[" + ", ".join(f"'{f}'" for f in files) + "]"
-    code_sql = "regexp_extract(filename, 'ticker=([A-Za-z0-9]+)\\.parquet', 1)"
+    # Order by the 4-char FAMILY root of the filename code: a family (7203 +
+    # 72031) is one requested block, ordered by (date, time) within — exactly
+    # what a per-ticker query_ticks("7203") returns for it. Ordering by the full
+    # stem would split the family into per-class blocks.
+    code_sql = "substr(regexp_extract(filename, 'ticker=([A-Za-z0-9]+)\\.parquet', 1), 1, 4)"
     order_cols = [code_sql, '"Data Date"']
     if data_type == "individual_stock":
         order_cols.append(time_expr)
@@ -476,7 +502,13 @@ def get_available_dates(
 
     dates = []
     for entry in type_dir.iterdir():
-        if entry.is_dir() and entry.name.startswith("date="):
+        # A date dir holding only the ingest coverage marker (a filtered day on
+        # which the ticker never traded) has no data — not a trading day here.
+        if (
+            entry.is_dir()
+            and entry.name.startswith("date=")
+            and next(entry.glob("*.parquet"), None) is not None
+        ):
             dates.append(entry.name[5:])
 
     return sorted(dates)

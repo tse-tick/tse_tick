@@ -4,10 +4,13 @@ NEEDS numbers each day's TICST120 parts in ascending stock-code order, code-sort
 within a part, but cuts parts at a fixed ~55 MB size — so a high-volume code spans
 a CONTIGUOUS run of consecutive parts (Phase 0 finding; see
 ``benchmark_extraction_7203/SPIKE_FINDINGS.md``). To read one ticker we probe each
-part's first record to bound the search, then walk backward from the upper-bound
-part until a part with no match, opening only that run. Degrades to "open all
-parts" when the ascending-code layout can't be confirmed, so it is never less
-correct than a full scan.
+part's FIRST record only: with non-decreasing start codes, part ``j`` can hold code
+``t`` iff ``starts[j] <= t <= starts[j+1]`` (the last part unbounded above), so the
+run is selected arithmetically — no part is ever decompressed beyond its first
+line here. At most one boundary part that provably-could-but-doesn't hold the code
+is over-selected (only when a start code equals ``t`` exactly); the vectorized
+filtered read absorbs it. Degrades to "open all parts" when the ascending-code
+layout can't be confirmed, so it is never less correct than a full scan.
 """
 from __future__ import annotations
 
@@ -63,43 +66,24 @@ def part_start_code(zip_path: Path) -> Optional[int]:
     return int(code) if code is not None and code.isdigit() else None
 
 
-def _part_contains(zip_path: Path, tickers: Set[str]) -> bool:
-    """True if any record's field-5 code is in ``tickers``.
-
-    Early-exits on the first match — cheap for a part that HAS the ticker (a
-    code-sorted part holding a high code reaches it quickly); a full scan only for a
-    part that does NOT (the run-terminating boundary part).
-    """
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            names = zf.namelist()
-            if not names:
-                return False
-            with zf.open(names[0]) as f:
-                for raw in f:
-                    code = extract_stock_code(raw)
-                    if code is not None and code in tickers:
-                        return True
-    except (zipfile.BadZipFile, EOFError, OSError):
-        return False
-    return False
-
-
 def select_parts_for_day(
     part_paths: List[Path], tickers: Iterable[str]
 ) -> Optional[List[Path]]:
     """Contiguous run(s) of parts (ONE day, ascending) that hold ``tickers``.
 
     A high-volume code straddles a contiguous run of consecutive parts (parts are
-    size-split, not code-split). Method: probe start codes (cheap); per ticker take
-    ``b = last part with start <= code`` (upper bound — parts after ``b`` start
-    above the code, so cannot hold it), then scan BACKWARD from ``b`` keeping every
-    part that actually contains the code, stopping at the first that does not. Union
-    the runs across tickers.
+    size-split, not code-split). Method: probe start codes (cheap — first line
+    only), then bound each ticker's run arithmetically: part ``j`` can hold code
+    ``t`` iff ``starts[j] <= t <= starts[j+1]`` (last part unbounded above). The
+    old implementation proved a boundary part's non-containment by decompressing
+    and Python-parsing it line-by-line; the probed starts already imply it, except
+    when a start equals ``t`` exactly — there the boundary part is kept (it may
+    hold the code's head/tail rows) and the filtered read drops it cheaply if not.
+    Union the runs across tickers.
 
     Returns ``None`` ("open all parts") if any probe fails or the start codes are
-    not non-decreasing (ascending-code layout unconfirmed). Returns an empty list if
-    every ticker is below the day's minimum code (absent).
+    not non-decreasing (ascending-code layout unconfirmed). A ticker below the
+    day's minimum code has no code-range run (only the appendix part is kept).
     """
     # Nothing to prune with 0 or 1 part — read it in full. This also means a lone,
     # possibly non-code-sorted part can never be wrongly excluded by the probe.
@@ -120,10 +104,16 @@ def select_parts_for_day(
         t4 = str(t).strip()[:4]
         if not t4.isdigit():
             return None
-        i = bisect.bisect_right(starts, int(t4)) - 1
-        while i >= 0 and _part_contains(part_paths[i], {t4}):
-            chosen.add(i)
-            i -= 1
+        code = int(t4)
+        # hi: last part starting at or below the code — parts after it start
+        # above the code and cannot hold it.
+        hi = bisect.bisect_right(starts, code) - 1
+        if hi < 0:
+            continue  # below the day's minimum code: no code-range run
+        # lo: first part whose NEXT part starts at or above the code — parts
+        # before it end below the code (their next start is below it).
+        lo = bisect.bisect_left(starts, code, 1) - 1
+        chosen.update(range(lo, hi + 1))
 
     # The LAST part also carries the day's trailing appendix — off-auction /
     # special records appended after the main ascending-code block, holding

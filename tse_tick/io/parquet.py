@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +30,15 @@ _DEFAULT_PARTITION_COLS: dict[str, list[str]] = {
 
 _INDEX_DATA_TYPES = INDEX_TYPES
 _UNKNOWN_CODE_RE = re.compile(r"^Unknown \((.+)\)$")
+
+# Per-date ticker-file fan-out: write concurrently only when a date produces at
+# least this many files (a full-frame individual_stock day writes thousands;
+# tiny fan-outs would pay more in thread setup than they save). The thread
+# count is deliberately small and NOT scaled to os.cpu_count(): the writes
+# release the GIL in Polars' Rust writer, but per-date process workers may
+# already be running several of these loops at once.
+_PARALLEL_WRITE_MIN_FILES = 16
+_PARALLEL_WRITE_THREADS = 8
 
 
 def _index_code_lookup() -> dict[str, str]:
@@ -100,20 +110,29 @@ def _drop_null_date_rows(df: pl.DataFrame, date_col: str) -> pl.DataFrame:
 
 
 def _coerce_time_cols(df: pl.DataFrame) -> pl.DataFrame:
-    result = df.clone()
-    for col, dtype in zip(result.columns, result.dtypes):
-        if dtype == pl.String:
-            sample_vals = result[col].drop_nulls()
-            if len(sample_vals) > 0:
-                sample = sample_vals[0]
-                if isinstance(sample, datetime.time):
-                    result = result.with_columns(
-                        pl.col(col).map_elements(
-                            lambda t: t.strftime("%H%M%S") if isinstance(t, datetime.time) else t,
-                            return_dtype=pl.String,
-                        )
-                    )
-    return result
+    """Convert any ``datetime.time``-holding column to ``"HHMMSS"`` strings.
+
+    Only ``pl.Time`` (native) and ``pl.Object`` (opaque Python values) columns
+    can hold time-of-day values — a ``pl.String`` column holds ``str``, never
+    ``datetime.time``, so the old String-dtype guard could never fire, yet it
+    materialized a ``drop_nulls()`` copy of every String column (~90 for
+    ``individual_stock``) on every partition write. The pipeline stores times as
+    strings throughout, so this normally sees nothing to do.
+    """
+    exprs = []
+    for col, dtype in zip(df.columns, df.dtypes):
+        if dtype == pl.Time:
+            exprs.append(pl.col(col).dt.to_string("%H%M%S").alias(col))
+        elif dtype == pl.Object:
+            sample_vals = df[col].drop_nulls()
+            if len(sample_vals) > 0 and isinstance(sample_vals[0], datetime.time):
+                exprs.append(
+                    pl.col(col).map_elements(
+                        lambda t: t.strftime("%H%M%S") if isinstance(t, datetime.time) else t,
+                        return_dtype=pl.String,
+                    ).alias(col)
+                )
+    return df.with_columns(exprs) if exprs else df
 
 
 def write_partitioned_parquet(
@@ -121,6 +140,7 @@ def write_partitioned_parquet(
     output_dir: str,
     data_type: str,
     partition_cols: Optional[list[str]] = None,
+    compression: str = "zstd",
 ) -> str:
     """Write a cleaned frame to the Hive-partitioned Parquet store.
 
@@ -137,6 +157,11 @@ def write_partitioned_parquet(
         output_dir: Store root; ``<data_type>/`` is created under it.
         data_type: One of the four NEEDS types (selects the default partitioning).
         partition_cols: Override the default partition columns (advanced use).
+        compression: Parquet codec (default ``"zstd"`` — ~30% smaller and ~3x
+            faster to read than ``"snappy"`` on this data per the tracked format
+            benchmark; pass ``"snappy"`` to match pre-0.14 stores). The codec is
+            per-file Parquet metadata, so mixed-codec stores read fine — no
+            re-ingest needed.
 
     Returns:
         The absolute path of the ``<output_dir>/<data_type>`` directory.
@@ -202,19 +227,39 @@ def write_partitioned_parquet(
                         by_target[key] = []
                         target_order.append(key)
                     by_target[key].append(ticker_group.drop(["_date_str"]))
+                tasks: list[tuple[pl.DataFrame, Path]] = []
                 for key in target_order:
                     frames = by_target[key]
                     out_df = frames[0] if len(frames) == 1 else pl.concat(frames, how="vertical")
                     fpath = date_dir / f"ticker={key}.parquet"
                     tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
                     pending.append((tmp, fpath))
-                    out_df.write_parquet(tmp, compression="snappy")
+                    tasks.append((out_df, tmp))
+                # The per-file writes are independent and release the GIL in
+                # Polars' Rust writer, so a big fan-out (a full-frame day is
+                # thousands of ticker files) runs them across a small thread
+                # pool. Only the WRITES are concurrent; the commit loop below
+                # stays sequential, so the all-or-nothing cleanup contract is
+                # unchanged. Small fan-outs skip the pool (thread setup would
+                # dominate).
+                if len(tasks) >= _PARALLEL_WRITE_MIN_FILES:
+                    workers = min(_PARALLEL_WRITE_THREADS, len(tasks))
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        futures = [
+                            pool.submit(out_df.write_parquet, tmp, compression=compression)
+                            for out_df, tmp in tasks
+                        ]
+                        for f in futures:
+                            f.result()
+                else:
+                    for out_df, tmp in tasks:
+                        out_df.write_parquet(tmp, compression=compression)
             else:
                 out_df = date_group.drop(["_date_str"])
                 fpath = date_dir / f"{date_str_val}.parquet"
                 tmp = date_dir / f".{fpath.name}.{os.getpid()}.tmp"
                 pending.append((tmp, fpath))
-                out_df.write_parquet(tmp, compression="snappy")
+                out_df.write_parquet(tmp, compression=compression)
             for tmp, fpath in pending:
                 os.replace(tmp, fpath)
         except BaseException:
@@ -282,7 +327,9 @@ def read_parquet_partition(
     return df
 
 
-def write_event_window_parquet(df: pl.DataFrame, output_dir: str) -> None:
+def write_event_window_parquet(
+    df: pl.DataFrame, output_dir: str, compression: str = "zstd"
+) -> None:
     """Append event-window ticks to the **event-window** Parquet store.
 
     Writes the separate event-window store (laid out as
@@ -337,7 +384,7 @@ def write_event_window_parquet(df: pl.DataFrame, output_dir: str) -> None:
         # in write_partitioned_parquet).
         tmp = part_dir / f".{fpath.name}.{os.getpid()}.tmp"
         try:
-            out_df.write_parquet(tmp, compression="snappy")
+            out_df.write_parquet(tmp, compression=compression)
             os.replace(tmp, fpath)
         except BaseException:
             try:

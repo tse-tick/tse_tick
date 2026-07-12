@@ -6,7 +6,6 @@ This script demonstrates the most common use cases for the tse_tick package.
 """
 
 import tse_tick
-import pandas as pd
 from pathlib import Path
 
 
@@ -91,8 +90,40 @@ def main():
     mapping = tse_tick.get_japanese_column_mapping()
     print(f"\n✓ Column mapping dictionary has {len(mapping)} entries")
 
-    # Example 5: Package information
-    print("\n\n5. Package Information")
+    # Example 5: The two-stage pipeline — ingest once, query many times
+    print("\n\n5. Two-Stage Extraction (ingest -> Parquet store -> query)")
+    print("-" * 70)
+
+    needs_root = "path/to/NEEDS"       # the delivery tree (any nesting works)
+    store_dir = "path/to/parquet_store"
+
+    if Path(needs_root).exists():
+        # One call runs both stages: Stage 1 ingests the tickers for the period
+        # into a reusable, part-pruned Parquet store; Stage 2 queries it back.
+        # A 4-char code selects its whole share-class family (7203 + 72031).
+        # max_workers="auto" parallelizes the per-date ingest (cores+RAM-capped);
+        # from a script it must run under the __main__ guard, as here.
+        df = tse_tick.extract_to_store(
+            needs_root,
+            store_dir,
+            "202301",                   # YYYY / YYYYMM / YYYYMMDD or a range
+            ["7203", "9984"],           # one code or a list
+            max_workers="auto",
+        )
+        print(f"extracted {df.height} rows for 7203 + 9984")
+
+        # The store persists — later reads are sub-second, no raw scan:
+        toyota_am = tse_tick.query_ticks(
+            store_dir, ticker=7203, date="20230104",
+            start_time="09:00:00", end_time="11:30:00",
+        )
+        print(f"repeat query from the store: {toyota_am.height} rows")
+    else:
+        print(f"NEEDS root not found: {needs_root}")
+        print("Update needs_root to try the two-stage pipeline (requires tse-tick[query]).")
+
+    # Example 6: Package information
+    print("\n\n6. Package Information")
     print("-" * 70)
     print(tse_tick.get_info())
 

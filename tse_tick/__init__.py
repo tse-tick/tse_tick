@@ -12,7 +12,7 @@ Developed at Keio University, Nakatsuma Seminar.
 # tse_tick/__init__.py
 import polars as pl
 
-__version__ = "0.13.3"
+__version__ = "0.14.0"
 __author__ = "Kazumi Li, Masataka Hayashi, Peter Romero"
 __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
@@ -103,6 +103,7 @@ from .enhanced import (
     parse_period,
     read_ticks,
     NoDataWarning,
+    PartialIngestWarning,
     TruncationWarning,
     LargeResultWarning,
     OneShotMemoryError,
@@ -159,7 +160,8 @@ except ImportError:
 
     def _duckdb_unavailable(*args, **kwargs):
         raise ImportError(
-            "DuckDB is required for query functions. Install it with: pip install duckdb>=0.9.0"
+            "DuckDB is required for query functions. Install the query extra: "
+            "pip install tse-tick[query]  (or: pip install duckdb>=0.9.0)"
         )
 
     query_ticks = _duckdb_unavailable
@@ -175,6 +177,7 @@ __all__ = [
     "discover_zips",
     "parse_period",
     "NoDataWarning",
+    "PartialIngestWarning",
     "TruncationWarning",
     "LargeResultWarning",
     "OneShotMemoryError",

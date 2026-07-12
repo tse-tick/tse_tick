@@ -15,13 +15,21 @@ def _mk(tmp, day, n, codes):
         individual_stock_csv(day, codes, rows_per_ticker=6))
 
 
-def test_prune_keeps_only_holding_part_across_two_days(tmp_path):
+def test_prune_keeps_only_holding_run_across_two_days(tmp_path):
+    # Four parts per day; 7203 sits strictly INSIDE part 2's code range (no part
+    # start equals it), so the arithmetic run is exactly part 2 — parts 1 and 3
+    # are excluded without opening them; part 4 is the always-kept appendix.
+    day_parts = {1: ["1301"], 2: ["7000", "7203", "7500"], 3: ["8001"], 4: ["9999"]}
     zips = [
-        _mk(tmp_path, "20240104", 1, ["1301"]), _mk(tmp_path, "20240104", 2, ["7203"]),
-        _mk(tmp_path, "20240105", 1, ["1301"]), _mk(tmp_path, "20240105", 2, ["7203"]),
+        _mk(tmp_path, day, n, codes)
+        for day in ("20240104", "20240105")
+        for n, codes in day_parts.items()
     ]
     kept = sorted(p.name for p in _prune_parts_by_ticker(zips, {"7203"}))
-    assert kept == ["HTICST120.20240104.2.zip", "HTICST120.20240105.2.zip"]
+    assert kept == [
+        "HTICST120.20240104.2.zip", "HTICST120.20240104.4.zip",
+        "HTICST120.20240105.2.zip", "HTICST120.20240105.4.zip",
+    ]
 
 
 def _seed_day(root, day, mapping):   # mapping: {part_no: [codes]}

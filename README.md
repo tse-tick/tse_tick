@@ -15,7 +15,7 @@ A Python library for parsing, filtering, and querying Nikkei NEEDS tick data fro
 - **4 data types** — TICST120 (individual stock ticks, 95 cols), TICSS110 (daily stock summary, 82 cols), TICIT110 (index ticks, 10 cols), TICIS110 (daily index summary, 17 cols)
 - **Multi-era format support** — 2016 fixed-width (TICIT010/TICIS010) and 2017-2025 CSV, auto-detected from the ZIP filename
 - **Polars backend** — fast CSV parsing, vectorized cleaning, memory-efficient
-- **CLI batch ingestion** — `tse-tick ingest` converts entire years/months/date ranges to partitioned Parquet; `--parallel N` spreads independent trading days across a RAM-aware process pool
+- **CLI batch ingestion** — `tse-tick ingest` converts entire years/months/date ranges to partitioned Parquet; independent trading days spread across a RAM-aware process pool by default (`--parallel auto`)
 - **Ticker filtering** (`--tickers`) — keep only specific stock codes at read time
 - **Event-window extraction** (`--filter-csv`) — extract ±N minute windows around corporate events with automatic after-hours reaction-anchor shifting
 - **Bilingual columns** — English and Japanese column names via `--language en|jp`
@@ -194,10 +194,11 @@ features = tse_tick.compute_all_features(df)
 ```python
 import tse_tick
 
-# The if __name__ == "__main__": guard is REQUIRED for max_workers > 1 when this
-# runs as a .py script: parallel ingest starts 'spawn' worker processes, which
-# re-import the script — an unguarded top-level call would re-run itself in every
-# worker (tse_tick raises an explanatory error if you forget).
+# The if __name__ == "__main__": guard is REQUIRED for parallel ingest when this
+# runs as a .py script: workers start with the 'spawn' method, which re-imports
+# the script — an unguarded top-level call would re-run itself in every worker
+# (tse_tick raises an explanatory error if you forget). In Jupyter/the REPL there
+# is nothing to re-import, so parallel ingest is on by default there.
 if __name__ == "__main__":
     # Build a reusable store for one or several tickers and get the DataFrame back —
     # in one call. No 10M-row cap, so a whole month of active tickers comes back
@@ -208,7 +209,7 @@ if __name__ == "__main__":
         "/path/to/PARQUET_STORE",     # reusable store (built once; resume-safe, part-pruned)
         "202402",                     # a day, month, year, or range (e.g. "2021-2023")
         ["7203", "9984"],             # one code, or a list — Toyota + SoftBank
-        max_workers=8,                # parallel per-date ingest (capped by cores + RAM)
+        max_workers="auto",           # parallel per-date ingest (capped by cores + RAM)
     )
     # ...every later read of the store is sub-second:
     df = tse_tick.query_ticks("/path/to/PARQUET_STORE", data_type="individual_stock",
@@ -230,6 +231,13 @@ df = tse_tick.read_ticks(
     end_time="11:30:00",
 )
 ```
+
+> **Share-class families.** A 4-char `individual_stock` code selects its whole
+> share-class **family** everywhere: `"7203"` (and equally `"72031"`) reads Toyota
+> plus its suffixed classes (New Shares `72031`, …) in `read_ticks`,
+> `extract_to_store`, and `query_ticks` — matching what a filtered ingest has
+> always stored. On a built store, `query_ticks(ticker="72031")` (the 5-char
+> form) reads exactly that class.
 
 > **⚠️ Reading a lot at once? Mind the 10M-row cap.** `read_ticks` **and** `query_ticks`
 > both return at most **10,000,000 rows** per call by default — on hitting it, the
@@ -371,8 +379,9 @@ Event-window filtered ingest writes per-date files:
 | `--output-root` (required) | Root directory for Parquet output |
 | `--period` | Date range: `YYYY`, `YYYY-YYYY`, `YYYYMM-YYYYMM`, or `YYYYMMDD-YYYYMMDD` |
 | `--language` | Column name language: `en` (default) or `jp` |
-| `--parallel` | Parallel worker processes for per-date ingest (default 1 = serial). Applies to `--period`, `--year`, and `--flat`; not to `--filter-csv` event windows. Capped by the machine's logical cores **and** available RAM (each worker holds a whole trading day's frame). |
+| `--parallel` | Parallel worker processes for per-date ingest: a positive int or `auto` (**default**: the machine's logical cores). Applies to `--period`, `--year`, and `--flat`; not to `--filter-csv` event windows. Capped by the machine's logical cores **and** available RAM (each worker holds a whole trading day's frame). Pass `1` to force serial. |
 | `--no-resume` | Disable resume (reprocess dates even if output exists) |
+| `--compression` | Parquet codec: `zstd` (default — smaller, faster reads) or `snappy` (matches pre-0.14 stores). Mixed-codec stores read fine, so no re-ingest is needed. |
 | `--tickers` | Comma-separated codes or `@file.txt` with one per line. Keeps only these stocks. |
 | `--filter-csv` | Path to event filter CSV. Enables event-window mode. Overrides `--tickers`. |
 | `--window` | Window minutes around each event's reaction anchor (default 120). Only with `--filter-csv`. |
@@ -429,9 +438,9 @@ One-shot read: raw NEEDS ZIPs → a ticker/time-filtered DataFrame, no store.
 - `date` — a day `"YYYYMMDD"`, month `"YYYYMM"`, year `"YYYY"`, or a `"start-end"` range
 - `prune_parts` — for `individual_stock` + a `ticker_filter`, open only the contiguous run of numbered parts that hold the ticker (plus the day's trailing appendix part) instead of every part. Falls back to a full scan if the ascending-code layout can't be confirmed, so results are identical — only faster. Default `True`; set `False` to force a full scan.
 
-### `extract_to_store(input_root, output_dir, period, ticker, *, data_type="individual_stock", start_time=None, end_time=None, language="en", resume=True, max_workers=1)`
+### `extract_to_store(input_root, output_dir, period, ticker, *, data_type="individual_stock", start_time=None, end_time=None, language="en", resume=True, max_workers=None, compression="zstd")`
 
-Two-stage in one call: ingest `ticker` for `period` into a reusable, part-pruned Parquet store (`output_dir`), then return the queried DataFrame. `ticker` accepts **one code or an iterable** (`"7203"` or `["7203", "9984"]`); several tickers are ingested in one pass and returned concatenated. Prefer it over `read_ticks` when the data will be read more than once — the raw scan is paid once, later `query_ticks` reads are sub-second, and there's no 10M-row cap. The result is scoped to `period` even on a reused store holding other days. `max_workers>1` parallelizes the per-date ingest (from a script, the call must sit inside `if __name__ == "__main__":` — spawn workers re-import your script). Everything is returned as ONE in-memory DataFrame — past ~10M rows a capturable `LargeResultWarning` fires; for big periods read the built store in `query_ticks` slices instead. Requires the `[query]` extra (DuckDB).
+Two-stage in one call: ingest `ticker` for `period` into a reusable, part-pruned Parquet store (`output_dir`), then return the queried DataFrame. `ticker` accepts **one code or an iterable** (`"7203"` or `["7203", "9984"]`); several tickers are ingested in one pass and returned concatenated, and a 4-char code selects its whole share-class family (`"7203"` ⇒ 7203 + 72031 …). Prefer it over `read_ticks` when the data will be read more than once — the raw scan is paid once, later `query_ticks` reads are sub-second, and there's no 10M-row cap. The result is scoped to `period` even on a reused store holding other days. If Stage 1 lost data (a corrupt part), a capturable `PartialIngestWarning` names the affected dates. `max_workers` — an int, `"auto"` (logical cores, RAM-capped), or `None` (default: the `TSE_TICK_MAX_WORKERS` env var if set; auto in Jupyter/REPL; serial from a script — parallel from a script requires the `if __name__ == "__main__":` guard, since spawn workers re-import your script). Everything is returned as ONE in-memory DataFrame — past ~10M rows a capturable `LargeResultWarning` fires; for big periods read the built store in `query_ticks` slices instead. Requires the `[query]` extra (DuckDB).
 
 ---
 
@@ -461,7 +470,14 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
 
 - **Quiet by default.** `create_df`, `read_ticks`, and the `ingest_*` functions emit diagnostics via
   `logging`, not `print`, so they never write to stdout (or crash on non-ASCII paths) unless you opt
-  in with `logging.basicConfig(level=logging.INFO)`. The `tse-tick` CLI still prints progress.
+  in with `logging.basicConfig(level=logging.INFO)` — worth doing for a long ingest: the per-date
+  progress lines carry an `[i/N]` counter and resumed runs log how many dates they skipped. The
+  `tse-tick` CLI still prints progress.
+- **Parallel ingest defaults.** `max_workers` accepts `"auto"` (logical cores, RAM-capped). The
+  default (`None`) resolves to the `TSE_TICK_MAX_WORKERS` env var (an int or `auto`) when set, to
+  auto in Jupyter/the REPL (spawn-safe there), and to serial from a `.py` script — where parallel
+  runs need the `if __name__ == "__main__":` guard because spawn workers re-import your script.
+  The CLI defaults to `--parallel auto`.
 - **Windows-friendly `print`.** On Windows, importing `tse_tick` switches Polars to ASCII table borders
   **and** reconfigures `stdout`/`stderr` to UTF-8, so a bare `print(df)` no longer raises
   `UnicodeEncodeError` on a cp1252 console — neither the box-drawing borders nor the content glyphs

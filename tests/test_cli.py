@@ -209,3 +209,32 @@ def test_cli_export_two_stage_store(tmp_path, monkeypatch, capsys):
     df = pl.read_csv(out)
     assert set(df["Stock Code"].cast(str).str.slice(0, 4).to_list()) == {"7203"}
     assert df.height == 20                       # 7203 rows from BOTH parts captured
+
+
+def test_cli_export_two_stage_store_multi_ticker(tmp_path, monkeypatch):
+    """`export --store` with several --tickers goes through extract_to_store
+    (multi-ticker since 0.12.0) — it used to silently fall back to a one-shot
+    read (capped at 10M rows) without building the store."""
+    import polars as pl
+    pytest.importorskip("duckdb")
+
+    month = tmp_path / "個別株式2024" / "TICST120" / "202401"
+    month.mkdir(parents=True)
+    write_zip(month / "HTICST120.20240104.1.zip", "HTICST120.20240104.1.csv",
+              individual_stock_csv("20240104", ["1301", "7203"], rows_per_ticker=10))
+    write_zip(month / "HTICST120.20240104.2.zip", "HTICST120.20240104.2.csv",
+              individual_stock_csv("20240104", ["9984", "9999"], rows_per_ticker=10))
+    out = tmp_path / "pair.csv"
+    store = tmp_path / "store"
+    monkeypatch.setattr("sys.argv", [
+        "tse-tick", "export", "--data-type", "individual_stock",
+        "--input-root", str(tmp_path), "--tickers", "7203,9984",
+        "--period", "20240104", "--output", str(out), "--store", str(store),
+    ])
+    main()
+    date_dir = store / "individual_stock" / "date=20240104"
+    assert (date_dir / "ticker=7203.parquet").exists()
+    assert (date_dir / "ticker=9984.parquet").exists()
+    df = pl.read_csv(out)
+    assert set(df["Stock Code"].cast(str).str.slice(0, 4).to_list()) == {"7203", "9984"}
+    assert df.height == 20  # 10 rows per ticker, one part each

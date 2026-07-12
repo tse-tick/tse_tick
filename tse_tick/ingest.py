@@ -25,7 +25,7 @@ from typing import Iterable, Optional, Union, cast
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, LargeResultWarning, OneShotMemoryError
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, NoDataWarning, OneShotMemoryError, PartialIngestWarning
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -49,6 +49,77 @@ _LARGE_EXTRACT_ROWS = 10_000_000  # extract_to_store warns before materializing 
 def _cpu_cap() -> int:
     """This machine's logical core count — the CPU ceiling for parallel ingest."""
     return os.cpu_count() or 1
+
+
+# Opt-in default worker count for the Python API (int or "auto"). The CLI and
+# interactive sessions default to auto on their own; a plain script stays serial
+# unless this is set (or max_workers is passed) — see _resolve_max_workers.
+_WORKERS_ENV = "TSE_TICK_MAX_WORKERS"
+_workers_hint_emitted = False
+
+
+def _interactive_main() -> bool:
+    """True in a REPL/Jupyter/`python -c` session — ``__main__`` has no
+    ``__file__`` there, so a spawn worker's bootstrap has no user script to
+    re-import and parallel ingest is safe without a ``__main__`` guard."""
+    return getattr(sys.modules.get("__main__"), "__file__", None) is None
+
+
+def _log_workers_hint_once() -> None:
+    """One-time nudge when a multi-core machine defaults to a serial ingest."""
+    global _workers_hint_emitted
+    if _workers_hint_emitted:
+        return
+    _workers_hint_emitted = True
+    logger.info(
+        "Ingesting serially. This machine has %d logical cores — pass "
+        "max_workers=\"auto\" (or set %s=auto) to run the independent per-date "
+        "ingests in parallel; from a script, the call must sit under "
+        "if __name__ == \"__main__\":", _cpu_cap(), _WORKERS_ENV,
+    )
+
+
+def _resolve_max_workers(max_workers, allow_default_auto: bool = True) -> int:
+    """Resolve a ``max_workers`` value (int, ``"auto"``, or ``None``) to an int.
+
+    ``"auto"`` requests this machine's logical core count (the RAM-aware
+    :func:`_cap_workers` still clamps it later). ``None`` — the API default —
+    resolves to the ``TSE_TICK_MAX_WORKERS`` env var when set, to auto in an
+    interactive session (safe: spawn has nothing to re-import there), and to
+    serial (1, plus a one-time hint on a multi-core box) in a script. A BLIND
+    auto default for scripts would be unsafe: spawn re-imports the calling
+    script in every worker, so an unguarded script's top-level side effects
+    would re-run once per worker before the bootstrap guard stops it. Resolve
+    ONLY in the parent process, never in worker-executed code.
+    ``allow_default_auto=False`` keeps a serial-only path quiet: ``None`` /
+    ``"auto"`` / env opt-ins resolve to 1 with no hint, and only an explicit
+    int survives (its >1 warning stays meaningful).
+    """
+    if isinstance(max_workers, str):
+        if max_workers.strip().lower() != "auto":
+            raise ValueError(
+                f"max_workers must be a positive int, 'auto', or None; got {max_workers!r}"
+            )
+        return _cpu_cap() if allow_default_auto else 1
+    if max_workers is None:
+        if not allow_default_auto:
+            return 1
+        env = os.environ.get(_WORKERS_ENV, "").strip()
+        if env:
+            if env.lower() == "auto":
+                return _cpu_cap()
+            try:
+                return max(1, int(env))
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid %s=%r (expected an int or 'auto')", _WORKERS_ENV, env
+                )
+        if _interactive_main():
+            return _cpu_cap()
+        if _cpu_cap() > 1:
+            _log_workers_hint_once()
+        return 1
+    return max(1, int(max_workers))
 
 
 def _available_ram_gb() -> float:
@@ -144,6 +215,33 @@ def _cap_workers(requested: int, per_worker_gb: Optional[float] = None) -> int:
                 workers, per_worker_gb,
             )
     return workers
+
+
+def _require_input_root(input_root: str) -> None:
+    """Fail fast on a nonexistent input root.
+
+    The structured-root discovery globs, and globbing a mistyped path just
+    matches nothing — the ingest then reported "Done: 0 succeeded, 0 failed"
+    as if it were success. The flat path has always raised; now both do.
+    """
+    if not Path(input_root).exists():
+        raise FileNotFoundError(f"Input root not found: {input_root}")
+
+
+def _warn_zero_discovery(input_root: str, data_type: str, scope: str) -> None:
+    """Capturable warning when discovery finds no ZIPs at all for a request.
+
+    Not an error: a period that is all holidays legitimately matches nothing.
+    But silence here made a wrong data_type or a root one level too deep look
+    like a successful no-op ingest.
+    """
+    warnings.warn(
+        f"No {data_type!r} ZIPs found under {input_root!r} for {scope}. "
+        f"Check that the root contains the NEEDS delivery tree for this data "
+        f"type (any nesting works) and that the period has trading days.",
+        NoDataWarning,
+        stacklevel=3,
+    )
 
 
 def _reject_bootstrap_reimport() -> None:
@@ -264,7 +362,15 @@ def _coverage_satisfied(date_dir: Path, ticker_filter: Optional[set]) -> bool:
     if marker is None:
         if wanted is None:
             return True
-        return all((Path(date_dir) / f"ticker={t}.parquet").exists() for t in wanted)
+        # Family matching: a filtered Stage 1 ingests the requested code's whole
+        # share-class family, and on a day the parent didn't trade only a
+        # suffixed class file may exist — that still covers the (rooted) request.
+        codes_present = {
+            p.stem[len("ticker="):] for p in Path(date_dir).glob("ticker=*.parquet")
+        }
+        return all(
+            any(_code_matches_family(c, t) for c in codes_present) for t in wanted
+        )
     if not marker.get("complete", True):
         return False
     if marker.get("full"):
@@ -306,6 +412,7 @@ def ingest_single_zip(
     year: Optional[int] = None,
     language: str = "en",
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> dict:
     """Ingest one raw NEEDS ZIP into the Hive-partitioned Parquet store.
 
@@ -350,7 +457,7 @@ def ingest_single_zip(
             "rows": 0,
             "output_path": None,
         }
-    out_path = write_partitioned_parquet(df, output_dir, data_type)
+    out_path = write_partitioned_parquet(df, output_dir, data_type, compression=compression)
 
     return {
         "zip_path": str(path.resolve()),
@@ -361,7 +468,7 @@ def ingest_single_zip(
     }
 
 
-def _ingest_single_zip_safe(zip_path, output_dir, data_type, language, ticker_filter):
+def _ingest_single_zip_safe(zip_path, output_dir, data_type, language, ticker_filter, compression):
     """Module-level ingest-one-ZIP task for ``ingest_directory``'s process pool.
 
     A local closure cannot be pickled under the ``spawn`` start method (Windows/macOS),
@@ -372,7 +479,7 @@ def _ingest_single_zip_safe(zip_path, output_dir, data_type, language, ticker_fi
     try:
         return ingest_single_zip(
             str(zip_path), output_dir, data_type=data_type,
-            language=language, ticker_filter=ticker_filter,
+            language=language, ticker_filter=ticker_filter, compression=compression,
         )
     except OneShotMemoryError:
         raise
@@ -401,7 +508,7 @@ def _flat_day_units(zip_files: list) -> "tuple[list, list]":
     return day_units, singles
 
 
-def _ingest_flat_day_safe(date_str, zip_paths, output_dir, data_type, language, ticker_filter):
+def _ingest_flat_day_safe(date_str, zip_paths, output_dir, data_type, language, ticker_filter, compression):
     """Module-level ingest-one-day task for ``ingest_directory``'s process pool.
 
     All ZIP parts of the day are read and concatenated before the single write —
@@ -417,7 +524,8 @@ def _ingest_flat_day_safe(date_str, zip_paths, output_dir, data_type, language, 
         dtype = data_type or _detect_data_type_from_path(str(zip_paths[0]))
         year = int(date_str[:4])
         meta = _ingest_date_group(
-            date_str, zip_paths, output_dir, dtype, year, language, ticker_filter
+            date_str, zip_paths, output_dir, dtype, year, language, ticker_filter,
+            compression=compression,
         )
         meta["data_type"] = dtype
         meta["year"] = year
@@ -445,9 +553,10 @@ def ingest_directory(
     output_dir: str,
     data_type: Optional[str] = None,
     language: str = "en",
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = None,
     progress: bool = True,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     """Ingest every ``.zip`` in a single flat directory into the Parquet store.
 
@@ -467,10 +576,14 @@ def ingest_directory(
         data_type: NEEDS type; auto-detected per day/ZIP from the filename when
             ``None``.
         language: Output column-name language (``"en"`` / ``"jp"``).
-        max_workers: Parallel worker processes; ``1`` is serial. Capped by the machine's
-            logical cores AND available RAM (each worker holds one day's frame).
-            **When calling with ``max_workers > 1`` from a script, the call must be
-            inside ``if __name__ == "__main__":`` — workers are started with the
+        max_workers: Parallel worker processes — an ``int``, ``"auto"`` (this machine's
+            logical cores), or ``None`` (the default): ``None`` reads the
+            ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
+            session (Jupyter/REPL — spawn-safe there), and serially from a
+            script. Parallel workers are capped by the machine's logical cores
+            AND available RAM (each worker holds a whole day's frame).
+            **When running parallel from a script, the call must be inside
+            ``if __name__ == "__main__":`` — workers are started with the
             ``spawn`` method, which re-imports your script in every worker.**
         progress: Log a per-unit progress line.
         ticker_filter: Optional ``set`` of string stock codes
@@ -484,6 +597,8 @@ def ingest_directory(
         ``{"zip_path": ..., "error": ...}`` instead.
     """
     _reject_bootstrap_reimport()  # actionable error for an unguarded top-level call (B1)
+
+    max_workers = _resolve_max_workers(max_workers)
 
     in_path = Path(input_dir)
     if not in_path.exists():
@@ -511,12 +626,12 @@ def ingest_directory(
                 for tok, unit_parts in day_units:
                     futures[executor.submit(
                         _ingest_flat_day_safe, tok, unit_parts, output_dir,
-                        data_type, language, ticker_filter,
+                        data_type, language, ticker_filter, compression,
                     )] = tok
                 for zf in singles:
                     futures[executor.submit(
                         _ingest_single_zip_safe, zf, output_dir,
-                        data_type, language, ticker_filter,
+                        data_type, language, ticker_filter, compression,
                     )] = zf
                 done = 0
                 for future in as_completed(futures):
@@ -530,14 +645,14 @@ def ingest_directory(
         for tok, unit_parts in day_units:
             done += 1
             meta = _ingest_flat_day_safe(
-                tok, unit_parts, output_dir, data_type, language, ticker_filter
+                tok, unit_parts, output_dir, data_type, language, ticker_filter, compression
             )
             results.append(meta)
             if progress:
                 _log_flat_progress(done, total, meta)
         for zf in singles:
             done += 1
-            meta = _ingest_single_zip_safe(zf, output_dir, data_type, language, ticker_filter)
+            meta = _ingest_single_zip_safe(zf, output_dir, data_type, language, ticker_filter, compression)
             results.append(meta)
             if progress:
                 _log_flat_progress(done, total, meta)
@@ -551,8 +666,9 @@ def ingest_year(
     year: int,
     data_type: str,
     language: str = "en",
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = 1,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     """Ingest every ``.zip`` for one ``year`` from a **flat** directory.
 
@@ -584,6 +700,9 @@ def ingest_year(
     """
     validate_data_type(data_type)
 
+    # Serial path: resolve quietly ("auto"/None -> 1, no hint) so only an
+    # explicit int request triggers the ignored-workers warning.
+    max_workers = _resolve_max_workers(max_workers, allow_default_auto=False)
     if max_workers > 1:
         logger.warning(
             "ingest_year runs the flat-directory path serially; max_workers=%d is "
@@ -605,7 +724,8 @@ def ingest_year(
     for tok, unit_parts in day_units:
         try:
             meta = _ingest_date_group(
-                tok, unit_parts, output_dir, data_type, year, language, ticker_filter
+                tok, unit_parts, output_dir, data_type, year, language, ticker_filter,
+                compression=compression,
             )
         except OneShotMemoryError:
             raise
@@ -620,7 +740,8 @@ def ingest_year(
     return results
 
 
-def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, language, ticker_filter):
+def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, language, ticker_filter,
+                       compression="zstd"):
     """Read every ZIP part of one date, concat, and write each ticker file once.
 
     This is the multi-part-per-day unit: NEEDS splits a trading day across parts
@@ -628,6 +749,12 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     concatenated before writing — otherwise later parts get skipped (resume) or
     overwrite earlier ones.
     """
+    # Root the requested codes to their 4-char families (72031 -> 7203) so the
+    # filter, the prune, and the coverage marker all record the same family
+    # semantics (idempotent — the parent paths root too, but the flat path and a
+    # direct call reach here un-rooted).
+    if ticker_filter and data_type == "individual_stock":
+        ticker_filter = _stock_family_roots(ticker_filter)
     # Prune the day's parts to the requested ticker(s) HERE, not on the parent, so
     # pruning stays interleaved with this date's write (issue #39: a partition lands
     # per day and a resumed run prunes only the dates it ingests) and, under
@@ -667,7 +794,16 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
         meta = {"date": date_str, "parts": len(zip_paths), "rows": 0, "output_path": None}
         if errors:
             # Lost parts are recorded (audit finding M1), never silently dropped.
+            # No marker either: the day must stay fully re-ingestable.
             meta["errors"] = errors
+        else:
+            # A cleanly-read day that yielded no rows for this request (the
+            # filtered ticker never traded) is DONE for this coverage — record
+            # that in a marker so resume can skip it. Without one, every resumed
+            # run re-probed and re-scanned the day's parts forever.
+            date_dir = Path(output_dir) / data_type / f"date={date_str}"
+            date_dir.mkdir(parents=True, exist_ok=True)
+            _write_coverage_marker(date_dir, ticker_filter, complete=True)
         return meta
     combined = pl.concat(parts, how="vertical")
     # Keep the per-date gc.collect() (issue #43 proposed removing them as "pure waste"):
@@ -678,7 +814,7 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     del parts
     gc.collect()
     rows = len(combined)
-    out_path = write_partitioned_parquet(combined, output_dir, data_type)
+    out_path = write_partitioned_parquet(combined, output_dir, data_type, compression=compression)
     # Record what this write covered (full or which tickers) so resume can skip
     # only requests the partition actually satisfies (audit finding H2). A day
     # that lost parts is marked incomplete so resume re-ingests it (finding M1)
@@ -697,7 +833,7 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
 
 
 def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ticker_filter,
-                    max_workers=1):
+                    max_workers=1, compression="zstd"):
     """Group ZIP parts by date and ingest each date as a unit (all parts → write once).
 
     Resume is keyed per-date (a date is written atomically), so later parts of a
@@ -713,6 +849,11 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
     deterministic regardless of worker completion order.
     """
     _reject_bootstrap_reimport()  # actionable error for an unguarded top-level call (B1)
+
+    # Family-root the request up front so the per-date resume check compares the
+    # same codes the coverage markers record (workers re-root; it is idempotent).
+    if ticker_filter and data_type == "individual_stock":
+        ticker_filter = _stock_family_roots(ticker_filter)
 
     output_root_path = Path(output_dir) / data_type
     groups: dict = {}
@@ -755,10 +896,20 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
             # partition must also have been written with coverage that includes
             # THIS request's ticker_filter — a store built for ticker A used to
             # resume-skip a later request for ticker B and silently return
-            # nothing for it (audit finding H2).
-            if existing and not invalid and _coverage_satisfied(date_dir, ticker_filter):
+            # nothing for it (audit finding H2). A marker ALONE (zero parquet
+            # files) also satisfies: a filtered day whose ticker never traded
+            # writes only the marker, and used to be re-scanned on every resume.
+            # A marker-less empty dir still re-ingests (legacy semantics).
+            has_marker = _read_coverage_marker(date_dir) is not None
+            if (existing or has_marker) and not invalid and _coverage_satisfied(date_dir, ticker_filter):
                 continue
         tasks.append((date_str, parts))
+
+    if resume and len(tasks) < len(groups):
+        logger.info(
+            "Resume: skipped %d of %d date(s) already in the store",
+            len(groups) - len(tasks), len(groups),
+        )
 
     # RAM-aware: each worker holds one whole date's frame. Estimate the largest day's
     # per-worker peak (from its part sizes for a full-frame individual_stock ingest; small
@@ -769,10 +920,12 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
 
     if workers <= 1 or len(tasks) <= 1:
         results: list[dict] = []
-        for date_str, parts in tasks:
-            meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language, ticker_filter)
+        for done, (date_str, parts) in enumerate(tasks, 1):
+            meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language,
+                                      ticker_filter, compression=compression)
             results.append(meta)
-            logger.info("  %s (%d parts) -> %s rows", date_str, meta["parts"], meta["rows"])
+            logger.info("  [%d/%d] %s (%d parts) -> %s rows",
+                        done, len(tasks), date_str, meta["parts"], meta["rows"])
         return results
 
     results = []
@@ -781,16 +934,19 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
             futures = {
                 executor.submit(
                     _ingest_date_group, date_str, parts, output_dir,
-                    data_type, year, language, ticker_filter,
+                    data_type, year, language, ticker_filter, compression,
                 ): date_str
                 for date_str, parts in tasks
             }
+            done = 0
             for future in as_completed(futures):
                 # A one-shot OOM in any worker propagates here and aborts the whole
                 # ingest rather than silently leaving a partial period behind.
                 meta = future.result()
                 results.append(meta)
-                logger.info("  %s (%d parts) -> %s rows", meta["date"], meta["parts"], meta["rows"])
+                done += 1
+                logger.info("  [%d/%d] %s (%d parts) -> %s rows",
+                            done, len(tasks), meta["date"], meta["parts"], meta["rows"])
     results.sort(key=lambda m: m["date"])
     return results
 
@@ -802,8 +958,9 @@ def ingest_year_from_root(
     data_type: str,
     language: str = "en",
     resume: bool = True,
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = None,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     """Ingest a whole ``year`` from a **structured** NEEDS root into the store.
 
@@ -820,12 +977,16 @@ def ingest_year_from_root(
         resume: Skip dates already present in the store (default ``True``). A date
             is skipped only if its Parquet files pass a footer integrity probe;
             a truncated partition (interrupted write) is deleted and re-ingested.
-        max_workers: Parallel worker processes for the independent per-date ingests;
-            ``1`` is serial. Capped by the machine's logical cores AND available RAM
-            (each worker holds a whole day's frame). **When calling with
-            ``max_workers > 1`` from a script, the call must be inside
-            ``if __name__ == "__main__":`` — worker processes are started with the
-            ``spawn`` method (a Polars ``fork`` deadlock workaround), which
+        max_workers: Parallel worker processes for the independent per-date
+            ingests — an ``int``, ``"auto"`` (this machine's
+            logical cores), or ``None`` (the default): ``None`` reads the
+            ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
+            session (Jupyter/REPL — spawn-safe there), and serially from a
+            script. Parallel workers are capped by the machine's logical cores
+            AND available RAM (each worker holds a whole day's frame).
+            **When running parallel from a script, the call must be inside
+            ``if __name__ == "__main__":`` — worker processes are started with
+            the ``spawn`` method (a Polars ``fork`` deadlock workaround), which
             re-imports your script in every worker.**
         ticker_filter: Optional ``set`` of stock/index codes to keep.
 
@@ -834,10 +995,15 @@ def ingest_year_from_root(
         "output_path"}``).
     """
     validate_data_type(data_type)
+    _require_input_root(input_root)
+    max_workers = _resolve_max_workers(max_workers)
 
     zip_paths = discover_zips(input_root, data_type, [year])
+    if not zip_paths:
+        _warn_zero_discovery(input_root, data_type, f"year {year}")
     return _ingest_grouped(
-        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers
+        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers,
+        compression=compression,
     )
 
 
@@ -848,8 +1014,9 @@ def ingest_period(
     data_type: str,
     language: str = "en",
     resume: bool = True,
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = None,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     """Ingest a whole period from a structured NEEDS root into the Parquet store.
 
@@ -869,13 +1036,18 @@ def ingest_period(
             A date is skipped only if its Parquet files pass a footer integrity
             probe; a truncated partition (interrupted write) is deleted and
             re-ingested.
-        max_workers: Parallel worker processes for the independent per-date ingests;
-            ``1`` is serial. Capped by the machine's logical cores AND available RAM
-            (each worker holds a whole day's frame). Wired through every granularity
-            (year / month / date). **When calling with ``max_workers > 1`` from a
-            script, the call must be inside ``if __name__ == "__main__":`` — worker
-            processes are started with the ``spawn`` method (a Polars ``fork``
-            deadlock workaround), which re-imports your script in every worker.**
+        max_workers: Parallel worker processes for the independent per-date
+            ingests — an ``int``, ``"auto"`` (this machine's
+            logical cores), or ``None`` (the default): ``None`` reads the
+            ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
+            session (Jupyter/REPL — spawn-safe there), and serially from a
+            script. Parallel workers are capped by the machine's logical cores
+            AND available RAM (each worker holds a whole day's frame).
+            Wired through every granularity (year / month / date). **When
+            running parallel from a script, the call must be inside
+            ``if __name__ == "__main__":`` — worker processes are started with
+            the ``spawn`` method (a Polars ``fork`` deadlock workaround), which
+            re-imports your script in every worker.**
         ticker_filter: Optional ``set`` of string stock codes
             (``individual_stock`` only).
 
@@ -884,6 +1056,8 @@ def ingest_period(
         failed ZIP contributes ``{"zip_path": ..., "error": ...}`` instead.
     """
     validate_data_type(data_type)
+    _require_input_root(input_root)
+    max_workers = _resolve_max_workers(max_workers)
 
     parsed = parse_period(period)
     granularity = parsed["granularity"]
@@ -895,34 +1069,45 @@ def ingest_period(
             results.extend(
                 ingest_year_from_root(
                     input_root, output_dir, year, data_type, language, resume,
-                    max_workers=max_workers, ticker_filter=ticker_filter
+                    max_workers=max_workers, ticker_filter=ticker_filter,
+                    compression=compression,
                 )
             )
         return results
 
     if granularity == "month":
         results = []
+        discovered = 0
         months_by_year: dict = parsed["months_by_year"]
         for year, months in months_by_year.items():
             zip_paths = discover_zips(input_root, data_type, [year], months=list(months))
+            discovered += len(zip_paths)
             results.extend(
                 _process_zips(zip_paths, output_dir, data_type, year, language, resume,
-                              max_workers=max_workers, ticker_filter=ticker_filter)
+                              max_workers=max_workers, ticker_filter=ticker_filter,
+                              compression=compression)
             )
+        if not discovered:
+            _warn_zero_discovery(input_root, data_type, f"period {period}")
         return results
 
     if granularity == "date":
         results = []
+        discovered = 0
         dates: list = parsed["dates"]
         date_years = sorted(set(int(d[:4]) for d in dates))
         for year in date_years:
             year_dates = [d for d in dates if d.startswith(str(year))]
             year_months = sorted(set(int(d[4:6]) for d in year_dates))
             zip_paths = discover_zips(input_root, data_type, [year], months=year_months, dates=year_dates)
+            discovered += len(zip_paths)
             results.extend(
                 _process_zips(zip_paths, output_dir, data_type, year, language, resume,
-                              max_workers=max_workers, ticker_filter=ticker_filter)
+                              max_workers=max_workers, ticker_filter=ticker_filter,
+                              compression=compression)
             )
+        if not discovered:
+            _warn_zero_discovery(input_root, data_type, f"period {period}")
         return results
 
     raise ValueError(f"Unknown granularity: {granularity}")
@@ -962,7 +1147,8 @@ def extract_to_store(
     end_time: Optional[str] = None,
     language: str = "en",
     resume: bool = True,
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = None,
+    compression: str = "zstd",
 ) -> "pl.DataFrame":
     """Two-stage extraction in ONE call: ingest one or more tickers for a period
     into a reusable Parquet store, then return the queried DataFrame.
@@ -981,6 +1167,9 @@ def extract_to_store(
         period: ``"YYYY"``, ``"YYYYMM"``, ``"YYYYMMDD"``, or a ``"start-end"`` range.
         ticker: One code **or an iterable of codes**, e.g. ``"7203"`` (Toyota),
             ``["7203", "9984"]``, or ``"101"`` (Nikkei 225). ``int`` codes work too.
+            ``individual_stock`` codes select their whole share-class **family**:
+            ``"7203"`` (and equally ``"72031"``) extracts the parent plus its
+            suffixed classes — the same rows a filtered ingest has always stored.
         data_type: One of the four NEEDS types (default ``"individual_stock"``).
         start_time: Optional intraday lower bound ``"HH:MM:SS"`` (tick types only;
             the two ``*_summary`` types are daily aggregates and raise if given).
@@ -988,12 +1177,16 @@ def extract_to_store(
         language: Output column-name language (``"en"`` / ``"jp"``).
         resume: Skip dates already in the store (default ``True``); truncated
             partitions (interrupted writes) are detected and re-ingested.
-        max_workers: Parallel worker processes for the Stage-1 per-date ingests;
-            ``1`` is serial. Capped by the machine's logical cores AND available
-            RAM. **When calling with ``max_workers > 1`` from a script, the call
-            must be inside ``if __name__ == "__main__":`` — workers are started
-            with the ``spawn`` method, which re-imports your script in every
-            worker.**
+        max_workers: Parallel worker processes for the Stage-1 per-date
+            ingests — an ``int``, ``"auto"`` (this machine's
+            logical cores), or ``None`` (the default): ``None`` reads the
+            ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
+            session (Jupyter/REPL — spawn-safe there), and serially from a
+            script. Parallel workers are capped by the machine's logical cores
+            AND available RAM (each worker holds a whole day's frame).
+            **When running parallel from a script, the call must be inside
+            ``if __name__ == "__main__":`` — workers are started with the
+            ``spawn`` method, which re-imports your script in every worker.**
 
     Returns:
         The queried Polars DataFrame for the requested ticker(s) — columns match
@@ -1015,18 +1208,53 @@ def extract_to_store(
         >>> df = tse_tick.extract_to_store("G:/NEEDS", "toyota_sb_store",
         ...                                "202201", ["7203", "9984"])
     """
-    from tse_tick.query import _query_extract_batch
+    # Import (and so the DuckDB dependency check) stays FIRST: Stage 1 can run
+    # for hours, and a missing [query] extra must fail before it, not after.
+    try:
+        from tse_tick.query import _query_extract_batch
+    except ImportError as exc:
+        raise ImportError(
+            "extract_to_store requires DuckDB (Stage 2 queries the built store). "
+            "Install the query extra: pip install tse-tick[query]"
+        ) from exc
 
+    max_workers = _resolve_max_workers(max_workers)
     tickers = _normalize_ticker_filter(ticker)
     if not tickers:
         raise ValueError("extract_to_store: at least one ticker is required")
+    if data_type == "individual_stock":
+        # Family semantics: root each code to its 4-char family (72031 -> 7203) so
+        # Stage 1's filter, the resume coverage, and Stage 2's file selection all
+        # agree — Stage 1 has always ingested the whole family for a 4-char code,
+        # and Stage 2 used to silently drop the suffixed classes' rows.
+        tickers = _stock_family_roots(tickers)
 
     # Stage 1 — ingest every ticker in one part-pruned pass into the reusable store.
-    ingest_period(
+    stage1_results = ingest_period(
         input_root, output_dir, period, data_type,
         language=language, resume=resume, ticker_filter=tickers,
-        max_workers=max_workers,
+        max_workers=max_workers, compression=compression,
     )
+    # Stage 1 records lost parts / failed dates in its results instead of raising
+    # (corrupt ZIPs are per-unit, not fatal) — but THIS call is about to return
+    # the queried frame as if it were complete, so surface the loss loudly. The
+    # affected days stay resume-eligible: fixing the raw files and re-running
+    # re-ingests exactly them.
+    lossy = sorted(
+        str(r.get("date") or r.get("zip_path", "?"))
+        for r in stage1_results
+        if r.get("error") or r.get("errors")
+    )
+    if lossy:
+        shown = ", ".join(lossy[:10]) + (", …" if len(lossy) > 10 else "")
+        warnings.warn(
+            f"extract_to_store: Stage 1 lost data on {len(lossy)} date(s) "
+            f"({shown}) — see the logged errors. The returned DataFrame may be "
+            f"missing those rows; the affected days remain resume-eligible, so "
+            f"re-running after fixing the raw files re-ingests exactly them.",
+            PartialIngestWarning,
+            stacklevel=2,
+        )
     # Stage 2 — one DuckDB connection and one scan for ALL tickers (issue #44), replacing
     # the per-ticker query_ticks(limit=None) loop + concat (and, for the two summary types,
     # N full-store scans with one). Returns the same multiset of rows in the same
@@ -1046,7 +1274,11 @@ def extract_to_store(
         total_rows = 0
         if type_dir.exists():
             for code in tickers:
-                for f in type_dir.glob(f"date=*/ticker={code}.parquet"):
+                # ticker={code}* + the family predicate: count the suffixed
+                # share-class files the query below will read too.
+                for f in type_dir.glob(f"date=*/ticker={code}*.parquet"):
+                    if not _code_matches_family(f.stem[len("ticker="):], code):
+                        continue
                     if date_from <= f.parent.name[len("date="):] <= date_to:
                         try:
                             total_rows += pq.ParquetFile(f).metadata.num_rows
@@ -1079,9 +1311,11 @@ def _process_zips(
     resume: bool = True,
     max_workers: int = 1,
     ticker_filter: Optional[set] = None,
+    compression: str = "zstd",
 ) -> list[dict]:
     return _ingest_grouped(
-        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers
+        zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers,
+        compression=compression,
     )
 
 
@@ -1092,7 +1326,8 @@ def ingest_event_windows_period(
     filter_csv: str,
     window_minutes: int = 120,
     resume: bool = True,
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = 1,
+    compression: str = "zstd",
 ) -> None:
     """Build the event-window Parquet store for a period from an events CSV.
 
@@ -1118,6 +1353,7 @@ def ingest_event_windows_period(
     Returns:
         ``None`` — results are written to the store; progress goes to ``logging``.
     """
+    max_workers = _resolve_max_workers(max_workers, allow_default_auto=False)
     if max_workers > 1:
         logger.warning(
             "ingest_event_windows_period runs serially; max_workers=%d is ignored.",
@@ -1266,7 +1502,7 @@ def ingest_event_windows_period(
                 if internal_cols:
                     combined = combined.drop(internal_cols)
                 combined_rows = len(combined)
-                write_event_window_parquet(combined, output_dir)
+                write_event_window_parquet(combined, output_dir, compression=compression)
                 del combined
                 gc.collect()
                 logger.info("  %s: %s event-window ticks written", date_str, f"{combined_rows:,}")

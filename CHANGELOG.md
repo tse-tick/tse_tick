@@ -2,6 +2,118 @@
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-12
+
+Two-stage extraction audit for `individual_stock`: one high-severity Stage-2
+data-loss fix, resume/robustness fixes, large multi-core speedups, and
+first-run UX. Behavior changes: share-class family semantics, zstd store
+default, parallel-by-default where spawn is provably safe.
+
+> **Before releasing from a workstation with real NEEDS data:** run
+> `benchmarks/run_correctness.py` and `pytest tests/test_real_data.py` — the
+> `clean_data` rewrite is hash-verified byte-identical on synthetic data for
+> all four types (en+jp), but the real-data byte-identity gates skip in CI.
+
+### Fixed
+- **Suffixed share-class rows are no longer silently dropped by Stage 2
+  (HIGH).** Stage 1's field-5 filter has always kept a code's whole family
+  (a `{"7203"}` request also ingests New Shares `72031` into its own
+  `ticker=72031.parquet`), but Stage 2 selected files by exact stem — those
+  rows were paid for and unreachable, so `extract_to_store("7203")` returned
+  fewer rows than `read_ticks("7203")` on real data, and a raw `"72031"`
+  request matched **nothing** anywhere. A 4-char code now selects its whole
+  family end-to-end (`read_ticks`, ingest + resume coverage, `query_ticks`,
+  `extract_to_store`); a longer code is rooted to its family by the raw-read /
+  two-stage entry points, while `query_ticks(ticker="72031")` (5-char form)
+  still reads exactly that class off a built store.
+- **Zero-row days no longer re-scan on every resume.** A filtered day whose
+  ticker never traded wrote nothing — no partition, no coverage marker — so
+  every resumed run re-probed and re-read its parts forever. A cleanly-read
+  zero-row day now records its coverage marker (in an otherwise-empty
+  `date=` dir) and resume skips it; a day that lost parts still writes no
+  marker and stays fully re-ingestable; `get_available_dates` skips
+  marker-only dirs.
+- **One malformed quote value no longer aborts a whole day.** The strict
+  Float64 pre-casts of `Buy Quote 1 Best` / `Buy Quote Vol 1` are gone; both
+  follow the same non-strict path as their 51 sibling quote columns
+  (malformed → 0).
+- **`extract_to_store` no longer hides Stage-1 losses.** Lost parts / failed
+  dates now raise a capturable `PartialIngestWarning` naming the affected
+  dates (they stay resume-eligible) instead of silently returning a frame
+  missing those rows.
+- **Missing DuckDB fails fast and guided.** `extract_to_store` without the
+  `[query]` extra raises `ImportError` pointing at `pip install
+  tse-tick[query]` *before* Stage 1 runs; the top-level query shims name the
+  extra too.
+- Partscan's `_part_contains` EOFError edge (a truncated part silently cut
+  the backward run walk, dropping earlier parts of the run) is gone with the
+  containment scan itself (see Performance).
+
+### Performance
+- **`clean_data` batched (2.15× on 4 cores; scales with cores).** ~80
+  one-expression `with_columns` calls (int/float casts, time slices, ~90
+  strips) collapsed into per-family batches — Polars parallelizes expressions
+  within a call. The categorical decode is ONE expression per column, all in
+  one batch (was: a full-column `unique()` Python round-trip plus one
+  when/then pass PER unknown value, across six duplicated branches). Output
+  hash-verified byte-identical for all four types × en/jp.
+- **Part selection is arithmetic.** `select_parts_for_day` bounds a ticker's
+  run with two bisects over the probed first-line start codes — no part is
+  decompressed beyond its first line during selection (was: a full per-line
+  Python scan of the run-terminating part per ticker per day, plus re-opened
+  holding parts). Over-selects at most one boundary part, only on exact
+  start==code equality.
+- **zstd store default.** ~30% smaller and ~3× faster to read than snappy on
+  this data (`results_format.csv`). `compression=` (`"zstd"`/`"snappy"`) is
+  plumbed through every ingest entry point and the CLI (`--compression`);
+  codecs are per-file, so existing snappy stores read fine and resume can
+  extend them — no re-ingest.
+- **Threaded per-ticker writes.** A date fanning out into ≥16 `ticker=` files
+  writes them across a bounded 8-thread pool (−36% zstd / −40% snappy on the
+  write step; Polars' Rust writer releases the GIL). The sequential
+  temp→`os.replace` commit loop and all-or-nothing cleanup are unchanged.
+- `_coerce_time_cols` no longer materializes a `drop_nulls()` copy of ~90
+  String columns per partition write (its String-dtype branch could never
+  fire); it now only considers `pl.Time` / `pl.Object` columns.
+
+### Added
+- `max_workers="auto"` (logical cores, still RAM-capped by `_cap_workers`) on
+  `ingest_period`, `ingest_year_from_root`, `ingest_directory`,
+  `extract_to_store`. Their default is now `None`: the `TSE_TICK_MAX_WORKERS`
+  env var (int or `auto`) when set; auto in an interactive session
+  (Jupyter/REPL — spawn has nothing to re-import there, so no `__main__`
+  guard is needed); serial from a script, with a one-time hint. CLI
+  `--parallel` defaults to `auto` on `ingest` and (new flag) `export`.
+- `PartialIngestWarning` (exported), `compression=` parameters,
+  `--compression` CLI flag.
+- First-run guardrails: a nonexistent `input_root` raises `FileNotFoundError`
+  on the structured/period path (was: `"Done: 0 succeeded, 0 failed"`);
+  zero-ZIP discovery emits a capturable `NoDataWarning` naming root/type/
+  scope; structured-root progress lines carry `[i/N]` and resumed runs log a
+  skipped-dates summary.
+- CLI `export --store` accepts **multiple** `--tickers` (was: silently fell
+  back to a capped one-shot read without building the store).
+- `examples/scripts/example_basic_usage.py` demonstrates the two-stage
+  pipeline (and no longer imports pandas).
+
+### Changed
+- Share-class family semantics (see Fixed) — a behavior change for callers
+  who relied on `extract_to_store`/`query_ticks` returning only the exact
+  4-char code's file.
+- Store compression default snappy → zstd (see Performance).
+- Tests: suite **447 passed / 50 data-gated skips** (new:
+  `test_family_codes.py`, `test_zero_row_resume.py`, `test_compression.py`,
+  `test_input_validation.py`; partscan exact-selection pins updated for the
+  boundary-equality supersets).
+
+### Deferred (future work)
+- Int64→Int32/Float32 dtype narrowing (halves the full-frame day and doubles
+  the RAM-capped worker count, but breaks the store schema — needs a
+  re-ingest and a migration note).
+- Lazy/streaming rewrite (`scan_csv` → `sink_parquet`) and the Polars GPU
+  engine: the pipeline is I/O+parse bound and DuckDB Stage 2 has no GPU path;
+  revisit if profiles change.
+
 ## [0.13.3] - 2026-07-12
 
 Fixes for the run14 real-data acceptance-test bug report — the analytics/export

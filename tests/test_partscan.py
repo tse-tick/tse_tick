@@ -67,18 +67,32 @@ def test_select_holding_run_and_last_part(tmp_path):
 
 def test_select_captures_overflow_run(tmp_path):
     # 7203 straddles parts 2 AND 3 (overflow); part 4 (last) kept for the appendix.
+    # Part 1 is also kept: part 2 STARTS exactly at 7203, so part 1's range
+    # [1301, 7203] could hold the code's head rows — the arithmetic selection
+    # keeps such a boundary part rather than decompressing it to prove absence.
     parts = _day_parts(tmp_path, [["1301"], ["7203"], ["7203"], ["9999"]])
     chosen = select_parts_for_day(parts, {"7203"})
     assert [p.name for p in chosen] == [
-        "HTICST120.20240104.2.zip", "HTICST120.20240104.3.zip",
-        "HTICST120.20240104.4.zip"]
+        "HTICST120.20240104.1.zip", "HTICST120.20240104.2.zip",
+        "HTICST120.20240104.3.zip", "HTICST120.20240104.4.zip"]
 
 
 def test_select_multi_ticker_union(tmp_path):
+    # 1301 -> part 1; 9999 -> part 3, plus part 2 (its range [7203, 9999] could
+    # hold 9999's head — boundary equality); part 3 is also the appendix part.
     parts = _day_parts(tmp_path, [["1301"], ["7203"], ["9999"]])
     chosen = select_parts_for_day(parts, {"1301", "9999"})
     assert sorted(p.name for p in chosen) == [
-        "HTICST120.20240104.1.zip", "HTICST120.20240104.3.zip"]
+        "HTICST120.20240104.1.zip", "HTICST120.20240104.2.zip",
+        "HTICST120.20240104.3.zip"]
+
+
+def test_select_bounded_no_boundary_equality(tmp_path):
+    # No start equals the code, so the arithmetic never over-selects: the run is
+    # exactly the one part whose range contains 7203, plus the appendix part.
+    parts = _day_parts(tmp_path, [["1301"], ["7000"], ["8000"], ["9999"]])
+    names = [p.name for p in select_parts_for_day(parts, {"7203"})]
+    assert names == ["HTICST120.20240104.2.zip", "HTICST120.20240104.4.zip"]
 
 
 def test_select_below_min_still_checks_last_part(tmp_path):

@@ -46,6 +46,20 @@ def _parse_months(months_str: str) -> list[int]:
     return sorted(set(result))
 
 
+def _parse_parallel(value: str):
+    """--parallel accepts a positive int or "auto" (cores+RAM-capped)."""
+    v = value.strip().lower()
+    if v == "auto":
+        return "auto"
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--parallel expects a positive int or 'auto', got {value!r}")
+    if n < 1:
+        raise argparse.ArgumentTypeError("--parallel must be >= 1")
+    return n
+
+
 def _parse_tickers(tickers_str: str) -> set[str]:
     ticker_str = tickers_str.strip()
     if ticker_str.startswith("@"):
@@ -67,7 +81,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print("Error: --filter-csv is only supported with --data-type individual_stock", file=sys.stderr)
         sys.exit(1)
 
-    if args.parallel and args.parallel > 1 and args.filter_csv:
+    if args.filter_csv and isinstance(args.parallel, int) and args.parallel > 1:
         logger.warning(
             "--parallel does not apply to the event-window (--filter-csv) ingest; it runs sequentially"
         )
@@ -90,6 +104,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 window_minutes=args.window,
                 resume=not args.no_resume,
                 max_workers=args.parallel,
+                compression=args.compression,
             )
             print("Done")
         else:
@@ -102,6 +117,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 resume=not args.no_resume,
                 max_workers=args.parallel,
                 ticker_filter=ticker_filter,
+                compression=args.compression,
             )
             success = sum(1 for r in results if "error" not in r)
             failed = sum(1 for r in results if "error" in r)
@@ -125,6 +141,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             language=args.language,
             max_workers=args.parallel,
             ticker_filter=ticker_filter,
+            compression=args.compression,
         )
         success = sum(1 for r in results if "error" not in r)
         failed = sum(1 for r in results if "error" in r)
@@ -144,6 +161,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 resume=not args.no_resume,
                 max_workers=args.parallel,
                 ticker_filter=ticker_filter,
+                compression=args.compression,
             )
             success = sum(1 for r in results if "error" not in r)
             failed = sum(1 for r in results if "error" in r)
@@ -160,24 +178,29 @@ def cmd_export(args: argparse.Namespace) -> None:
     ticker_filter = _parse_tickers(args.tickers) if args.tickers else None
 
     store = getattr(args, "store", None)
-    if store and args.data_type == "individual_stock" and ticker_filter and len(ticker_filter) == 1:
+    if store and args.data_type == "individual_stock" and ticker_filter:
         # Two-stage: build a reusable, part-pruned Parquet store then query it. The
         # store is left on disk for fast (sub-second) repeat queries.
-        ticker = next(iter(ticker_filter))
-        print(f"Building part-pruned store at {store}, then querying {ticker} (two-stage)...")
+        # extract_to_store takes one code or many (multi-ticker since 0.12.0 —
+        # the CLI used to silently fall back to a capped one-shot read here).
+        tickers = sorted(ticker_filter)
+        label = ", ".join(tickers)
+        print(f"Building part-pruned store at {store}, then querying {label} (two-stage)...")
         df = tse_tick.extract_to_store(
             args.input_root,
             store,
             args.period,
-            ticker,
+            tickers,
             data_type=args.data_type,
             start_time=args.start_time,
             end_time=args.end_time,
             language=args.language,
+            compression=args.compression,
+            max_workers=args.parallel,
         )
     else:
         if store:
-            print("Note: --store supports a single individual_stock ticker; "
+            print("Note: --store needs --tickers and data-type individual_stock; "
                   "doing a direct read instead.", file=sys.stderr)
         # One-shot direct read. For individual_stock + a ticker filter this is
         # automatically part-pruned (opens only the ticker's parts), so it's fast.
@@ -252,16 +275,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ingest_parser.add_argument(
         "--parallel",
-        type=int,
-        default=1,
-        help="Parallel worker processes for per-date ingest (default: 1, serial; "
-             "capped at the machine's logical core count). Applies to --period and "
-             "--year (structured root) and --flat; not to --filter-csv event windows.",
+        type=_parse_parallel,
+        default="auto",
+        help="Parallel worker processes for per-date ingest: a positive int, or "
+             "'auto' (the default) for the machine's logical core count, RAM-capped "
+             "(each worker holds one trading day's frame). Applies to --period and "
+             "--year (structured root) and --flat; not to --filter-csv event windows. "
+             "Pass 1 to force a serial ingest.",
     )
     ingest_parser.add_argument(
         "--no-resume",
         action="store_true",
         help="Disable resume (reprocess all files even if output exists)",
+    )
+    ingest_parser.add_argument(
+        "--compression",
+        default="zstd",
+        choices=["zstd", "snappy"],
+        help="Parquet codec for the store (default: zstd — smaller and faster to "
+             "read; snappy matches pre-0.14 stores). Mixed-codec stores read fine.",
     )
     ingest_parser.add_argument(
         "--flat",
@@ -334,10 +366,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument(
         "--store", default=None,
-        help="Optional Parquet store dir. If given for a single individual_stock "
-             "ticker, build a reusable, part-pruned store here then query it "
-             "(two-stage) — best when you will read the data more than once. Omit "
+        help="Optional Parquet store dir. If given with --tickers (one or many) for "
+             "individual_stock, build a reusable, part-pruned store here then query "
+             "it (two-stage) — best when you will read the data more than once. Omit "
              "for a one-off direct read (also part-pruned). Requires the [query] extra.",
+    )
+    export_parser.add_argument(
+        "--parallel",
+        type=_parse_parallel,
+        default="auto",
+        help="Parallel worker processes for the --store two-stage ingest: a positive "
+             "int or 'auto' (default; cores+RAM-capped).",
+    )
+    export_parser.add_argument(
+        "--compression",
+        default="zstd",
+        choices=["zstd", "snappy"],
+        help="Parquet codec for the --store two-stage path (default: zstd).",
     )
     export_parser.add_argument(
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
