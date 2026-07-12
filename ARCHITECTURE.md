@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.13.0 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.14.0 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
@@ -21,7 +21,7 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.13.0)
+├── CHANGELOG.md                     # version history (current: 0.14.0)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
@@ -37,7 +37,7 @@ tse_tick/                          # Project root
 │   ├── translate.py                 # yfinance/Polygon/ccxt → tse_tick name map; loads data/translations.json (0.3.0)
 │   ├── schemas.py                   # Column name definitions (EN/JP) for all 4 data types
 │   ├── enhanced.py                  # Core ETL: create_df(), read_ticks(), discover_zips(), parse_period(), _prune_parts_by_ticker()
-│   ├── partscan.py                  # Part-pruning: probe part start codes, select the ticker's contiguous run ∪ last part (0.11.6)
+│   ├── partscan.py                  # Part-pruning: probe part start codes, bound the ticker's run arithmetically ∪ last part (0.14.0)
 │   ├── core.py                      # Data cleaning + 2016 fixed-width parser + categorical schemas + _tick_datetime()
 │   ├── ingest.py                    # Batch ZIP→Parquet: ingest_period(), extract_to_store(), ingest_year_from_root(), _process_zips()
 │   ├── query.py                     # DuckDB SQL interface over partitioned Parquet stores
@@ -126,6 +126,20 @@ tse_tick/                          # Project root
 ---
 
 ## 4. Key Changes (CHANGELOG Summary)
+
+### v0.14.0 — two-stage audit: family semantics, zero-row resume, batched clean, zstd, auto workers (2026-07-12)
+
+| Change | Detail |
+|--------|--------|
+| Share-class **family semantics** | A 4-char `individual_stock` code selects parent + suffixed classes end-to-end (`"7203"` ⇒ 7203 + 72031); a longer code is family-rooted by the raw/two-stage entry points. Fixes Stage 2 silently dropping `ticker=72031.parquet` rows that Stage 1 had always ingested (extract_to_store < read_ticks), and a raw `"72031"` request matching nothing. `query_ticks` 5-char form stays exact (single-class escape hatch). `_query_extract_batch` orders by the 4-char family root |
+| Zero-row resume | A cleanly-read filtered day with no matching rows writes its coverage marker into an otherwise-empty `date=` dir; resume skips on the marker alone. Was: re-pruned + re-scanned on EVERY resumed run. `get_available_dates` skips marker-only dirs |
+| `PartialIngestWarning` | `extract_to_store` no longer discards Stage-1 results — lost parts/dates warn capturably (days stay resume-eligible). Missing DuckDB now raises a guided `pip install tse-tick[query]` error before Stage 1 |
+| `clean_data` batched | ~80 one-expression `with_columns` calls collapsed into per-family batches (Polars parallelizes within a call); categorical decode is ONE expression per column (was: full-column `unique()` round-trip + a when/then pass per unknown value). Byte-identical output (hash-verified, all 4 types × en/jp); 2.15× on 4 cores |
+| Partscan arithmetic | `select_parts_for_day` bounds the run from the probed starts (two bisects/ticker); `_part_contains` full-part Python scans removed (also fixes its EOFError run-truncation edge). Over-selects ≤ 1 boundary part only on exact start==code equality |
+| zstd default | Store writes default to `compression="zstd"` (−30% size, ~3× read vs snappy per `results_format.csv`); `compression=` plumbed through every ingest entry point + CLI `--compression`. Mixed-codec stores read fine |
+| `max_workers="auto"` | Accepts `"auto"` (logical cores, RAM-capped); default `None` = env `TSE_TICK_MAX_WORKERS`, auto in Jupyter/REPL (spawn-safe), serial+hint from scripts. CLI `--parallel` defaults to auto (ingest + export) |
+| Threaded ticker writes | A date's ≥16 per-ticker files write across a bounded 8-thread pool (−36% zstd / −40% snappy on the write step); sequential commit loop + all-or-nothing cleanup unchanged |
+| First-run guardrails | Nonexistent `input_root` raises `FileNotFoundError` on the structured path (was: "Done: 0 succeeded, 0 failed"); zero-ZIP discovery warns capturably (`NoDataWarning`); `[i/N]` progress + resume-skip summary; CLI `export --store` accepts multi-ticker; strict Buy-Quote casts removed (one malformed value no longer aborts a day) |
 
 ### v0.2.0 — Polars Migration (2026-05-05)
 
@@ -442,7 +456,7 @@ ingest_year_from_root(input_root, output_dir, year, data_type, max_workers=1)
     │
     └─ Output layout:
         {output}/individual_stock/date=YYYYMMDD/ticker=NNNN.parquet
-        (Hive-partitioned: date level, then ticker level, snappy compression)
+        (Hive-partitioned: date level, then ticker level, zstd compression by default)
 ```
 
 ### 5.4 Japanese Language Flow
@@ -554,7 +568,7 @@ All functions operate on a single tick DataFrame (one ticker, one day):
 
 | Function | Purpose |
 |----------|---------|
-| `write_partitioned_parquet(df, output_dir, data_type)` | Groups by date→ticker, writes partitioned snappy parquet |
+| `write_partitioned_parquet(df, output_dir, data_type, compression="zstd")` | Groups by date→ticker, writes partitioned parquet (zstd default; ≥16 ticker files per date write across a small thread pool) |
 | `read_parquet_partition(data_dir, data_type, date, ticker, columns)` | PyArrow dataset filter read |
 | `write_event_window_parquet(df, output_dir)` | Event-window format; appends to existing files |
 | `read_partitioned_parquet(data_dir, year, month)` | PyArrow dataset read with year/month filters |
