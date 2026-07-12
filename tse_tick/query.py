@@ -8,8 +8,8 @@ from typing import Optional, Union
 import polars as pl
 import duckdb
 
-from .constants import SUMMARY_TYPES, validate_data_type
-from .enhanced import TruncationWarning, _code_matches_family
+from .constants import SUMMARY_TYPES, validate_data_type, validate_time_filter_support
+from .enhanced import NoDataWarning, TruncationWarning, _code_matches_family
 
 # Column names are interpolated as double-quoted identifiers (f'"{c}"'), so the
 # only injection risk is a character that closes the quote (") or escapes it
@@ -92,6 +92,22 @@ def _normalize_ticker(ticker: Union[int, str]) -> str:
     return token
 
 
+def _warn_query_no_data(data_type: str, ticker, date) -> None:
+    """Emit the same capturable ``NoDataWarning`` :func:`read_ticks` does when a
+    store query resolves to zero rows — a date not in the store, a code never
+    ingested, or filters that exclude every row — so the two documented read
+    paths signal "no data" the same way. ``stacklevel=3`` reports the caller's
+    ``query_ticks(...)`` line (helper -> query_ticks -> user)."""
+    warnings.warn(
+        f"query_ticks: 0 rows for the requested filters (data_type={data_type!r}, "
+        f"ticker={ticker!r}, date={date!r}). Possible causes: a date not in the "
+        f"store, a ticker/index code never ingested, or time filters that exclude "
+        f"every row.",
+        NoDataWarning,
+        stacklevel=3,
+    )
+
+
 def query_ticks(
     data_dir: str,
     data_type: str = "individual_stock",
@@ -144,6 +160,7 @@ def query_ticks(
         ...                  start_time="09:00:00", end_time="11:30:00")
     """
     validate_data_type(data_type)
+    validate_time_filter_support(data_type, start_time, end_time)
 
     type_dir = _resolve_type_dir(data_dir, data_type)
 
@@ -186,6 +203,7 @@ def query_ticks(
             if not ticker_files:
                 # Unknown ticker: return the store schema with 0 rows so chained
                 # column access doesn't raise (instead of a schemaless (0, 0) frame).
+                _warn_query_no_data(data_type, ticker, date)
                 any_file = next(type_dir.glob("**/*.parquet"), None)
                 if any_file is None:
                     return pl.DataFrame()
@@ -274,6 +292,12 @@ def query_ticks(
             stacklevel=2,
         )
 
+    # Same "no data" signal read_ticks emits — a date not in the store, a code
+    # never ingested, or filters that excluded every row. (The unknown-ticker
+    # early return above already warned, so it won't reach here.)
+    if df.height == 0:
+        _warn_query_no_data(data_type, ticker, date)
+
     return df
 
 
@@ -315,6 +339,7 @@ def _query_extract_batch(
     summary types they become a SQL condition on the Hive ``date`` column.
     """
     validate_data_type(data_type)
+    validate_time_filter_support(data_type, start_time, end_time)
     type_dir = _resolve_type_dir(data_dir, data_type)
 
     # sorted(tickers) is the concat block order of the old loop; normalise each code the

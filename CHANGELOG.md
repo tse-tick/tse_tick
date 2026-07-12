@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-07-13
+
+Round-16 post-deployment bug-hunt fixes: consistent no-data signalling and
+argument validation across the one-shot (`read_ticks`) and store (`query_ticks`,
+`extract_to_store`) read paths. No parse/clean output changes — every fix is a
+guard, a validation, or a warning; `black`/`flake8`/`mypy` clean and the full
+synthetic suite is green.
+
+### Fixed
+- **`start_time`/`end_time` on a `*_summary` type now raises `ValueError` at every
+  entry point, before any work.** The two summary types are daily aggregates with
+  no `Execution Time` column, so only `read_ticks` rejected a time filter;
+  `query_ticks`, `_query_extract_batch` and `extract_to_store` passed it through to
+  DuckDB, which failed with a raw binder error (`Referenced column "Execution
+  Time" not found`) — and `extract_to_store` did so only **after** running the
+  full Stage-1 ingest and leaving a partial store on disk. All four paths now
+  share one `validate_time_filter_support` guard; `extract_to_store` validates up
+  front, so the call fails in ~0 s with no wasted ingest.
+- **`query_ticks` now emits the capturable `NoDataWarning` on a zero-row result,
+  matching `read_ticks`.** A store query that resolves to nothing — a date not in
+  the store, a code never ingested, or a time window that excludes every row —
+  previously returned a typed-empty frame silently; the two documented read paths
+  now signal "no data" the same way (silenceable via
+  `warnings.filterwarnings("ignore", category=tse_tick.NoDataWarning)`).
+- **An unrecognized `language` now raises `ValueError` instead of silently
+  returning raw undecoded codes.** Only `"en"` and `"jp"` are valid; a value such
+  as `"ja"` fell through to an empty categorical-decode map and returned raw NEEDS
+  codes (`"11"`, `"1"`) with English headers and no warning. `read_ticks` and
+  `create_df` now validate via `validate_language` — covering `export_to_csv` and
+  the `ingest_*`/`extract_to_store` paths transitively — with a message pointing
+  at `"jp"`. (`language="jp"` has always produced full Japanese headers **and**
+  values; it is the correct value for Japanese output.)
+
+### Docs
+- **`discover_zips` docstring** now notes that the two index types search both the
+  current `…110` and the legacy 2016 `…010` record-code prefixes (the recursive
+  fallback already did this; the wording implied a single prefix).
+
 ## [0.14.0] - 2026-07-12
 
 Two-stage extraction audit for `individual_stock`: one high-severity Stage-2

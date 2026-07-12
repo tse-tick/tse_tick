@@ -127,6 +127,15 @@ tse_tick/                          # Project root
 
 ## 4. Key Changes (CHANGELOG Summary)
 
+### v0.14.1 — round-16 fixes: summary time-filter guard, query_ticks no-data warning, language validation (2026-07-13)
+
+| Change | Detail |
+|--------|--------|
+| Summary time-filter guard | `start_time`/`end_time` on a `*_summary` type now raises `ValueError` at **every** entry point via one shared `constants.validate_time_filter_support`. Only `read_ticks` guarded before; `query_ticks`, `_query_extract_batch` and `extract_to_store` passed the filter to DuckDB → raw binder error (`"Execution Time" not found`), and `extract_to_store` did so only **after** a full Stage-1 ingest (partial store left on disk). `extract_to_store` now validates up front — fails in ~0 s, no wasted ingest |
+| `query_ticks` no-data warning | `query_ticks` emits the capturable `NoDataWarning` on a zero-row result (unknown code, absent date, over-tight time window), matching `read_ticks`. Was silent. No `filterwarnings=error` in the suite, so existing empty-result tests still pass |
+| `language` validation | `read_ticks`/`create_df` reject an unrecognized `language` via `constants.validate_language` (covers `export_to_csv` + `ingest_*`/`extract_to_store` transitively). Was: `"ja"`/`"fr"` fell through to an empty decode map → raw NEEDS codes with English headers, silently. Only `"en"`/`"jp"` are valid; the message points at `"jp"` (which has always produced full Japanese headers **and** values) |
+| `discover_zips` docstring | Now states the two index types search both the current `…110` and legacy 2016 `…010` record-code prefixes (the recursive fallback already did; wording implied one prefix) |
+
 ### v0.14.0 — two-stage audit: family semantics, zero-row resume, batched clean, zstd, auto workers (2026-07-12)
 
 | Change | Detail |

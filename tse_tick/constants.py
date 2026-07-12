@@ -73,10 +73,43 @@ INDEX_TYPES = frozenset({DataType.INDICES.value, DataType.INDICES_SUMMARY.value}
 # The two classes must partition the four types (guards against future drift).
 assert SUMMARY_TYPES | TICK_TYPES == VALID_DATA_TYPES and not (SUMMARY_TYPES & TICK_TYPES)
 
+# Supported output languages — the single membership set behind validate_language.
+VALID_LANGUAGES = frozenset(Language.values())  # {"en", "jp"}
+
 
 def validate_data_type(data_type: str) -> None:
     """Raise ``ValueError`` if ``data_type`` is not one of the four NEEDS types."""
     if data_type not in VALID_DATA_TYPES:
         raise ValueError(
             f"Unknown data_type {data_type!r}. Must be one of {sorted(VALID_DATA_TYPES)}"
+        )
+
+
+def validate_language(language: str) -> None:
+    """Raise ``ValueError`` if ``language`` is not a supported output language.
+
+    Only ``"en"`` and ``"jp"`` are accepted. Anything else (e.g. ``"ja"``) used to
+    fall through to an empty categorical-decode map and silently return raw NEEDS
+    codes instead of decoded strings; reject it up front and point at ``"jp"``.
+    """
+    if language not in VALID_LANGUAGES:
+        raise ValueError(
+            f"Unknown language {language!r}. Must be one of {sorted(VALID_LANGUAGES)} "
+            f"(use 'jp' for Japanese; 'ja' is not accepted)."
+        )
+
+
+def validate_time_filter_support(data_type: str, start_time, end_time) -> None:
+    """Raise ``ValueError`` if intraday time filters are given for a summary type.
+
+    The two ``*_summary`` types are daily aggregates with no ``Execution Time``
+    column, so ``start_time``/``end_time`` cannot apply. Every entry point that
+    accepts a time filter (``read_ticks``, ``query_ticks``, ``_query_extract_batch``,
+    ``extract_to_store``) calls this so the invalid filter is rejected with one
+    clear message instead of reaching DuckDB as a column-not-found bind error.
+    """
+    if (start_time is not None or end_time is not None) and data_type in SUMMARY_TYPES:
+        raise ValueError(
+            f"start_time/end_time are not supported for {data_type!r} "
+            f"(daily aggregates have no Execution Time); filter on 'date' only"
         )
