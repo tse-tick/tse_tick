@@ -77,21 +77,29 @@ def individual_stock_csv(
     tickers: list[str],
     rows_per_ticker: int = 40,
     base_prices: dict[str, int] | None = None,
+    minute_offsets: dict[str, int] | None = None,
 ) -> bytes:
     """Build a headerless TICST120 (95-field) CSV as raw bytes.
 
     Rows are split between the morning and afternoon sessions with a real
     11:30-12:30 lunch gap, and prices vary row-to-row so order-book features
     (spread, imbalance, volatility) have something to compute.
+
+    ``minute_offsets`` shifts a ticker's whole schedule by N minutes. DuckDB's
+    parallel sort has an arbitrary order within a same-``(date, time)`` tie, so
+    tests that compare frames containing several tickers (e.g. a parent code and
+    its suffixed share class) must de-tie their timestamps to be deterministic.
     """
     base_prices = base_prices or {}
+    minute_offsets = minute_offsets or {}
     half = max(rows_per_ticker // 2, 1)
     lines: list[str] = []
 
     for ticker in tickers:
         base = base_prices.get(ticker, 1500)
-        am_minutes = [_AM_OPEN + round(i * (149 / max(half - 1, 1))) for i in range(half)]
-        pm_minutes = [_PM_OPEN + round(i * (149 / max(half - 1, 1))) for i in range(half)]
+        shift = minute_offsets.get(ticker, 0)
+        am_minutes = [shift + _AM_OPEN + round(i * (149 / max(half - 1, 1))) for i in range(half)]
+        pm_minutes = [shift + _PM_OPEN + round(i * (149 / max(half - 1, 1))) for i in range(half)]
         schedule = [(m, "1") for m in am_minutes] + [(m, "2") for m in pm_minutes]
 
         for i, (minute, session) in enumerate(schedule):
@@ -266,3 +274,31 @@ def write_zip(zip_path: Path, member_name: str, payload: bytes) -> Path:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(member_name, payload)
     return zip_path
+
+
+def seed_structured_day(
+    root: Path,
+    day: str,
+    mapping: dict[int, list[str]],
+    *,
+    rows_per_ticker: int = 6,
+    minute_offsets: dict[str, int] | None = None,
+) -> None:
+    """Seed one trading day of TICST120 parts under a nested NEEDS delivery tree.
+
+    ``mapping`` is ``{part_number: [stock codes]}`` — one ZIP part per entry,
+    ascending part numbers, exactly the multi-part-day layout the structured
+    ingest paths consume (``個別株式{year}/TICST120/{yyyymm}/``). The shared
+    helper behind the two-stage extraction tests (suffixed share-class families
+    and zero-row days are built by choosing the codes per part).
+    """
+    leaf = Path(root) / f"個別株式{day[:4]}" / "TICST120" / day[:6]
+    leaf.mkdir(parents=True, exist_ok=True)
+    for n, codes in mapping.items():
+        write_zip(
+            leaf / f"HTICST120.{day}.{n}.zip",
+            f"HTICST120.{day}.{n}.csv",
+            individual_stock_csv(
+                day, codes, rows_per_ticker=rows_per_ticker, minute_offsets=minute_offsets
+            ),
+        )
