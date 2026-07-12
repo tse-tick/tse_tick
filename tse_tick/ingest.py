@@ -25,7 +25,7 @@ from typing import Iterable, Optional, Union, cast
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, OneShotMemoryError, PartialIngestWarning
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, NoDataWarning, OneShotMemoryError, PartialIngestWarning
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type
@@ -215,6 +215,33 @@ def _cap_workers(requested: int, per_worker_gb: Optional[float] = None) -> int:
                 workers, per_worker_gb,
             )
     return workers
+
+
+def _require_input_root(input_root: str) -> None:
+    """Fail fast on a nonexistent input root.
+
+    The structured-root discovery globs, and globbing a mistyped path just
+    matches nothing — the ingest then reported "Done: 0 succeeded, 0 failed"
+    as if it were success. The flat path has always raised; now both do.
+    """
+    if not Path(input_root).exists():
+        raise FileNotFoundError(f"Input root not found: {input_root}")
+
+
+def _warn_zero_discovery(input_root: str, data_type: str, scope: str) -> None:
+    """Capturable warning when discovery finds no ZIPs at all for a request.
+
+    Not an error: a period that is all holidays legitimately matches nothing.
+    But silence here made a wrong data_type or a root one level too deep look
+    like a successful no-op ingest.
+    """
+    warnings.warn(
+        f"No {data_type!r} ZIPs found under {input_root!r} for {scope}. "
+        f"Check that the root contains the NEEDS delivery tree for this data "
+        f"type (any nesting works) and that the period has trading days.",
+        NoDataWarning,
+        stacklevel=3,
+    )
 
 
 def _reject_bootstrap_reimport() -> None:
@@ -878,6 +905,12 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
                 continue
         tasks.append((date_str, parts))
 
+    if resume and len(tasks) < len(groups):
+        logger.info(
+            "Resume: skipped %d of %d date(s) already in the store",
+            len(groups) - len(tasks), len(groups),
+        )
+
     # RAM-aware: each worker holds one whole date's frame. Estimate the largest day's
     # per-worker peak (from its part sizes for a full-frame individual_stock ingest; small
     # for filtered / summary / index) and let _cap_workers clamp to what RAM allows.
@@ -887,11 +920,12 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
 
     if workers <= 1 or len(tasks) <= 1:
         results: list[dict] = []
-        for date_str, parts in tasks:
+        for done, (date_str, parts) in enumerate(tasks, 1):
             meta = _ingest_date_group(date_str, parts, output_dir, data_type, year, language,
                                       ticker_filter, compression=compression)
             results.append(meta)
-            logger.info("  %s (%d parts) -> %s rows", date_str, meta["parts"], meta["rows"])
+            logger.info("  [%d/%d] %s (%d parts) -> %s rows",
+                        done, len(tasks), date_str, meta["parts"], meta["rows"])
         return results
 
     results = []
@@ -904,12 +938,15 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
                 ): date_str
                 for date_str, parts in tasks
             }
+            done = 0
             for future in as_completed(futures):
                 # A one-shot OOM in any worker propagates here and aborts the whole
                 # ingest rather than silently leaving a partial period behind.
                 meta = future.result()
                 results.append(meta)
-                logger.info("  %s (%d parts) -> %s rows", meta["date"], meta["parts"], meta["rows"])
+                done += 1
+                logger.info("  [%d/%d] %s (%d parts) -> %s rows",
+                            done, len(tasks), meta["date"], meta["parts"], meta["rows"])
     results.sort(key=lambda m: m["date"])
     return results
 
@@ -958,9 +995,12 @@ def ingest_year_from_root(
         "output_path"}``).
     """
     validate_data_type(data_type)
+    _require_input_root(input_root)
     max_workers = _resolve_max_workers(max_workers)
 
     zip_paths = discover_zips(input_root, data_type, [year])
+    if not zip_paths:
+        _warn_zero_discovery(input_root, data_type, f"year {year}")
     return _ingest_grouped(
         zip_paths, output_dir, data_type, year, language, resume, ticker_filter, max_workers,
         compression=compression,
@@ -1016,6 +1056,7 @@ def ingest_period(
         failed ZIP contributes ``{"zip_path": ..., "error": ...}`` instead.
     """
     validate_data_type(data_type)
+    _require_input_root(input_root)
     max_workers = _resolve_max_workers(max_workers)
 
     parsed = parse_period(period)
@@ -1036,29 +1077,37 @@ def ingest_period(
 
     if granularity == "month":
         results = []
+        discovered = 0
         months_by_year: dict = parsed["months_by_year"]
         for year, months in months_by_year.items():
             zip_paths = discover_zips(input_root, data_type, [year], months=list(months))
+            discovered += len(zip_paths)
             results.extend(
                 _process_zips(zip_paths, output_dir, data_type, year, language, resume,
                               max_workers=max_workers, ticker_filter=ticker_filter,
                               compression=compression)
             )
+        if not discovered:
+            _warn_zero_discovery(input_root, data_type, f"period {period}")
         return results
 
     if granularity == "date":
         results = []
+        discovered = 0
         dates: list = parsed["dates"]
         date_years = sorted(set(int(d[:4]) for d in dates))
         for year in date_years:
             year_dates = [d for d in dates if d.startswith(str(year))]
             year_months = sorted(set(int(d[4:6]) for d in year_dates))
             zip_paths = discover_zips(input_root, data_type, [year], months=year_months, dates=year_dates)
+            discovered += len(zip_paths)
             results.extend(
                 _process_zips(zip_paths, output_dir, data_type, year, language, resume,
                               max_workers=max_workers, ticker_filter=ticker_filter,
                               compression=compression)
             )
+        if not discovered:
+            _warn_zero_discovery(input_root, data_type, f"period {period}")
         return results
 
     raise ValueError(f"Unknown granularity: {granularity}")

@@ -178,16 +178,19 @@ def cmd_export(args: argparse.Namespace) -> None:
     ticker_filter = _parse_tickers(args.tickers) if args.tickers else None
 
     store = getattr(args, "store", None)
-    if store and args.data_type == "individual_stock" and ticker_filter and len(ticker_filter) == 1:
+    if store and args.data_type == "individual_stock" and ticker_filter:
         # Two-stage: build a reusable, part-pruned Parquet store then query it. The
         # store is left on disk for fast (sub-second) repeat queries.
-        ticker = next(iter(ticker_filter))
-        print(f"Building part-pruned store at {store}, then querying {ticker} (two-stage)...")
+        # extract_to_store takes one code or many (multi-ticker since 0.12.0 —
+        # the CLI used to silently fall back to a capped one-shot read here).
+        tickers = sorted(ticker_filter)
+        label = ", ".join(tickers)
+        print(f"Building part-pruned store at {store}, then querying {label} (two-stage)...")
         df = tse_tick.extract_to_store(
             args.input_root,
             store,
             args.period,
-            ticker,
+            tickers,
             data_type=args.data_type,
             start_time=args.start_time,
             end_time=args.end_time,
@@ -197,7 +200,7 @@ def cmd_export(args: argparse.Namespace) -> None:
         )
     else:
         if store:
-            print("Note: --store supports a single individual_stock ticker; "
+            print("Note: --store needs --tickers and data-type individual_stock; "
                   "doing a direct read instead.", file=sys.stderr)
         # One-shot direct read. For individual_stock + a ticker filter this is
         # automatically part-pruned (opens only the ticker's parts), so it's fast.
@@ -363,9 +366,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument(
         "--store", default=None,
-        help="Optional Parquet store dir. If given for a single individual_stock "
-             "ticker, build a reusable, part-pruned store here then query it "
-             "(two-stage) — best when you will read the data more than once. Omit "
+        help="Optional Parquet store dir. If given with --tickers (one or many) for "
+             "individual_stock, build a reusable, part-pruned store here then query "
+             "it (two-stage) — best when you will read the data more than once. Omit "
              "for a one-off direct read (also part-pruned). Requires the [query] extra.",
     )
     export_parser.add_argument(
