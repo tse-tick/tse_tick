@@ -46,6 +46,20 @@ def _parse_months(months_str: str) -> list[int]:
     return sorted(set(result))
 
 
+def _parse_parallel(value: str):
+    """--parallel accepts a positive int or "auto" (cores+RAM-capped)."""
+    v = value.strip().lower()
+    if v == "auto":
+        return "auto"
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--parallel expects a positive int or 'auto', got {value!r}")
+    if n < 1:
+        raise argparse.ArgumentTypeError("--parallel must be >= 1")
+    return n
+
+
 def _parse_tickers(tickers_str: str) -> set[str]:
     ticker_str = tickers_str.strip()
     if ticker_str.startswith("@"):
@@ -67,7 +81,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
         print("Error: --filter-csv is only supported with --data-type individual_stock", file=sys.stderr)
         sys.exit(1)
 
-    if args.parallel and args.parallel > 1 and args.filter_csv:
+    if args.filter_csv and isinstance(args.parallel, int) and args.parallel > 1:
         logger.warning(
             "--parallel does not apply to the event-window (--filter-csv) ingest; it runs sequentially"
         )
@@ -179,6 +193,7 @@ def cmd_export(args: argparse.Namespace) -> None:
             end_time=args.end_time,
             language=args.language,
             compression=args.compression,
+            max_workers=args.parallel,
         )
     else:
         if store:
@@ -257,11 +272,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ingest_parser.add_argument(
         "--parallel",
-        type=int,
-        default=1,
-        help="Parallel worker processes for per-date ingest (default: 1, serial; "
-             "capped at the machine's logical core count). Applies to --period and "
-             "--year (structured root) and --flat; not to --filter-csv event windows.",
+        type=_parse_parallel,
+        default="auto",
+        help="Parallel worker processes for per-date ingest: a positive int, or "
+             "'auto' (the default) for the machine's logical core count, RAM-capped "
+             "(each worker holds one trading day's frame). Applies to --period and "
+             "--year (structured root) and --flat; not to --filter-csv event windows. "
+             "Pass 1 to force a serial ingest.",
     )
     ingest_parser.add_argument(
         "--no-resume",
@@ -350,6 +367,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "ticker, build a reusable, part-pruned store here then query it "
              "(two-stage) — best when you will read the data more than once. Omit "
              "for a one-off direct read (also part-pruned). Requires the [query] extra.",
+    )
+    export_parser.add_argument(
+        "--parallel",
+        type=_parse_parallel,
+        default="auto",
+        help="Parallel worker processes for the --store two-stage ingest: a positive "
+             "int or 'auto' (default; cores+RAM-capped).",
     )
     export_parser.add_argument(
         "--compression",

@@ -182,3 +182,89 @@ def test_cap_workers_ram_aware(caplog):
         w2 = ingest_mod._cap_workers(min(2, cap), per_worker_gb=0.01)
     assert w2 == min(2, cap)
     assert not any("available RAM" in r.message for r in caplog.records)
+
+
+# --- max_workers="auto" resolution (0.14.0) -----------------------------------
+
+def test_resolve_max_workers_sentinels(monkeypatch):
+    import pytest
+
+    resolve = ingest_mod._resolve_max_workers
+    monkeypatch.delenv(ingest_mod._WORKERS_ENV, raising=False)
+    assert resolve("auto") == ingest_mod._cpu_cap()
+    assert resolve(" AUTO ") == ingest_mod._cpu_cap()   # case/space tolerant
+    assert resolve(3) == 3
+    assert resolve(0) == 1                              # ints clamp to >= 1
+    with pytest.raises(ValueError):
+        resolve("bogus")
+    # serial-only paths resolve the sentinels quietly to 1
+    assert resolve("auto", allow_default_auto=False) == 1
+    assert resolve(None, allow_default_auto=False) == 1
+    assert resolve(4, allow_default_auto=False) == 4    # explicit int survives
+
+
+def test_resolve_max_workers_env_var(monkeypatch):
+    resolve = ingest_mod._resolve_max_workers
+    monkeypatch.setenv(ingest_mod._WORKERS_ENV, "3")
+    assert resolve(None) == 3
+    monkeypatch.setenv(ingest_mod._WORKERS_ENV, "auto")
+    assert resolve(None) == ingest_mod._cpu_cap()
+    monkeypatch.setenv(ingest_mod._WORKERS_ENV, "2")
+    assert resolve(5) == 5                              # explicit arg beats env
+
+
+def test_resolve_max_workers_interactive_vs_script(monkeypatch, caplog):
+    import logging
+    import sys
+    import types
+
+    resolve = ingest_mod._resolve_max_workers
+    monkeypatch.delenv(ingest_mod._WORKERS_ENV, raising=False)
+
+    # Interactive (__main__ without __file__, e.g. Jupyter/REPL): spawn has
+    # nothing to re-import, so the default goes parallel.
+    fake_main = types.ModuleType("__main__")
+    monkeypatch.setitem(sys.modules, "__main__", fake_main)
+    assert resolve(None) == ingest_mod._cpu_cap()
+
+    # Script (__main__ with __file__): default stays serial, with a one-time hint.
+    fake_main.__file__ = "/some/script.py"
+    monkeypatch.setattr(ingest_mod, "_workers_hint_emitted", False)
+    monkeypatch.setattr(ingest_mod, "_cpu_cap", lambda: 8)
+    with caplog.at_level(logging.INFO, logger="tse_tick.ingest"):
+        assert resolve(None) == 1
+        assert resolve(None) == 1
+    hints = [r for r in caplog.records if "max_workers" in r.getMessage()]
+    assert len(hints) == 1                              # hint logged exactly once
+
+
+def test_ingest_period_auto_equals_serial(tmp_path):
+    src = tmp_path / "src"
+    _seed_stock(src)
+    serial = tmp_path / "serial"
+    auto = tmp_path / "auto"
+    tse_tick.ingest_period(str(src), str(serial), f"{DAYS[0]}-{DAYS[-1]}",
+                           "individual_stock", max_workers=1)
+    tse_tick.ingest_period(str(src), str(auto), f"{DAYS[0]}-{DAYS[-1]}",
+                           "individual_stock", max_workers="auto")
+    _assert_stores_identical(_snapshot(serial, "individual_stock"),
+                             _snapshot(auto, "individual_stock"))
+
+
+def test_cli_parallel_accepts_auto_and_int():
+    import pytest
+    from tse_tick.cli import _build_parser, _parse_parallel
+
+    assert _parse_parallel("auto") == "auto"
+    assert _parse_parallel("2") == 2
+    with pytest.raises(Exception):
+        _parse_parallel("zero-ish")
+    parser = _build_parser()
+    args = parser.parse_args(["ingest", "--data-type", "individual_stock",
+                              "--input-root", "x", "--output-root", "y",
+                              "--period", "2024"])
+    assert args.parallel == "auto"                      # the CLI default
+    args = parser.parse_args(["ingest", "--data-type", "individual_stock",
+                              "--input-root", "x", "--output-root", "y",
+                              "--period", "2024", "--parallel", "2"])
+    assert args.parallel == 2

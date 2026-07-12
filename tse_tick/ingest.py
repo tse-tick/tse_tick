@@ -51,6 +51,77 @@ def _cpu_cap() -> int:
     return os.cpu_count() or 1
 
 
+# Opt-in default worker count for the Python API (int or "auto"). The CLI and
+# interactive sessions default to auto on their own; a plain script stays serial
+# unless this is set (or max_workers is passed) — see _resolve_max_workers.
+_WORKERS_ENV = "TSE_TICK_MAX_WORKERS"
+_workers_hint_emitted = False
+
+
+def _interactive_main() -> bool:
+    """True in a REPL/Jupyter/`python -c` session — ``__main__`` has no
+    ``__file__`` there, so a spawn worker's bootstrap has no user script to
+    re-import and parallel ingest is safe without a ``__main__`` guard."""
+    return getattr(sys.modules.get("__main__"), "__file__", None) is None
+
+
+def _log_workers_hint_once() -> None:
+    """One-time nudge when a multi-core machine defaults to a serial ingest."""
+    global _workers_hint_emitted
+    if _workers_hint_emitted:
+        return
+    _workers_hint_emitted = True
+    logger.info(
+        "Ingesting serially. This machine has %d logical cores — pass "
+        "max_workers=\"auto\" (or set %s=auto) to run the independent per-date "
+        "ingests in parallel; from a script, the call must sit under "
+        "if __name__ == \"__main__\":", _cpu_cap(), _WORKERS_ENV,
+    )
+
+
+def _resolve_max_workers(max_workers, allow_default_auto: bool = True) -> int:
+    """Resolve a ``max_workers`` value (int, ``"auto"``, or ``None``) to an int.
+
+    ``"auto"`` requests this machine's logical core count (the RAM-aware
+    :func:`_cap_workers` still clamps it later). ``None`` — the API default —
+    resolves to the ``TSE_TICK_MAX_WORKERS`` env var when set, to auto in an
+    interactive session (safe: spawn has nothing to re-import there), and to
+    serial (1, plus a one-time hint on a multi-core box) in a script. A BLIND
+    auto default for scripts would be unsafe: spawn re-imports the calling
+    script in every worker, so an unguarded script's top-level side effects
+    would re-run once per worker before the bootstrap guard stops it. Resolve
+    ONLY in the parent process, never in worker-executed code.
+    ``allow_default_auto=False`` keeps a serial-only path quiet: ``None`` /
+    ``"auto"`` / env opt-ins resolve to 1 with no hint, and only an explicit
+    int survives (its >1 warning stays meaningful).
+    """
+    if isinstance(max_workers, str):
+        if max_workers.strip().lower() != "auto":
+            raise ValueError(
+                f"max_workers must be a positive int, 'auto', or None; got {max_workers!r}"
+            )
+        return _cpu_cap() if allow_default_auto else 1
+    if max_workers is None:
+        if not allow_default_auto:
+            return 1
+        env = os.environ.get(_WORKERS_ENV, "").strip()
+        if env:
+            if env.lower() == "auto":
+                return _cpu_cap()
+            try:
+                return max(1, int(env))
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid %s=%r (expected an int or 'auto')", _WORKERS_ENV, env
+                )
+        if _interactive_main():
+            return _cpu_cap()
+        if _cpu_cap() > 1:
+            _log_workers_hint_once()
+        return 1
+    return max(1, int(max_workers))
+
+
 def _available_ram_gb() -> float:
     """Best-effort available physical RAM in GB; ``0.0`` if it can't be determined."""
     if sys.platform == "win32":
@@ -455,7 +526,7 @@ def ingest_directory(
     output_dir: str,
     data_type: Optional[str] = None,
     language: str = "en",
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = None,
     progress: bool = True,
     ticker_filter: Optional[set] = None,
     compression: str = "zstd",
@@ -478,10 +549,14 @@ def ingest_directory(
         data_type: NEEDS type; auto-detected per day/ZIP from the filename when
             ``None``.
         language: Output column-name language (``"en"`` / ``"jp"``).
-        max_workers: Parallel worker processes; ``1`` is serial. Capped by the machine's
-            logical cores AND available RAM (each worker holds one day's frame).
-            **When calling with ``max_workers > 1`` from a script, the call must be
-            inside ``if __name__ == "__main__":`` — workers are started with the
+        max_workers: Parallel worker processes — an ``int``, ``"auto"`` (this machine's
+            logical cores), or ``None`` (the default): ``None`` reads the
+            ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
+            session (Jupyter/REPL — spawn-safe there), and serially from a
+            script. Parallel workers are capped by the machine's logical cores
+            AND available RAM (each worker holds a whole day's frame).
+            **When running parallel from a script, the call must be inside
+            ``if __name__ == "__main__":`` — workers are started with the
             ``spawn`` method, which re-imports your script in every worker.**
         progress: Log a per-unit progress line.
         ticker_filter: Optional ``set`` of string stock codes
@@ -495,6 +570,8 @@ def ingest_directory(
         ``{"zip_path": ..., "error": ...}`` instead.
     """
     _reject_bootstrap_reimport()  # actionable error for an unguarded top-level call (B1)
+
+    max_workers = _resolve_max_workers(max_workers)
 
     in_path = Path(input_dir)
     if not in_path.exists():
@@ -562,7 +639,7 @@ def ingest_year(
     year: int,
     data_type: str,
     language: str = "en",
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = 1,
     ticker_filter: Optional[set] = None,
     compression: str = "zstd",
 ) -> list[dict]:
@@ -596,6 +673,9 @@ def ingest_year(
     """
     validate_data_type(data_type)
 
+    # Serial path: resolve quietly ("auto"/None -> 1, no hint) so only an
+    # explicit int request triggers the ignored-workers warning.
+    max_workers = _resolve_max_workers(max_workers, allow_default_auto=False)
     if max_workers > 1:
         logger.warning(
             "ingest_year runs the flat-directory path serially; max_workers=%d is "
@@ -841,7 +921,7 @@ def ingest_year_from_root(
     data_type: str,
     language: str = "en",
     resume: bool = True,
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = None,
     ticker_filter: Optional[set] = None,
     compression: str = "zstd",
 ) -> list[dict]:
@@ -860,12 +940,16 @@ def ingest_year_from_root(
         resume: Skip dates already present in the store (default ``True``). A date
             is skipped only if its Parquet files pass a footer integrity probe;
             a truncated partition (interrupted write) is deleted and re-ingested.
-        max_workers: Parallel worker processes for the independent per-date ingests;
-            ``1`` is serial. Capped by the machine's logical cores AND available RAM
-            (each worker holds a whole day's frame). **When calling with
-            ``max_workers > 1`` from a script, the call must be inside
-            ``if __name__ == "__main__":`` — worker processes are started with the
-            ``spawn`` method (a Polars ``fork`` deadlock workaround), which
+        max_workers: Parallel worker processes for the independent per-date
+            ingests — an ``int``, ``"auto"`` (this machine's
+            logical cores), or ``None`` (the default): ``None`` reads the
+            ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
+            session (Jupyter/REPL — spawn-safe there), and serially from a
+            script. Parallel workers are capped by the machine's logical cores
+            AND available RAM (each worker holds a whole day's frame).
+            **When running parallel from a script, the call must be inside
+            ``if __name__ == "__main__":`` — worker processes are started with
+            the ``spawn`` method (a Polars ``fork`` deadlock workaround), which
             re-imports your script in every worker.**
         ticker_filter: Optional ``set`` of stock/index codes to keep.
 
@@ -874,6 +958,7 @@ def ingest_year_from_root(
         "output_path"}``).
     """
     validate_data_type(data_type)
+    max_workers = _resolve_max_workers(max_workers)
 
     zip_paths = discover_zips(input_root, data_type, [year])
     return _ingest_grouped(
@@ -889,7 +974,7 @@ def ingest_period(
     data_type: str,
     language: str = "en",
     resume: bool = True,
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = None,
     ticker_filter: Optional[set] = None,
     compression: str = "zstd",
 ) -> list[dict]:
@@ -911,13 +996,18 @@ def ingest_period(
             A date is skipped only if its Parquet files pass a footer integrity
             probe; a truncated partition (interrupted write) is deleted and
             re-ingested.
-        max_workers: Parallel worker processes for the independent per-date ingests;
-            ``1`` is serial. Capped by the machine's logical cores AND available RAM
-            (each worker holds a whole day's frame). Wired through every granularity
-            (year / month / date). **When calling with ``max_workers > 1`` from a
-            script, the call must be inside ``if __name__ == "__main__":`` — worker
-            processes are started with the ``spawn`` method (a Polars ``fork``
-            deadlock workaround), which re-imports your script in every worker.**
+        max_workers: Parallel worker processes for the independent per-date
+            ingests — an ``int``, ``"auto"`` (this machine's
+            logical cores), or ``None`` (the default): ``None`` reads the
+            ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
+            session (Jupyter/REPL — spawn-safe there), and serially from a
+            script. Parallel workers are capped by the machine's logical cores
+            AND available RAM (each worker holds a whole day's frame).
+            Wired through every granularity (year / month / date). **When
+            running parallel from a script, the call must be inside
+            ``if __name__ == "__main__":`` — worker processes are started with
+            the ``spawn`` method (a Polars ``fork`` deadlock workaround), which
+            re-imports your script in every worker.**
         ticker_filter: Optional ``set`` of string stock codes
             (``individual_stock`` only).
 
@@ -926,6 +1016,7 @@ def ingest_period(
         failed ZIP contributes ``{"zip_path": ..., "error": ...}`` instead.
     """
     validate_data_type(data_type)
+    max_workers = _resolve_max_workers(max_workers)
 
     parsed = parse_period(period)
     granularity = parsed["granularity"]
@@ -1007,7 +1098,7 @@ def extract_to_store(
     end_time: Optional[str] = None,
     language: str = "en",
     resume: bool = True,
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = None,
     compression: str = "zstd",
 ) -> "pl.DataFrame":
     """Two-stage extraction in ONE call: ingest one or more tickers for a period
@@ -1037,12 +1128,16 @@ def extract_to_store(
         language: Output column-name language (``"en"`` / ``"jp"``).
         resume: Skip dates already in the store (default ``True``); truncated
             partitions (interrupted writes) are detected and re-ingested.
-        max_workers: Parallel worker processes for the Stage-1 per-date ingests;
-            ``1`` is serial. Capped by the machine's logical cores AND available
-            RAM. **When calling with ``max_workers > 1`` from a script, the call
-            must be inside ``if __name__ == "__main__":`` — workers are started
-            with the ``spawn`` method, which re-imports your script in every
-            worker.**
+        max_workers: Parallel worker processes for the Stage-1 per-date
+            ingests — an ``int``, ``"auto"`` (this machine's
+            logical cores), or ``None`` (the default): ``None`` reads the
+            ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
+            session (Jupyter/REPL — spawn-safe there), and serially from a
+            script. Parallel workers are capped by the machine's logical cores
+            AND available RAM (each worker holds a whole day's frame).
+            **When running parallel from a script, the call must be inside
+            ``if __name__ == "__main__":`` — workers are started with the
+            ``spawn`` method, which re-imports your script in every worker.**
 
     Returns:
         The queried Polars DataFrame for the requested ticker(s) — columns match
@@ -1074,6 +1169,7 @@ def extract_to_store(
             "Install the query extra: pip install tse-tick[query]"
         ) from exc
 
+    max_workers = _resolve_max_workers(max_workers)
     tickers = _normalize_ticker_filter(ticker)
     if not tickers:
         raise ValueError("extract_to_store: at least one ticker is required")
@@ -1181,7 +1277,7 @@ def ingest_event_windows_period(
     filter_csv: str,
     window_minutes: int = 120,
     resume: bool = True,
-    max_workers: int = 1,
+    max_workers: Union[int, str, None] = 1,
     compression: str = "zstd",
 ) -> None:
     """Build the event-window Parquet store for a period from an events CSV.
@@ -1208,6 +1304,7 @@ def ingest_event_windows_period(
     Returns:
         ``None`` — results are written to the store; progress goes to ``logging``.
     """
+    max_workers = _resolve_max_workers(max_workers, allow_default_auto=False)
     if max_workers > 1:
         logger.warning(
             "ingest_event_windows_period runs serially; max_workers=%d is ignored.",
