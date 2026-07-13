@@ -127,6 +127,14 @@ tse_tick/                          # Project root
 
 ## 4. Key Changes (CHANGELOG Summary)
 
+### Unreleased — round-18: catchable query-path memory guard
+
+| Change | Detail |
+|--------|--------|
+| Query OOM (round-18) | `query_ticks` / `_query_extract_batch` (the `extract_to_store` Stage-2) now raise a catchable `QueryMemoryError` (a `MemoryError`, sibling to `OneShotMemoryError`) instead of leaking DuckDB's raw `OutOfMemoryException`. A `limit=None` scan of a multi-year active ticker assembles as one frame that overflows RAM at the Arrow conversion (7203 / 2017–2019 ≈ 136M rows × 95 cols ≈ 100 GB); the new error carries tse_tick's own remedy (read the built store in bounded slices) rather than DuckDB's un-reachable `SET threads=…` hint. Converted at every high-level `.pl()` site via `_execute_to_polars`; the `query_sql` escape hatch is intentionally left raw. Symmetric with the read path's `OneShotMemoryError` |
+| Memory hardening | DuckDB query connections set `preserve_insertion_order=false` to lower peak memory on large ordered scans. Safe: both structured builders always impose an explicit `ORDER BY`, and the within-same-timestamp tie order was already non-deterministic (PR #45), so output is unchanged |
+| Tests | `test_round18_fixes.py` (7): catchable/`MemoryError` type + import-without-`[query]`, `_execute_to_polars` OOM/`MemoryError` conversion and pass-through of other errors, `query_ticks` end-to-end conversion, insertion-order setting, ordering preserved |
+
 ### v0.14.2 — package-integrity + real-data bug-hunt: dep floors, empty-filter fix, flexible query date (2026-07-13)
 
 | Change | Detail |

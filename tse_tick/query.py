@@ -9,7 +9,13 @@ import polars as pl
 import duckdb
 
 from .constants import SUMMARY_TYPES, validate_data_type, validate_time_filter_support
-from .enhanced import NoDataWarning, TruncationWarning, _code_matches_family, parse_period
+from .enhanced import (
+    NoDataWarning,
+    QueryMemoryError,
+    TruncationWarning,
+    _code_matches_family,
+    parse_period,
+)
 
 # Column names are interpolated as double-quoted identifiers (f'"{c}"'), so the
 # only injection risk is a character that closes the quote (") or escapes it
@@ -19,19 +25,36 @@ from .enhanced import NoDataWarning, TruncationWarning, _code_matches_family, pa
 _FORBIDDEN_IDENTIFIER_CHARS = frozenset('"\\;`\r\n\t\x00')
 _MAX_QUERY_ROWS = 10_000_000
 
+# Shared tail for the query-path out-of-memory guidance. The built store is fine;
+# the fix is to pull less of it into RAM per call. Mirrors enhanced.py's
+# _TWO_STAGE_GUIDANCE (the read-path escape hatch) for the query path.
+_QUERY_MEMORY_GUIDANCE = (
+    "The query result is too large to materialize as one in-memory DataFrame. The "
+    "built store is fine; read it back in bounded slices instead: narrow date= to "
+    "a month or day, pass a smaller limit=, or loop query_ticks over sub-periods "
+    "(per day / per month) and process each slice before reading the next."
+)
+
 
 def _duckdb_connect() -> "duckdb.DuckDBPyConnection":
-    """An in-memory DuckDB connection with its spill directory pointed at the
-    system temp dir.
+    """An in-memory DuckDB connection tuned for large, ordered scans.
 
-    An in-memory DuckDB spills large sorts to a ``.tmp/`` folder **in the
-    caller's working directory** by default — a whole-store ``query_ticks``
-    was observed dumping 31 GB there and leaving it orphaned when interrupted
-    (audit finding B3). The system temp dir is the right home for scratch
-    files; configuring it is best-effort (an old DuckDB without the setting
-    still works, just with its default spill location)."""
+    Two best-effort session settings (an old DuckDB missing either still works):
+
+    * ``preserve_insertion_order = false`` — the two structured query builders
+      (:func:`query_ticks`, :func:`_query_extract_batch`) always impose an explicit
+      ``ORDER BY``, so not preserving DuckDB's input order changes nothing they
+      promise (the within-same-timestamp tick tie order is already
+      non-deterministic — see PR #45), while letting the engine avoid buffering the
+      whole result just to keep insertion order, which lowers peak memory on a big
+      ``limit=None`` scan.
+    * ``temp_directory`` — an in-memory DuckDB spills large sorts to a ``.tmp/``
+      folder **in the caller's working directory** by default; a whole-store
+      ``query_ticks`` was observed dumping 31 GB there and orphaning it when
+      interrupted (audit finding B3). The system temp dir is the right home."""
     con = duckdb.connect()
     try:
+        con.execute("SET preserve_insertion_order = false")
         spill = Path(tempfile.gettempdir()) / "tse_tick_duckdb_spill"
         spill.mkdir(parents=True, exist_ok=True)
         escaped = str(spill).replace("'", "''")
@@ -39,6 +62,28 @@ def _duckdb_connect() -> "duckdb.DuckDBPyConnection":
     except Exception:
         pass
     return con
+
+
+def _execute_to_polars(con: "duckdb.DuckDBPyConnection", sql: str) -> pl.DataFrame:
+    """Run ``sql`` and return a Polars frame, converting a DuckDB out-of-memory
+    failure into a catchable :class:`QueryMemoryError`.
+
+    DuckDB raises ``duckdb.OutOfMemoryException`` — which is *not* a
+    :class:`MemoryError` subclass, and whose message advises engine settings
+    (``SET threads=…`` / ``SET memory_limit=…``) the caller cannot reach through
+    this API — when it cannot materialize a result. For ``query_ticks`` that is a
+    ``limit=None`` scan of a multi-year active ticker whose assembled frame
+    overflows RAM at the Arrow conversion. Re-raise it (and a bare
+    :class:`MemoryError` from the host) as :class:`QueryMemoryError`, which carries
+    tse_tick's own slice-the-store remedy and lets callers ``except MemoryError``
+    uniformly across the read and query paths. Other DuckDB errors propagate
+    unchanged."""
+    try:
+        return con.execute(sql).pl()
+    except (duckdb.OutOfMemoryException, MemoryError) as exc:
+        raise QueryMemoryError(
+            f"{_QUERY_MEMORY_GUIDANCE} (underlying error: {type(exc).__name__}: {exc})"
+        ) from exc
 
 
 def _resolve_type_dir(data_dir: str, data_type: str) -> Path:
@@ -187,7 +232,10 @@ def query_ticks(
             When more rows match than the cap the result is truncated and a
             :class:`TruncationWarning` is emitted (capturable via ``warnings``); a
             result that exactly fills the cap with nothing dropped does **not** warn.
-            Pass a larger ``limit=`` or ``limit=None`` for the full result.
+            Pass a larger ``limit=`` or ``limit=None`` for the full result. Note that
+            ``limit=None`` over a multi-year range of an active ticker can assemble a
+            frame far larger than RAM (Toyota 7203 for 2017–2019 is ~136M rows × 95
+            cols ≈ 100 GB) — see *Raises*.
 
     Returns:
         A Polars DataFrame ordered by ``Data Date`` then ``Execution Time``
@@ -195,6 +243,15 @@ def query_ticks(
         ``date`` partition column (``i64`` ``YYYYMMDD``) that Hive partitioning
         derives from the ``date=`` directory, so this store path returns one more
         column than the one-shot :func:`tse_tick.read_ticks`.
+
+    Raises:
+        QueryMemoryError: If the result is too large to materialize as one in-memory
+            DataFrame (a :class:`MemoryError` subclass, so ``except MemoryError``
+            catches both this and the read path's :class:`OneShotMemoryError`). The
+            built store is unaffected — read it back in bounded slices instead (narrow
+            ``date=`` to a month or day, pass a smaller ``limit=``, or loop per day /
+            per month). Replaces DuckDB's raw ``OutOfMemoryException``, whose engine
+            hints are not reachable through this API.
 
     Example:
         >>> df = query_ticks(store, data_type=DataType.INDIVIDUAL_STOCK,
@@ -318,7 +375,7 @@ def query_ticks(
 
     con = _duckdb_connect()
     try:
-        df = con.execute(sql).pl()
+        df = _execute_to_polars(con, sql)
     finally:
         con.close()
 
@@ -445,7 +502,7 @@ def _query_extract_batch(
         )
         con = _duckdb_connect()
         try:
-            summary_result = con.execute(sql).pl()
+            summary_result = _execute_to_polars(con, sql)
         finally:
             con.close()
         return _drop_partition_ticker_column(summary_result)
@@ -522,7 +579,7 @@ def _query_extract_batch(
     )
     con = _duckdb_connect()
     try:
-        tick_result = con.execute(sql).pl()
+        tick_result = _execute_to_polars(con, sql)
     finally:
         con.close()
     return _drop_partition_ticker_column(tick_result)

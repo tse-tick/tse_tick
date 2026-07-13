@@ -102,6 +102,29 @@ class OneShotMemoryError(MemoryError):
     """
 
 
+class QueryMemoryError(MemoryError):
+    """Raised when a store query (:func:`query_ticks`, or the batched Stage-2 query
+    behind :func:`extract_to_store`) would exhaust memory materializing its result
+    as one in-memory DataFrame.
+
+    A ``limit=None`` (or very large ``limit=``) query over a multi-year range of an
+    active ticker can match hundreds of millions of rows — tens to hundreds of GB
+    once assembled as a single Polars frame — which overflows RAM when DuckDB
+    converts the result to Arrow. The underlying ``duckdb.OutOfMemoryException``
+    (which is **not** itself a :class:`MemoryError` subclass) is caught and
+    re-raised as this type so it (a) subclasses :class:`MemoryError`, the same base
+    :class:`OneShotMemoryError` uses, letting one ``except MemoryError`` cover an
+    over-large read *and* an over-large query, and (b) carries tse_tick's own remedy
+    — read the built store back in bounded slices (narrow ``date=``, a smaller
+    ``limit=``, or loop per day / per month) — rather than DuckDB's engine-tuning
+    hints (``SET threads=…`` / ``SET memory_limit=…``) that the caller cannot reach
+    through this API.
+
+    The store itself is unaffected: it is already built and correct, so the fix is
+    purely in how much of it a single call pulls into memory at once.
+    """
+
+
 class SuspiciousZipError(ValueError):
     """Raised when a ZIP trips one of the zip-bomb guards: too many members, an
     implausible compression ratio, or an oversized decompressed member.

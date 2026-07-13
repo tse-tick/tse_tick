@@ -262,7 +262,12 @@ df = tse_tick.read_ticks(
 > - **Loop per day** — call `read_ticks(..., date=day)` for each trading day and
 >   `pl.concat(...)`; each day stays well under the cap.
 > - **Lift the cap** — `read_ticks(..., rows=None)` / `query_ticks(..., limit=None)`
->   reads it all in one shot, bounded only by memory.
+>   reads it all in one shot, bounded only by memory. If the result is too large to
+>   assemble as one frame — a multi-year range of an *active* name is enormous (Toyota
+>   7203 for 2017–2019 is ~136M rows × 95 cols ≈ 100 GB in RAM) — the read path raises
+>   a catchable `tse_tick.OneShotMemoryError` and the query path a catchable
+>   `tse_tick.QueryMemoryError` (both `MemoryError` subclasses), pointing you back to
+>   the bounded slices above rather than a raw DuckDB out-of-memory traceback.
 >
 > If a one-shot read might be large, check for a `TruncationWarning` (it's the signal
 > to switch to the two-stage store):

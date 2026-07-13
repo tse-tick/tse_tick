@@ -107,6 +107,7 @@ from .enhanced import (
     TruncationWarning,
     LargeResultWarning,
     OneShotMemoryError,
+    QueryMemoryError,
 )
 
 from .schemas import (
@@ -181,6 +182,7 @@ __all__ = [
     "TruncationWarning",
     "LargeResultWarning",
     "OneShotMemoryError",
+    "QueryMemoryError",
     "get_schema_individual_stock_95",
     "get_schema_summary_83",
     "get_schema_indices_23",

@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+Round-18 — a catchable memory guard on the DuckDB query path, symmetric with the
+read path's `OneShotMemoryError`. No change to parsed/cleaned row output; the full
+synthetic + real-data suite is green and `flake8`/`mypy` show no new findings.
+
+### Added
+- **`tse_tick.QueryMemoryError`** — a catchable `MemoryError` subclass raised when a
+  store query would exhaust memory materializing its result as one in-memory
+  DataFrame. It is importable on a core (no-`[query]`) install (defined alongside
+  `OneShotMemoryError` in `enhanced.py`, not in the DuckDB-gated `query.py`), and
+  being a `MemoryError` it lets one `except MemoryError` cover an over-large read
+  **and** an over-large query.
+
+### Fixed
+- **`query_ticks(..., limit=None)` over a large range now fails with an actionable,
+  catchable error instead of a raw DuckDB `OutOfMemoryException`.** A `limit=None`
+  query for a multi-year active ticker asks DuckDB to sort and return the whole
+  result as one Polars frame — Toyota `7203` for 2017–2019 is ~136M rows × 95 cols
+  ≈ **100 GB in RAM**, which overflows a typical machine at the Arrow conversion
+  (`ArrowBuffer: failed to allocate …`). The underlying `duckdb.OutOfMemoryException`
+  — whose `SET threads=…` / `SET memory_limit=…` advice the caller cannot reach
+  through this API — is now caught at every high-level `.pl()` site (`query_ticks`
+  and the batched `_query_extract_batch` behind `extract_to_store`) via a new
+  `_execute_to_polars` helper and re-raised as `QueryMemoryError` carrying tse_tick's
+  own remedy: read the built store back in bounded slices (narrow `date=`, a smaller
+  `limit=`, or loop per day / per month). The privileged `query_sql` escape hatch is
+  intentionally left raw. (Reported via the run-16 extraction notebook.)
+
+### Changed
+- **DuckDB query connections disable insertion-order preservation**
+  (`preserve_insertion_order=false`) to lower peak memory on large `limit=None`
+  scans. Safe and output-preserving: `query_ticks` and `_query_extract_batch` always
+  impose an explicit `ORDER BY`, and the within-same-timestamp tick tie order was
+  already non-deterministic (PR #45).
+
 ## [0.14.2] - 2026-07-13
 
 Package-integrity + real-data bug-hunt fixes: correct dependency floors, an
