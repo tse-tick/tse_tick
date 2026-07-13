@@ -2,11 +2,26 @@
 
 ## [Unreleased]
 
-Round-18 — a catchable memory guard on the DuckDB query path, symmetric with the
-read path's `OneShotMemoryError`. No change to parsed/cleaned row output; the full
-synthetic + real-data suite is green and `flake8`/`mypy` show no new findings.
+A memory-safe query path: a catchable guard when a result won't fit in RAM
+(round-18), plus a streaming `export_query` that writes an arbitrarily large slice to
+one Parquet file without ever holding it in memory. No change to parsed/cleaned row
+output; the full synthetic + real-data suite is green and `flake8`/`mypy` show no new
+findings.
 
 ### Added
+- **`tse_tick.export_query(store, output_path, …)`** — stream a store slice to a
+  **single Parquet file** without materializing it. Where `query_ticks(..., limit=None)`
+  over a multi-year active ticker raises `QueryMemoryError` (~100 GB for Toyota 7203 /
+  2017–2019), `export_query` walks the store's `date=` partitions in order and appends
+  each stored day as a Parquet row group, so peak memory stays bounded regardless of
+  period length (measured: a 3-month 7203 export plateaued ~3.6 GB, vs 2.8 GB for one
+  month — sub-linear). It reuses `query_ticks` per day, so the written rows are
+  **identical** to concatenating `query_ticks(..., limit=None)` over the same slice
+  (verified on real data: a 4.98M-row month matched exactly), for all four data types,
+  with family/`date=`/time-window/column filters. Returns a small manifest
+  (`{path, rows, dates, …}`), not the data; refuses to overwrite an existing file
+  unless `overwrite=True`; a no-data export writes a typed-empty file and warns
+  `NoDataWarning`. Requires the `[query]` extra. (Issue #59.)
 - **`tse_tick.QueryMemoryError`** — a catchable `MemoryError` subclass raised when a
   store query would exhaust memory materializing its result as one in-memory
   DataFrame. It is importable on a core (no-`[query]`) install (defined alongside
