@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-07-14
+
 A memory-safe query path: a catchable guard when a result won't fit in RAM
 (round-18), plus a streaming `export_query` that writes an arbitrarily large slice to
 one Parquet file without ever holding it in memory. No change to parsed/cleaned row

@@ -12,7 +12,7 @@ Developed at Keio University, Nakatsuma Seminar.
 # tse_tick/__init__.py
 import polars as pl
 
-__version__ = "0.14.2"
+__version__ = "0.14.3"
 __author__ = "Kazumi Li, Masataka Hayashi, Peter Romero"
 __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"

@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.14.2 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.14.3 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=1.0.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=1.1.0` (both are hard floors — see v0.14.2 below) |
@@ -127,7 +127,7 @@ tse_tick/                          # Project root
 
 ## 4. Key Changes (CHANGELOG Summary)
 
-### Unreleased — memory-safe query path: streaming export + catchable OOM guard
+### v0.14.3 — memory-safe query path: streaming export + catchable OOM guard (2026-07-14)
 
 | Change | Detail |
 |--------|--------|
