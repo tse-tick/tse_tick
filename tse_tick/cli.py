@@ -3,11 +3,31 @@
 import argparse
 import logging
 import sys
+import warnings
 
 from tse_tick.ingest import ingest_directory, ingest_year_from_root, ingest_period, ingest_event_windows_period
 from tse_tick.constants import DATA_TYPES, VALID_DATA_TYPES
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_showwarning(message, category, filename, lineno, file=None, line=None):
+    """``warnings.showwarning`` replacement installed only while the CLI runs.
+
+    Renders tse_tick's own warnings (:class:`~tse_tick.NoDataWarning`,
+    :class:`~tse_tick.TruncationWarning`, and the rest — all defined in the
+    ``tse_tick`` package) as a clean one-line ``Warning: <message>`` note on
+    stdout. A no-data holiday or a truncation is expected feedback, not an error;
+    Python's default rendering (``<path>\\cli.py:208: NoDataWarning: ...`` plus an
+    echoed source line) reads like an internal crash to a non-coder CLI user and
+    lands on stderr (red under PowerShell). Warnings from other packages keep the
+    stock formatting so their context isn't lost.
+    """
+    if getattr(category, "__module__", "").startswith("tse_tick"):
+        print(f"Warning: {message}")
+    else:
+        stream = file if file is not None else sys.stderr
+        stream.write(warnings.formatwarning(message, category, filename, lineno, line))
 
 
 def _parse_years(years_str: str) -> list[int]:
@@ -412,13 +432,30 @@ def main() -> None:
     root.addHandler(handler)
     root.setLevel(level)
 
-    if args.command == "ingest":
-        cmd_ingest(args)
-    elif args.command == "export":
-        cmd_export(args)
-    else:
-        parser.print_help()
-        sys.exit(1)
+    # Two novice-facing presentation fixes, scoped to the CLI invocation only:
+    #  * tse_tick's own warnings print as clean notes (see _clean_showwarning);
+    #  * the library's deliberate user-facing errors (unsupported time filter,
+    #    bad --period, a missing --input-root or @tickers file — ValueError /
+    #    FileNotFoundError, each already carrying a complete message) surface as a
+    #    one-line "Error: ..." instead of a raw traceback exposing internal paths.
+    # catch_warnings() restores the global warnings state on exit, so the
+    # library's warn-based API contract is untouched outside this call. The full
+    # traceback stays available via --log-level DEBUG.
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")  # a single CLI run always shows its warnings
+        warnings.showwarning = _clean_showwarning
+        try:
+            if args.command == "ingest":
+                cmd_ingest(args)
+            elif args.command == "export":
+                cmd_export(args)
+            else:
+                parser.print_help()
+                sys.exit(1)
+        except (ValueError, FileNotFoundError) as exc:
+            logger.debug("CLI command failed", exc_info=True)  # traceback at --log-level DEBUG
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

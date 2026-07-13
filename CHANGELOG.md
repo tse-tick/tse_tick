@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+- **CLI errors are one-liners, not Python tracebacks.** `tse-tick export`/`ingest`
+  let the library's deliberate user-facing errors — an unsupported
+  `--start-time`/`--end-time` on a daily-summary type, a malformed `--period`, a
+  missing `--input-root` or `@tickers` file (`ValueError` / `FileNotFoundError`, each
+  already carrying a complete message) — propagate as a full traceback exposing
+  internal module paths (`…\tse_tick\constants.py:112`). They now surface as a single
+  `Error: <message>` line on stderr with exit code 1. The full traceback stays
+  available with `--log-level DEBUG`.
+- **CLI no-data / truncation notices are clean.** The CLI rendered `tse_tick`'s own
+  warnings (e.g. `NoDataWarning` on an exchange holiday) with Python's default
+  `…\cli.py:NNN: NoDataWarning:` prefix and an echoed source line on stderr (red under
+  PowerShell). They now print as a clean `Warning: <message>` note on stdout (exit 0,
+  the typed-empty output file still written). CLI-only — the library's `warnings`-based
+  API contract (catchable `NoDataWarning` / `TruncationWarning` / …) is unchanged.
+
 ## [0.14.3] - 2026-07-14
 
 A memory-safe query path: a catchable guard when a result won't fit in RAM

@@ -141,6 +141,12 @@ tse-tick export --data-type individual_stock --tickers 7203 \
     --output toyota.csv --store /path/to/toyota_store
 ```
 
+Novice mistakes read in plain language rather than as a Python traceback: a malformed
+`--period`, a missing `--input-root`, or a time filter on a daily-summary type prints a
+one-line `Error: …` (exit code 1), and a no-data day (e.g. an exchange holiday) prints a
+`Warning: …` note and still writes the empty file (exit 0). Pass `--log-level DEBUG` to
+see the full traceback.
+
 ### Query the Parquet store
 
 > **Note:** the query functions (`query_ticks`, `query_sql`, `get_available_*`) require the

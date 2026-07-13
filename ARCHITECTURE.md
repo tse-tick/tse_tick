@@ -127,6 +127,14 @@ tse_tick/                          # Project root
 
 ## 4. Key Changes (CHANGELOG Summary)
 
+### [Unreleased] — CLI presentation: friendly errors & no-data notes (normal-user QA)
+
+| Change | Detail |
+|--------|--------|
+| CLI error rendering | `main()` wraps the `ingest`/`export` dispatch and converts the library's deliberate user-facing errors (`ValueError` from `validate_time_filter_support` / `parse_period`, `FileNotFoundError` from a missing `--input-root` or `@tickers` file) into a one-line `Error: <message>` on stderr + exit 1, instead of letting a full traceback (internal module paths) reach a non-coder. Scope is intentionally the *input-mistake* families only — an unexpected exception still raises (a real bug should be loud); the caught traceback is logged at `--log-level DEBUG` (`logger.debug(exc_info=True)`) |
+| CLI warning rendering | A CLI-only `warnings.showwarning` (`_clean_showwarning`, installed inside a `catch_warnings()` block so global state is restored) prints tse_tick's own warnings — detected via `category.__module__.startswith("tse_tick")` — as a clean `Warning: <message>` note on **stdout** (consistent with the existing stdout-progress / PowerShell-red-avoidance choice), dropping Python's `…\cli.py:NNN: NoDataWarning:` prefix + echoed source line. Third-party warnings keep the stock formatting. `simplefilter("always")` so a single CLI run always shows its notices. **Library-only warn contract is untouched** (catchable `NoDataWarning`/`TruncationWarning`/… unchanged for API users) |
+| Tests | `test_cli.py` (+4): time-filter-on-summary and missing-`--input-root` → clean `Error:` (no traceback, exit 1); bad `--period` → clean `Error:` for `ingest`; no-data day → clean `Warning:` note on stdout with no warning chrome, empty file still written |
+
 ### v0.14.3 — memory-safe query path: streaming export + catchable OOM guard (2026-07-14)
 
 | Change | Detail |
