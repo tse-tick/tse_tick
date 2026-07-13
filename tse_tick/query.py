@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, cast
 
 import polars as pl
+import pyarrow.parquet as pq
 import duckdb
 
 from .constants import SUMMARY_TYPES, validate_data_type, validate_time_filter_support
@@ -404,6 +405,150 @@ def query_ticks(
         _warn_query_no_data(data_type, ticker, date)
 
     return df
+
+
+def export_query(
+    data_dir: str,
+    output_path: str,
+    data_type: str = "individual_stock",
+    ticker: Optional[Union[int, str]] = None,
+    date: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    columns: Optional[list[str]] = None,
+    compression: str = "zstd",
+    overwrite: bool = False,
+) -> Dict[str, object]:
+    """Stream a **pre-built Parquet store** slice to a single Parquet file, without
+    ever holding the whole result in memory.
+
+    The memory-safe counterpart to :func:`query_ticks` for results too large to
+    assemble as one in-memory DataFrame: where ``query_ticks(..., limit=None)`` over
+    a multi-year active ticker raises :class:`QueryMemoryError` (~100 GB for Toyota
+    7203 / 2017–2019), this walks the store's ``date=`` partitions **in order** and
+    appends each stored day as a Parquet row group, so peak memory stays ~one trading
+    day regardless of period length. It reuses :func:`query_ticks` per day, so the
+    written rows are identical to concatenating ``query_ticks(..., limit=None)`` over
+    the same slice (modulo the already non-deterministic same-timestamp tick tie
+    order — see PR #45). Requires the ``[query]`` extra (DuckDB).
+
+    Args:
+        data_dir: Store root: the directory that contains ``<data_type>/``.
+        output_path: Destination ``.parquet`` file. Parent directories are created.
+        data_type: One of the four NEEDS types (see :func:`query_ticks`).
+        ticker: Stock/index code (``int`` or ``str``) with the same family semantics
+            as :func:`query_ticks` (a 4-char code exports its whole share-class
+            family); ``None`` exports every code.
+        date: A day / month / year / ``start-end`` range (the flexible forms
+            :func:`query_ticks` accepts); ``None`` exports every stored date.
+        start_time: Inclusive ``"HH:MM:SS"`` lower bound (tick types only).
+        end_time: Inclusive ``"HH:MM:SS"`` upper bound (tick types only).
+        columns: Column projection; ``None`` writes all columns.
+        compression: Parquet codec for the output file (default ``"zstd"``).
+        overwrite: If ``output_path`` already exists, replace it only when ``True``;
+            otherwise raise :class:`FileExistsError` (so an export can't silently
+            clobber a file).
+
+    Returns:
+        A small manifest ``dict`` — ``{"path", "rows", "dates", "data_type",
+        "ticker"}`` — where ``rows`` is the total rows written and ``dates`` the
+        number of stored days that contributed rows. It deliberately does **not**
+        return the data, so a huge export stays memory-bounded.
+
+    Raises:
+        FileExistsError: If ``output_path`` exists and ``overwrite`` is ``False``.
+
+    Example:
+        >>> export_query(store, "toyota_2017_2019.parquet",
+        ...              data_type="individual_stock", ticker=7203, date="2017-2019")
+        {'path': 'toyota_2017_2019.parquet', 'rows': 136436016, 'dates': 733, ...}
+    """
+    validate_data_type(data_type)
+    validate_time_filter_support(data_type, start_time, end_time)
+    _resolve_type_dir(data_dir, data_type)  # store-exists + path-traversal validation
+
+    out_path = Path(output_path)
+    if out_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"{output_path!r} already exists; pass overwrite=True to replace it."
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lo, hi = _date_range_bounds(date) if date is not None else (None, None)
+    days = [
+        d
+        for d in get_available_dates(data_dir, data_type)
+        if (lo is None or d >= lo) and (hi is None or d <= hi)
+    ]
+
+    writer: Optional["pq.ParquetWriter"] = None
+    total_rows = 0
+    dates_written = 0
+    try:
+        # Per-day queries on days a filtered ticker never traded resolve to 0 rows and
+        # would each emit a NoDataWarning; suppress those and warn once, below, only if
+        # the whole export is empty — matching query_ticks's single "no data" signal.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", NoDataWarning)
+            for day in days:
+                frame = query_ticks(
+                    data_dir,
+                    data_type=data_type,
+                    ticker=ticker,
+                    date=day,
+                    start_time=start_time,
+                    end_time=end_time,
+                    columns=columns,
+                    limit=None,
+                )
+                if frame.height == 0:
+                    continue
+                table = frame.to_arrow()
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        str(out_path), table.schema, compression=compression
+                    )
+                elif table.schema != writer.schema:
+                    # Defensive: the store's per-day schema is stable, but align an
+                    # all-null column that a single day might type differently.
+                    table = table.cast(writer.schema)
+                writer.write_table(table)
+                total_rows += frame.height
+                dates_written += 1
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if writer is None:
+        # Nothing matched across the range (unknown code, a period with no stored
+        # days, or filters that excluded every row). Write query_ticks's typed-empty
+        # frame so the output keeps the full schema, and let its single NoDataWarning
+        # surface — the same "no data" signal both read paths emit.
+        empty_table = query_ticks(
+            data_dir,
+            data_type=data_type,
+            ticker=ticker,
+            date=date,
+            start_time=start_time,
+            end_time=end_time,
+            columns=columns,
+            limit=None,
+        ).to_arrow()
+        empty_writer = pq.ParquetWriter(
+            str(out_path), empty_table.schema, compression=compression
+        )
+        try:
+            empty_writer.write_table(empty_table)
+        finally:
+            empty_writer.close()
+
+    return {
+        "path": str(out_path),
+        "rows": total_rows,
+        "dates": dates_written,
+        "data_type": data_type,
+        "ticker": ticker,
+    }
 
 
 def _query_extract_batch(

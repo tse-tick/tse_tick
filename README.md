@@ -169,6 +169,30 @@ tickers = tse_tick.get_available_tickers("/path/to/PARQUET_STORE", date="2024020
 > `"YYYYMM"`, year `"YYYY"`, or a `"start-end"` range (the same forms `read_ticks` / `ingest_period`
 > take) — so a store you built with a month can be queried with that same month string.
 
+#### Export a large slice to one Parquet file (memory-safe)
+
+When a slice is too big to hold in RAM as one DataFrame (a multi-year active ticker), stream it
+straight to a single Parquet file instead of calling `query_ticks(..., limit=None)`:
+
+```python
+import tse_tick
+
+manifest = tse_tick.export_query(
+    "/path/to/PARQUET_STORE",
+    "toyota_2017_2019.parquet",       # single output file
+    data_type="individual_stock",
+    ticker=7203,
+    date="2017-2019",
+    overwrite=False,                  # refuses to clobber an existing file unless True
+)
+# {'path': 'toyota_2017_2019.parquet', 'rows': 136436016, 'dates': 733, ...}
+```
+
+`export_query` walks the store's days in order and appends each as a Parquet row group, so peak
+memory stays bounded regardless of period length (it does *not* return the data — just a manifest).
+Its output is row-identical to concatenating `query_ticks(..., limit=None)` over the same slice.
+Requires the `[query]` extra.
+
 ### Feature extraction
 
 ```python
@@ -259,6 +283,12 @@ df = tse_tick.read_ticks(
 >   capturable `tse_tick.LargeResultWarning` fires first — for multi-year periods of
 >   an active ticker, ignore the returned frame and read the store in `query_ticks`
 >   slices instead (the frame can be tens of GB).
+> - **`export_query(store, out.parquet, ...)`** — stream the whole slice straight to a
+>   **single Parquet file** without ever holding it in memory. The memory-safe way to
+>   get a multi-year active ticker in *one* place: it walks the store's days in order
+>   and appends each as a row group, so peak RAM stays bounded regardless of period
+>   length (a 3-month 7203 export plateaus ~3.6 GB vs the ~100 GB a whole-frame read
+>   would need). Returns a small manifest, not the data. Requires the `[query]` extra.
 > - **Loop per day** — call `read_ticks(..., date=day)` for each trading day and
 >   `pl.concat(...)`; each day stays well under the cap.
 > - **Lift the cap** — `read_ticks(..., rows=None)` / `query_ticks(..., limit=None)`

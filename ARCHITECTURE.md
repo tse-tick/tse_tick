@@ -127,13 +127,14 @@ tse_tick/                          # Project root
 
 ## 4. Key Changes (CHANGELOG Summary)
 
-### Unreleased — round-18: catchable query-path memory guard
+### Unreleased — memory-safe query path: streaming export + catchable OOM guard
 
 | Change | Detail |
 |--------|--------|
+| `export_query` (issue #59) | New public `export_query(store, output_path, …)` streams a store slice to a **single Parquet file** without materializing it: it walks the store's `date=` partitions in order and appends each stored day as a Parquet row group (via `pyarrow.parquet.ParquetWriter`), reusing `query_ticks` per day so the output is row-identical to concatenating `query_ticks(..., limit=None)` over the slice (same tie-order caveat, PR #45). Peak memory is bounded regardless of period length — the way to get a multi-year active ticker to disk where `query_ticks(limit=None)` OOMs (measured: 3-month 7203 export plateaus ~3.6 GB; a 4.98M-row real-data month matched `query_ticks` exactly). Returns a manifest `{path, rows, dates, …}`; `overwrite=False` refuses to clobber; a no-data export writes a typed-empty file + `NoDataWarning`. Requires `[query]`. Known follow-up: it re-globs the store per day (query_ticks's N+1), fine for a single-ticker store, optimizable to one walk later |
 | Query OOM (round-18) | `query_ticks` / `_query_extract_batch` (the `extract_to_store` Stage-2) now raise a catchable `QueryMemoryError` (a `MemoryError`, sibling to `OneShotMemoryError`) instead of leaking DuckDB's raw `OutOfMemoryException`. A `limit=None` scan of a multi-year active ticker assembles as one frame that overflows RAM at the Arrow conversion (7203 / 2017–2019 ≈ 136M rows × 95 cols ≈ 100 GB); the new error carries tse_tick's own remedy (read the built store in bounded slices) rather than DuckDB's un-reachable `SET threads=…` hint. Converted at every high-level `.pl()` site via `_execute_to_polars`; the `query_sql` escape hatch is intentionally left raw. Symmetric with the read path's `OneShotMemoryError` |
 | Memory hardening | DuckDB query connections set `preserve_insertion_order=false` to lower peak memory on large ordered scans. Safe: both structured builders always impose an explicit `ORDER BY`, and the within-same-timestamp tie order was already non-deterministic (PR #45), so output is unchanged |
-| Tests | `test_round18_fixes.py` (7): catchable/`MemoryError` type + import-without-`[query]`, `_execute_to_polars` OOM/`MemoryError` conversion and pass-through of other errors, `query_ticks` end-to-end conversion, insertion-order setting, ordering preserved |
+| Tests | `test_export_query.py` (11): output identity vs `query_ticks(limit=None)` across all four types + family/date-range/time-window/columns, per-day row-group streaming, overwrite guard, typed-empty no-data. `test_round18_fixes.py` (7): catchable/`MemoryError` type + import-without-`[query]`, `_execute_to_polars` conversion + pass-through, end-to-end, insertion-order, ordering preserved |
 
 ### v0.14.2 — package-integrity + real-data bug-hunt: dep floors, empty-filter fix, flexible query date (2026-07-13)
 

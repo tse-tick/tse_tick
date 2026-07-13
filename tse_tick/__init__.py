@@ -151,6 +151,7 @@ from .translate import translate, mapping
 try:
     from .query import (
         query_ticks,
+        export_query,
         query_sql,
         get_available_dates,
         get_available_tickers,
@@ -166,6 +167,7 @@ except ImportError:
         )
 
     query_ticks = _duckdb_unavailable
+    export_query = _duckdb_unavailable
     query_sql = _duckdb_unavailable
     get_available_dates = _duckdb_unavailable
     get_available_tickers = _duckdb_unavailable
@@ -200,6 +202,7 @@ __all__ = [
     "write_event_window_parquet",
     "read_partitioned_parquet",
     "query_ticks",
+    "export_query",
     "query_sql",
     "get_available_dates",
     "get_available_tickers",
