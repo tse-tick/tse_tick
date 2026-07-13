@@ -165,6 +165,10 @@ dates = tse_tick.get_available_dates("/path/to/PARQUET_STORE")
 tickers = tse_tick.get_available_tickers("/path/to/PARQUET_STORE", date="20240201")
 ```
 
+> `query_ticks` / `get_available_tickers` accept a flexible `date=` — a day `"YYYYMMDD"`, month
+> `"YYYYMM"`, year `"YYYY"`, or a `"start-end"` range (the same forms `read_ticks` / `ingest_period`
+> take) — so a store you built with a month can be queried with that same month string.
+
 ### Feature extraction
 
 ```python

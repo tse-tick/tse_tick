@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-07-13
+
+Package-integrity + real-data bug-hunt fixes: correct dependency floors, an
+empty-`ticker_filter` correctness fix, and a flexible query-side `date=`. No
+changes to parsed/cleaned row output — every fix is a filter-gating, formatting,
+packaging, or query-date change; the full synthetic + real-data suite is green and
+`flake8`/`mypy` show no new findings.
+
+### Fixed
+- **`read_ticks(data_type="individual_stock", ticker_filter=set())` now matches
+  nothing instead of silently returning the whole unfiltered market.** The
+  `individual_stock` raw-byte fast path gated on the *truthiness* of the filter, so
+  an empty (falsy) `set()` fell through to the "no filter" branch and returned every
+  code for the window — with no warning — while the same call on `indices` correctly
+  returned empty and `extract_to_store(ticker=set())` correctly raised. It now
+  returns a typed-empty frame and the capturable `NoDataWarning`, mirroring the
+  `indices` sibling. Three truthiness gates were corrected to `is not None`: the
+  field-5 filter branch, the one-shot size-guard exemption, and the no-rows
+  typed-empty return in `get_1y_dataframe` (the last was the one that would
+  otherwise have turned an empty set into a raised `ValueError`). (Report B1.)
+- **`OneShotMemoryError` no longer renders a sub-GB limit as `"0 GB"`.** A small
+  `max_oneshot_bytes` override (e.g. `1000`) printed `"… exceeds the 0 GB one-shot
+  limit"`; both the estimated size and the limit are now formatted in the largest
+  fitting unit to three significant figures (`"1000 B"`, `"150 MB"`, `"5 GB"`). The
+  default 5 GB message is unchanged. (Report B2.)
+
+### Changed
+- **Dependency floors raised to what the code actually requires: `polars>=1.0.0`**
+  (was `>=0.20.0`) **and `duckdb>=1.1.0`** (was `>=0.9.0`, in the `[query]` extra).
+  The code uses `pl.String`, `list.get(…, null_on_oob=)`, `read_csv(schema_overrides=)`,
+  and the partitioned-parquet writer — none present in polars 0.20.x — and
+  `query_ticks` relies on DuckDB hive partitioning not deriving a column from the
+  `ticker=NNNN.parquet` filename (leaked as a spurious `ticker` column on duckdb
+  ≤1.0.0). An install resolving to the old floors imported but crashed on the first
+  ticker-filtered read, which broke both `examples/notebooks`. The floors are now
+  pinned with in-line comments so they are not lowered again. (Report A1.)
+- **`query_ticks` and `get_available_tickers` accept the same flexible `date=` forms
+  as `read_ticks` / `ingest_period`** — a day `"YYYYMMDD"`, month `"YYYYMM"`, year
+  `"YYYY"`, or a `"start-end"` range — matched against the store's Hive `date`
+  partition, instead of only a single exact `YYYYMMDD` day. Building a store with a
+  month and then querying it with that same month string now works. Delegates to
+  `parse_period`, so the accepted syntax and error messages are identical across the
+  read and query paths. (Report B3.)
+- **`query_ticks` and the batched Stage-2 query defensively drop a stray Hive
+  `ticker` column** if a past or future DuckDB derives one from the
+  `ticker=NNNN.parquet` filename. No NEEDS output schema has a literal `ticker`
+  column (codes are `Stock Code` / `Index Code`), so the drop is always safe and
+  makes the store path resilient across DuckDB versions regardless of the floor.
+  (Report A2.)
+
 ## [0.14.1] - 2026-07-13
 
 Round-16 post-deployment bug-hunt fixes: consistent no-data signalling and
