@@ -146,10 +146,21 @@ def _resolve_oneshot_bytes(max_oneshot_bytes):
     return max_oneshot_bytes
 
 
+def _format_size(n_bytes: float) -> str:
+    """Render a byte count in the largest unit that keeps it >= 1, to 3 significant
+    digits — so a sub-GB one-shot limit reads as e.g. ``"150 MB"`` or ``"1000 B"``
+    instead of the misleading ``"0 GB"`` a fixed ``GB`` format produced for a small
+    ``max_oneshot_bytes`` override (report B2)."""
+    for unit, size in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if n_bytes >= size:
+            return f"{n_bytes / size:.3g} {unit}"
+    return f"{int(n_bytes)} B"
+
+
 def _oneshot_limit_message(total_bytes: int, limit_bytes: int) -> str:
     return (
-        f"Estimated decompressed size ({total_bytes / 1024**3:.1f} GB) exceeds the "
-        f"{limit_bytes / 1024**3:.0f} GB one-shot limit. {_TWO_STAGE_GUIDANCE}"
+        f"Estimated decompressed size ({_format_size(total_bytes)}) exceeds the "
+        f"{_format_size(limit_bytes)} one-shot limit. {_TWO_STAGE_GUIDANCE}"
     )
 
 
@@ -630,7 +641,10 @@ def _read_zip_member(
                 n_lines += 1
             return _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
 
-        if ticker_filter and kind == "individual_stock":
+        if ticker_filter is not None and kind == "individual_stock":
+            # ``is not None`` (not truthiness): an *empty* set is a real filter that
+            # matches nothing, so it must reach the field-5 path (-> empty result),
+            # not fall through to the unfiltered read below (report B1).
             # Vectorized field-5 filter (issue #38): byte-identical
             # kept-line set to the old ``extract_stock_code`` per-line
             # loop, ~2x faster per part, and still bounded-memory (only
@@ -696,7 +710,11 @@ def get_1y_dataframe(
     # The individual_stock ticker fast path keeps only matching lines (bounded
     # memory), so the cumulative size ceiling — meant for full-frame loads — must
     # not block it (alpha-review finding 4). ``None`` disables the guard entirely.
-    guard_bytes = None if (ticker_filter and kind == "individual_stock") else max_oneshot_bytes
+    guard_bytes = (
+        None
+        if (ticker_filter is not None and kind == "individual_stock")
+        else max_oneshot_bytes
+    )
 
     schema_override = {f"column_{col+1}": pl.String for col in range(95)}
 
@@ -768,9 +786,13 @@ def get_1y_dataframe(
             continue
 
     if not dfs:
-        if ticker_filter:
-            # No matching rows: return a 0-row frame of the correct raw width so
-            # the cleaning pipeline still yields a fully-typed empty result.
+        if ticker_filter is not None:
+            # A filter was applied but matched no rows — including a deliberately
+            # empty ``set()``, which matches nothing (report B1). Return a 0-row
+            # frame of the correct raw width so the cleaning pipeline still yields a
+            # fully-typed empty result, instead of raising as a genuinely unfiltered
+            # read with no data does. ``is not None`` (not truthiness) is what routes
+            # the empty set here rather than to the raise below.
             return pl.DataFrame(
                 schema={f"column_{i + 1}": pl.String for i in range(_raw_width(kind, year))}
             )

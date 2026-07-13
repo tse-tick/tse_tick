@@ -3,13 +3,13 @@ import re
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union, cast
 
 import polars as pl
 import duckdb
 
 from .constants import SUMMARY_TYPES, validate_data_type, validate_time_filter_support
-from .enhanced import NoDataWarning, TruncationWarning, _code_matches_family
+from .enhanced import NoDataWarning, TruncationWarning, _code_matches_family, parse_period
 
 # Column names are interpolated as double-quoted identifiers (f'"{c}"'), so the
 # only injection risk is a character that closes the quote (") or escapes it
@@ -68,6 +68,31 @@ def _validate_date(date_str: str) -> None:
         raise ValueError(f"Invalid date format (expected YYYYMMDD): {date_str!r}")
 
 
+def _date_range_bounds(date_str: str) -> "tuple[str, str]":
+    """Inclusive ``(lo, hi)`` ``YYYYMMDD`` bounds for a flexible ``date=`` argument.
+
+    Accepts the same forms ``read_ticks`` / ``ingest_period`` do — ``YYYY`` /
+    ``YYYYMM`` / ``YYYYMMDD`` / ``start-end`` — by delegating to
+    :func:`tse_tick.parse_period`, so the accepted syntax and the error messages
+    stay identical across the read and query paths (report B3). The bounds map onto
+    the store's Hive ``date`` partition: a lone day gives ``lo == hi``; a month or
+    year widens to that unit's first/last calendar slot (``01``..``31`` /
+    ``0101``..``1231`` — safe inclusive upper bounds, since no ``YYYYMMDD`` exceeds
+    them)."""
+    info = parse_period(date_str)
+    granularity = cast(str, info["granularity"])
+    if granularity == "date":
+        dates = cast(List[str], info["dates"])  # ascending & contiguous; a day is [d]
+        return dates[0], dates[-1]
+    if granularity == "month":
+        months_by_year = cast(Dict[int, List[int]], info["months_by_year"])
+        pairs = [(y, m) for y, months in months_by_year.items() for m in months]
+        (lo_y, lo_m), (hi_y, hi_m) = min(pairs), max(pairs)
+        return f"{lo_y}{lo_m:02d}01", f"{hi_y}{hi_m:02d}31"
+    years = cast(List[int], info["years"])  # granularity == "year"
+    return f"{min(years)}0101", f"{max(years)}1231"
+
+
 def _validate_time(time_str: str) -> None:
     if not re.match(r"^\d{2}:\d{2}:\d{2}$", time_str):
         raise ValueError(f"Invalid time format (expected HH:MM:SS): {time_str!r}")
@@ -108,6 +133,20 @@ def _warn_query_no_data(data_type: str, ticker, date) -> None:
     )
 
 
+def _drop_partition_ticker_column(df: pl.DataFrame) -> pl.DataFrame:
+    """Drop a stray ``ticker`` column if the query surfaced one.
+
+    The store encodes the code in the Parquet *filename* (``ticker=NNNN.parquet``)
+    and the date in the directory. Modern DuckDB (the ``duckdb>=1.1.0`` floor)
+    exposes only the directory key (``date``) as a Hive column, but older DuckDB
+    also derived a ``ticker`` column from the filename and leaked it into the
+    result. No NEEDS output schema has a literal ``ticker`` column (codes are
+    ``Stock Code`` / ``Index Code``), so dropping it is always safe and keeps the
+    store path robust across DuckDB versions regardless of the declared floor
+    (report A2)."""
+    return df.drop("ticker") if "ticker" in df.columns else df
+
+
 def query_ticks(
     data_dir: str,
     data_type: str = "individual_stock",
@@ -134,7 +173,10 @@ def query_ticks(
             A 4-char stock code selects its whole share-class family (``"7203"``
             also returns New Shares ``72031``, matching what a filtered ingest
             stores for it); a 5-char code reads exactly that share class.
-        date: Trading day as ``"YYYYMMDD"``; ``None`` for every stored date.
+        date: A day ``"YYYYMMDD"``, month ``"YYYYMM"``, year ``"YYYY"``, or a
+            ``"start-end"`` range — the same flexible forms :func:`read_ticks` and
+            ``ingest_period`` accept, matched against the store's ``date``
+            partition. ``None`` for every stored date.
         start_time: Inclusive lower bound on time-of-day (``"HH:MM:SS"``). For
             ``individual_stock``, quote-only rows (blank ``Execution Time``) are
             matched on their ``Update Time`` instead, so an in-window order book
@@ -231,8 +273,10 @@ def query_ticks(
 
     conditions: list[str] = []
     if date is not None:
-        _validate_date(date)
-        conditions.append(f"date = '{date}'")
+        lo, hi = _date_range_bounds(date)
+        conditions.append(
+            f"date = '{lo}'" if lo == hi else f"date >= '{lo}' AND date <= '{hi}'"
+        )
     if code_condition is not None:
         conditions.append(code_condition)
     # Execution Time is stored as a 6-digit "HHMMSS" string; the public API
@@ -277,6 +321,10 @@ def query_ticks(
         df = con.execute(sql).pl()
     finally:
         con.close()
+
+    # Defensive: keep the store path robust to a DuckDB that derives a `ticker`
+    # column from the ticker=NNNN.parquet filename (older versions did — report A2).
+    df = _drop_partition_ticker_column(df)
 
     # We fetched limit+1 above; if more than `limit` rows came back the result was
     # truncated — trim to `limit` and surface the same capturable TruncationWarning
@@ -397,9 +445,10 @@ def _query_extract_batch(
         )
         con = _duckdb_connect()
         try:
-            return con.execute(sql).pl()
+            summary_result = con.execute(sql).pl()
         finally:
             con.close()
+        return _drop_partition_ticker_column(summary_result)
 
     # Tick types: ONE scan over all the requested tickers' files (the file list is built
     # from a SINGLE store walk, vs the loop's fresh connection + whole-store glob per
@@ -473,9 +522,10 @@ def _query_extract_batch(
     )
     con = _duckdb_connect()
     try:
-        return con.execute(sql).pl()
+        tick_result = con.execute(sql).pl()
     finally:
         con.close()
+    return _drop_partition_ticker_column(tick_result)
 
 
 def query_sql(
@@ -549,7 +599,9 @@ def get_available_tickers(
     Args:
         data_dir: Store root: the directory that contains ``<data_type>/``.
         data_type: Which store to inspect (see :func:`query_ticks`).
-        date: Restrict to a single ``"YYYYMMDD"`` day; ``None`` scans all days.
+        date: Restrict to a day ``"YYYYMMDD"``, month ``"YYYYMM"``, year ``"YYYY"``,
+            or a ``"start-end"`` range (the same flexible forms :func:`query_ticks`
+            and :func:`read_ticks` accept); ``None`` scans all days.
 
     Returns:
         Sorted **string** codes (e.g. ``["6758", "7203", "9984"]``) — ready to
@@ -562,11 +614,14 @@ def get_available_tickers(
     """
     type_dir = _resolve_type_dir(data_dir, data_type)
 
-    date_dirs = (
-        [type_dir / f"date={date}"]
-        if date is not None
-        else [d for d in type_dir.iterdir() if d.is_dir() and d.name.startswith("date=")]
-    )
+    all_date_dirs = [
+        d for d in type_dir.iterdir() if d.is_dir() and d.name.startswith("date=")
+    ]
+    if date is None:
+        date_dirs = all_date_dirs
+    else:
+        lo, hi = _date_range_bounds(date)
+        date_dirs = [d for d in all_date_dirs if lo <= d.name[len("date=") :] <= hi]
 
     def _sort_key(code: str):
         # Pure-digit codes sort numerically ("9984" < "10000"); alphanumeric

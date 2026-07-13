@@ -5,10 +5,10 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.14.0 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.14.2 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
-| Dependencies | core: `polars>=0.20.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=0.9.0` |
+| Dependencies | core: `polars>=1.0.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=1.1.0` (both are hard floors — see v0.14.2 below) |
 | Repository | `https://github.com/tse-tick/tse_tick.git` |
 | Data | Nikkei NEEDS high-frequency tick data (Tokyo Stock Exchange, proprietary) |
 | Year range | 2016–2025 |
@@ -126,6 +126,16 @@ tse_tick/                          # Project root
 ---
 
 ## 4. Key Changes (CHANGELOG Summary)
+
+### v0.14.2 — package-integrity + real-data bug-hunt: dep floors, empty-filter fix, flexible query date (2026-07-13)
+
+| Change | Detail |
+|--------|--------|
+| Dependency floors | `polars>=1.0.0` (was `0.20.0`) and `duckdb>=1.1.0` (was `0.9.0`, `[query]` extra). The code uses `pl.String`, `list.get(…, null_on_oob=)`, `read_csv(schema_overrides=)`, and the partitioned-parquet writer (all polars ≥1.0.0), and `query_ticks` relies on DuckDB hive partitioning **not** deriving a column from the `ticker=NNNN.parquet` filename (≥1.1.0). Old floors imported but crashed on the first ticker-filtered read → broke both `examples/notebooks`. Pinned with in-line comments in `pyproject.toml` |
+| Empty `ticker_filter` (B1) | `read_ticks(individual_stock, ticker_filter=set())` returned the **whole unfiltered market** — the fast path gated on filter *truthiness*, so an empty (falsy) set fell through to the no-filter branch. Now matches nothing (typed-empty + `NoDataWarning`), mirroring the `indices` sibling and `extract_to_store`'s "≥1 ticker" rule. Three gates in `enhanced.py` fixed to `is not None`: the field-5 filter branch, the one-shot size-guard exemption, and `get_1y_dataframe`'s no-rows typed-empty return |
+| Flexible query date (B3) | `query_ticks` / `get_available_tickers` accept `YYYY` / `YYYYMM` / `YYYYMMDD` / `start-end` (via `parse_period`), matched as an inclusive range over the Hive `date` partition — not just an exact day. Same forms and errors as `read_ticks` / `ingest_period`; the internal `_query_extract_batch` date bounds stay strict `YYYYMMDD` |
+| Stray `ticker` column (A2) | `query_ticks` and `_query_extract_batch` defensively drop a `ticker` column if a (past or future) DuckDB derives one from the filename. Safe — no output schema has a literal `ticker` column — and robust across DuckDB versions regardless of the floor |
+| `OneShotMemoryError` message (B2) | A sub-GB `max_oneshot_bytes` override no longer renders as `"0 GB"`; both the estimated size and the limit are shown in the largest fitting unit to 3 significant figures (`1000 B`, `150 MB`, `5 GB`). Default 5 GB message unchanged |
 
 ### v0.14.1 — round-16 fixes: summary time-filter guard, query_ticks no-data warning, language validation (2026-07-13)
 
@@ -505,10 +515,11 @@ create_df(..., language="jp")
 ```
 query_ticks(data_dir, ticker, date, start_time, end_time, columns, limit)
     │
-    ├─ Input validation (regex on identifiers, dates YYYYMMDD, times HH:MM:SS)
+    ├─ Input validation (identifiers; times HH:MM:SS; date via parse_period →
+    │                     YYYY / YYYYMM / YYYYMMDD / start-end, as a date range)
     ├─ Path traversal check via _resolve_type_dir()
     ├─ Builds SQL: SELECT col_select FROM read_parquet(glob, hive_partitioning=true)
-    │              WHERE date=... AND ticker=... AND "Execution Time" >= ...
+    │              WHERE date>=lo AND date<=hi AND ticker=... AND "Execution Time" >= ...
     │              ORDER BY "Data Date", "Execution Time" LIMIT 10M
     ├─ DuckDB in-memory connection → con.execute(sql).pl() → polars DataFrame
     └─ Connection closed in finally block
