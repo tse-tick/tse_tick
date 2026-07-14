@@ -12,7 +12,7 @@ Developed at Keio University, Nakatsuma Seminar.
 # tse_tick/__init__.py
 import polars as pl
 
-__version__ = "0.14.4"
+__version__ = "0.14.5"
 __author__ = "Kazumi Li, Masataka Hayashi, Peter Romero"
 __email__ = "kaiwenli@keio.jp"
 __license__ = "MIT"
@@ -108,6 +108,7 @@ from .enhanced import (
     LargeResultWarning,
     OneShotMemoryError,
     QueryMemoryError,
+    IngestWorkerError,
 )
 
 from .schemas import (
@@ -185,6 +186,7 @@ __all__ = [
     "LargeResultWarning",
     "OneShotMemoryError",
     "QueryMemoryError",
+    "IngestWorkerError",
     "get_schema_individual_stock_95",
     "get_schema_summary_83",
     "get_schema_indices_23",
