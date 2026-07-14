@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-07-14
+
+Two defects that together killed a parallel `ingest_period` over 2023–2025 with a bare
+`BrokenProcessPool` after 13 minutes: TSE's **alphanumeric stock codes** (issued from
+2024) silently disabled part-pruning for ~half of all 2024/2025 trading days, and the
+RAM-aware worker cap never bound on a ticker-filtered ingest. Parse/clean output is
+unchanged and part-pruning stays **row-for-row identical to a full scan** (re-verified
+on real data: the 27-part `20240403` returned an identical `(530472, 95)` frame pruned
+and unpruned). No re-ingest needed.
+
+### Fixed
+- **Alphanumeric stock codes no longer disable part-pruning.** TSE issues 4-char codes
+  ending in a letter from 2024 (e.g. `162A`); `part_start_code` parsed a part's first
+  record with `int()` and returned `None` for those, and a single unprobeable part made
+  `select_parts_for_day` fall back to opening **every** part of that day. Measured on
+  `G:\NEEDS`: **0/8 sampled days affected in 2017–2019 and 2023, but 4/8 in 2024 and 4/8
+  in 2025**. Codes are now compared as the fixed-width **4-char tokens** NEEDS writes
+  rather than as ints — token order equals NEEDS' ordering, and for the all-digit codes
+  that predate 2024 it is identical to their numeric order, so the parts selected for
+  them are unchanged. Real-data measurement on `20240403` (27 parts): pruning now selects
+  **2 parts, and the read went 472s → 13s (35×)** with a byte-identical result; the
+  per-date ingest went **204s / 5.14 GB → 73s / 2.21 GB**. A non-4-char token still falls
+  back to a full scan, so an unconfirmed layout is never pruned wrongly.
+  An alphanumeric `ticker_filter` (e.g. `{"130A"}`) now prunes too — the old `isdigit()`
+  gate disabled pruning for it entirely.
+- **The RAM-aware worker cap now binds on a ticker-filtered ingest.**
+  `_estimate_worker_gb` returned a flat 0.5 GB for *any* `ticker_filter`, so
+  `_cap_workers` computed a RAM ceiling that never clamped and a filtered ingest ran one
+  worker per core. A filtered worker-day actually costs ~1.1 GB **per code** (measured:
+  `{"7203","9984"}` on `20240403` = 990,975 rows → **2.21 GB** peak), so the Jupyter
+  default of 16 workers needed ~35 GB on a 34 GB box (~24.6 GB available) and a worker
+  was killed. The estimate now scales per kept code (`_TICKER_WORKER_GB`, 1.5 GB with
+  headroom), clamped by the whole day's frame so it can never exceed a full-frame
+  estimate and a small day stays at the floor. Unfiltered and summary/index estimates
+  are unchanged.
+- **A killed ingest worker now raises `tse_tick.IngestWorkerError`** instead of a bare
+  `BrokenProcessPool: A process in the process pool was terminated abruptly`. A worker
+  killed by the OS (usually for memory) never gets to raise, so the pool reported
+  neither cause nor remedy while aborting a multi-hour ingest. The new error names the
+  likely cause, states that completed dates are already written and **resume-safe**, and
+  points at `max_workers` — mirroring how `QueryMemoryError` replaces DuckDB's raw
+  `OutOfMemoryException`. Per-date Python exceptions are unaffected (still captured per
+  date as `{"date", "error"}` result dicts).
+
+### Added
+- **`tse_tick.IngestWorkerError`** — a catchable `RuntimeError` subclass, importable on a
+  core (no `[query]`) install.
+
 ## [0.14.4] - 2026-07-14
 
 A CLI presentation pass from a normal-user (non-coder) QA acceptance test: `tse-tick

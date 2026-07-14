@@ -19,13 +19,14 @@ import sys
 import warnings
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Optional, Union, cast
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, NoDataWarning, OneShotMemoryError, PartialIngestWarning
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, NoDataWarning, OneShotMemoryError, PartialIngestWarning, IngestWorkerError
 from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type, validate_time_filter_support
@@ -41,7 +42,12 @@ _MP_SPAWN = multiprocessing.get_context("spawn")
 
 
 _RAM_SAFETY_FRACTION = 0.7   # use at most this fraction of available RAM for worker frames
-_FILTERED_WORKER_GB = 0.5    # ticker-filtered / summary / index: a small per-worker frame
+_FILTERED_WORKER_GB = 0.5    # summary / index (small daily frames), and the small-day floor
+# individual_stock, PER filtered code: an active name's day peaks ~1.1 GB (measured:
+# 7203+9984 for 20240403 = 990,975 rows -> 2.21 GB peak), rounded up for headroom. This
+# was a flat 0.5 for ANY filter, so the RAM cap never bound and the 16-worker Jupyter
+# default overcommitted a 34 GB box -> a killed worker (BrokenProcessPool).
+_TICKER_WORKER_GB = 1.5
 _FULLFRAME_EXPANSION = 8.0   # compressed part bytes -> peak per-worker RAM (full-frame day)
 _LARGE_EXTRACT_ROWS = 10_000_000  # extract_to_store warns before materializing more rows
 
@@ -150,17 +156,34 @@ def _available_ram_gb() -> float:
         return 0.0
 
 
+def _filtered_worker_gb(full_gb: float, n_tickers: int) -> float:
+    """Per-worker GB for a ticker-FILTERED ``individual_stock`` day.
+
+    A filtered worker materialises only the matching rows, so its peak scales with
+    how many codes are kept — but it can never exceed the whole day's frame, hence
+    the ``full_gb`` clamp (which also keeps a small day's estimate small).
+
+    This used to be a flat 0.5 GB for any filter, which made the RAM-aware
+    :func:`_cap_workers` never bind on a filtered ingest: the Jupyter default of one
+    worker per core ran 16 x a measured ~2.2 GB (7203+9984, one day) on a 34 GB box,
+    and a killed worker surfaced as ``BrokenProcessPool``. One active code's day
+    measures ~1.1 GB, so scale by :data:`_TICKER_WORKER_GB` per code.
+    """
+    return min(full_gb, _TICKER_WORKER_GB * max(1, n_tickers))
+
+
 def _estimate_worker_gb(units, data_type, ticker_filter) -> float:
     """Rough peak RAM (GB) one worker needs for its largest unit of work.
 
-    A worker holds one whole date's frame in memory. Ticker-filtered reads (only the
-    matching rows are materialised) and the summary / index types (small daily frames)
-    need little; a **full-frame** ``individual_stock`` day is the whole day — every part,
-    decompressed and cleaned — estimated from the largest day's total compressed part
-    bytes times an expansion factor. ``units`` is an iterable of ``(label, [part paths])``
-    (one entry per date group, or per ZIP for the flat path).
+    A worker holds one whole date's frame in memory. The summary / index types have
+    small daily frames; a **full-frame** ``individual_stock`` day is the whole day —
+    every part, decompressed and cleaned — estimated from the largest day's total
+    compressed part bytes times an expansion factor. A ticker-filtered
+    ``individual_stock`` day sits between the two and scales with the number of codes
+    kept (see :func:`_filtered_worker_gb`). ``units`` is an iterable of
+    ``(label, [part paths])`` (one entry per date group, or per ZIP for the flat path).
     """
-    if data_type not in (None, "individual_stock") or ticker_filter:
+    if data_type not in (None, "individual_stock"):
         return _FILTERED_WORKER_GB
     biggest = 0
     for _label, parts in units:
@@ -172,7 +195,28 @@ def _estimate_worker_gb(units, data_type, ticker_filter) -> float:
                 continue  # skip one vanished/unreadable part, don't zero the whole day
         if total > biggest:
             biggest = total
-    return max(_FILTERED_WORKER_GB, (biggest / 1e9) * _FULLFRAME_EXPANSION)
+    full_gb = max(_FILTERED_WORKER_GB, (biggest / 1e9) * _FULLFRAME_EXPANSION)
+    if ticker_filter:
+        return _filtered_worker_gb(full_gb, len(ticker_filter))
+    return full_gb
+
+
+def _worker_died_error(done: int, total: int, workers: int) -> IngestWorkerError:
+    """Build the actionable error for a killed pool worker (see IngestWorkerError).
+
+    ``BrokenProcessPool`` says only "terminated abruptly" — no cause, no remedy —
+    so name the usual cause (memory: N workers x one trading day's frame each),
+    say the finished dates are resume-safe, and point at ``max_workers``.
+    """
+    return IngestWorkerError(
+        f"A parallel ingest worker was terminated abruptly after {done} of {total} "
+        f"unit(s) completed. The usual cause is running out of memory: {workers} "
+        f"worker(s) each hold one trading day's frame, and a day whose part-pruning "
+        f"cannot be confirmed is read in full (several GB). The completed dates are "
+        f"already written and resume-safe — re-run the same call with a lower "
+        f"max_workers (e.g. max_workers=2, or max_workers=1 to go serial) and it "
+        f"continues where it stopped."
+    )
 
 
 def _cap_workers(requested: int, per_worker_gb: Optional[float] = None) -> int:
@@ -635,8 +679,13 @@ def ingest_directory(
                     )] = zf
                 done = 0
                 for future in as_completed(futures):
+                    # a one-shot OOM propagates and aborts; a *killed* worker only
+                    # yields BrokenProcessPool, so convert it to an actionable error.
+                    try:
+                        meta = future.result()
+                    except BrokenProcessPool as exc:
+                        raise _worker_died_error(done, total, max_workers) from exc
                     done += 1
-                    meta = future.result()  # a one-shot OOM propagates and aborts
                     results.append(meta)
                     if progress:
                         _log_flat_progress(done, total, meta)
@@ -941,8 +990,13 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
             done = 0
             for future in as_completed(futures):
                 # A one-shot OOM in any worker propagates here and aborts the whole
-                # ingest rather than silently leaving a partial period behind.
-                meta = future.result()
+                # ingest rather than silently leaving a partial period behind. A
+                # *killed* worker can't raise at all, so its BrokenProcessPool
+                # becomes an actionable IngestWorkerError instead.
+                try:
+                    meta = future.result()
+                except BrokenProcessPool as exc:
+                    raise _worker_died_error(done, len(tasks), workers) from exc
                 results.append(meta)
                 done += 1
                 logger.info("  [%d/%d] %s (%d parts) -> %s rows",

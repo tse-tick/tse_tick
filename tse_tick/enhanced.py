@@ -125,6 +125,27 @@ class QueryMemoryError(MemoryError):
     """
 
 
+class IngestWorkerError(RuntimeError):
+    """Raised when a worker process of a parallel ``ingest_*`` is terminated abruptly.
+
+    A ``ProcessPoolExecutor`` worker that is *killed* — most often by the OS for
+    memory (each worker holds one whole trading day's frame, and a day whose
+    part-pruning cannot be confirmed is read in full), or by a native crash — never
+    gets to raise: the pool surfaces only ``BrokenProcessPool`` ("A process in the
+    process pool was terminated abruptly"), which names neither a cause nor a remedy
+    and aborts a multi-hour ingest at ``future.result()``.
+
+    The ``ingest_*`` functions convert it to this error, which names the likely cause
+    and the knob that fixes it (a lower ``max_workers``) and states that the dates
+    finished before the failure are already written and resume-safe, so the same call
+    re-run continues where it stopped. This mirrors how :class:`QueryMemoryError`
+    replaces DuckDB's raw ``OutOfMemoryException``: an engine-level failure the caller
+    cannot act on becomes a tse_tick error carrying tse_tick's own remedy. Per-date
+    Python exceptions are unaffected — those are still captured per date and returned
+    as ``{"date", "error"}`` result dicts rather than aborting the run.
+    """
+
+
 class SuspiciousZipError(ValueError):
     """Raised when a ZIP trips one of the zip-bomb guards: too many members, an
     implausible compression ratio, or an oversized decompressed member.

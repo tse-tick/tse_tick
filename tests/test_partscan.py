@@ -35,7 +35,7 @@ def test_part_start_code_reads_first_record(tmp_path: Path):
         tmp_path / "HTICST120.20240104.1.zip", "HTICST120.20240104.1.csv",
         individual_stock_csv("20240104", ["1301"], rows_per_ticker=4),
     )
-    assert part_start_code(z) == 1301
+    assert part_start_code(z) == "1301"   # the 4-char token (see alphanumeric tests)
 
 
 def test_part_start_code_bad_zip_returns_none(tmp_path: Path):
@@ -107,3 +107,49 @@ def test_select_falls_back_on_bad_probe(tmp_path):
     parts = _day_parts(tmp_path, [["1301"], ["7203"]])
     (tmp_path / "HTICST120.20240104.2.zip").write_bytes(b"corrupt")  # probe -> None
     assert select_parts_for_day(parts, {"7203"}) is None            # signal: open all
+
+
+# --- alphanumeric codes (TSE issues these from 2024, e.g. "162A"/"130A") ---
+def test_part_start_code_reads_alphanumeric_code(tmp_path: Path):
+    """A 2024+ alphanumeric code must probe to its 4-char token, not ``None``.
+
+    Probing ``None`` made ``select_parts_for_day`` disable pruning for the WHOLE
+    day (measured on real data: 27 parts / 5.14 GB / 204s per worker-day vs
+    2 parts / 0.18 GB / 13s when pruned).
+    """
+    z = write_zip(
+        tmp_path / "HTICST120.20240403.1.zip", "HTICST120.20240403.1.csv",
+        individual_stock_csv("20240403", ["162A"], rows_per_ticker=4),
+    )
+    assert part_start_code(z) == "162A"
+
+
+def test_select_prunes_day_containing_an_alphanumeric_part(tmp_path):
+    """One alphanumeric-coded part must not force a full scan of the day.
+
+    Mirrors the real 2024/2025 layout (probed starts ``[1301, 1489, 162A, 2036,
+    …]``): ascending as 4-char strings, since ``"1489" < "162A" < "2036"``.
+    """
+    parts = _day_parts(tmp_path, [["1301"], ["162A"], ["2036"], ["7203"], ["9999"]])
+    chosen = select_parts_for_day(parts, {"7203"})
+    assert chosen is not None, "an alphanumeric part start must not force a full scan"
+    names = [p.name for p in chosen]
+    assert "HTICST120.20240104.4.zip" in names        # 7203's code-run part
+    assert "HTICST120.20240104.5.zip" in names        # last part (appendix)
+    assert "HTICST120.20240104.2.zip" not in names    # the 162A part is not in the run
+
+
+def test_select_supports_an_alphanumeric_ticker_filter(tmp_path):
+    """An alphanumeric ``ticker_filter`` prunes too — the old ``isdigit()`` gate
+    returned ``None`` (full scan) for any non-numeric code such as ``"162A"``."""
+    parts = _day_parts(tmp_path, [["1301"], ["162A"], ["7203"], ["9999"]])
+    chosen = select_parts_for_day(parts, {"162A"})
+    assert chosen is not None
+    assert "HTICST120.20240104.2.zip" in [p.name for p in chosen]   # 162A's part
+
+
+def test_select_still_falls_back_when_string_order_breaks(tmp_path):
+    """The monotonic check is what makes the arithmetic sound, so it must still
+    reject a layout that is not ascending in the 4-char-string space."""
+    parts = _day_parts(tmp_path, [["9999"], ["1301"], ["7203"]])   # descending start
+    assert select_parts_for_day(parts, {"7203"}) is None
