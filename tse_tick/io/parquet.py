@@ -10,6 +10,7 @@ from typing import Optional
 import polars as pl
 
 import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 
 from tse_tick.constants import INDEX_TYPES, validate_data_type
 
@@ -133,6 +134,140 @@ def _coerce_time_cols(df: pl.DataFrame) -> pl.DataFrame:
                     ).alias(col)
                 )
     return df.with_columns(exprs) if exprs else df
+
+
+class PartitionedParquetAppender:
+    """Append cleaned frames to the Hive store incrementally, bounding memory.
+
+    :func:`write_partitioned_parquet` takes one frame for the whole unit of work
+    (a trading day) and then copies it again per ticker, so its peak scales with
+    the day's rows — a 4.67M-row day of two active codes measured 24.5 GB and OOM'd
+    a 34 GB box. This appends each frame it is given as Parquet **row groups** to
+    one writer per ``(date, ticker)``, so peak stays ~one appended frame no matter
+    how large the day is. NEEDS size-splits parts at ~55 MB, so a busier day means
+    *more* parts rather than bigger ones, and the bound holds as volume grows.
+
+    Same store layout, same key derivation, and the same two-phase atomicity as
+    :func:`write_partitioned_parquet`: every file is written to a hidden
+    pid-suffixed ``.tmp`` and only ``os.replace``-d into place by :meth:`commit`,
+    so a crash mid-day can never leave a truncated or partially-published date for
+    the existence-keyed resume to trust. It is the same pattern
+    :func:`tse_tick.export_query` already uses to stream a store slice out.
+
+    Usage — ``commit()`` publishes, ``abort()`` discards; never both::
+
+        app = PartitionedParquetAppender(out, "individual_stock")
+        try:
+            for frame in frames:
+                app.write(frame)
+            app.commit()
+        except BaseException:
+            app.abort()
+            raise
+    """
+
+    def __init__(
+        self,
+        output_dir: str,
+        data_type: str,
+        partition_cols: Optional[list[str]] = None,
+        compression: str = "zstd",
+    ) -> None:
+        validate_data_type(data_type)
+        self._pcols = (
+            partition_cols if partition_cols is not None else _DEFAULT_PARTITION_COLS[data_type]
+        )
+        self._date_col = self._pcols[0]
+        self._ticker_col = self._pcols[1] if len(self._pcols) > 1 else None
+        self._code_lookup = _index_code_lookup() if data_type in _INDEX_DATA_TYPES else None
+        self._type_dir = Path(output_dir) / data_type
+        self._type_dir.mkdir(parents=True, exist_ok=True)
+        self._compression = compression
+        self._writers: dict[tuple[str, str], "pq.ParquetWriter"] = {}
+        self._targets: dict[tuple[str, str], tuple[Path, Path]] = {}
+        self.rows_written = 0
+
+    def write(self, df: pl.DataFrame) -> None:
+        """Append one cleaned frame, routing each row to its ``(date, ticker)`` file."""
+        if df.is_empty():
+            return
+        for col in self._pcols:
+            if col not in df.columns:
+                raise ValueError(f"Partition column {col!r} not in DataFrame")
+        df = _coerce_time_cols(df)
+        if df.schema[self._date_col].is_temporal():
+            df = df.with_columns(pl.col(self._date_col).dt.strftime("%Y%m%d").alias("_date_str"))
+        else:
+            df = df.with_columns(
+                pl.col(self._date_col)
+                .cast(pl.String)
+                .str.replace_all("-", "", literal=True)
+                .alias("_date_str")
+            )
+        # A malformed raw Data Date parses to null; its key would stringify to
+        # "None" and write an unqueryable date=None/ partition (audit finding L2).
+        df = _drop_null_date_rows(df, self._date_col)
+        if df.is_empty():
+            return
+
+        for (date_str,), date_group in df.group_by("_date_str", maintain_order=True):
+            date_str_val = str(date_str)
+            date_dir = self._type_dir / f"date={date_str_val}"
+            date_dir.mkdir(parents=True, exist_ok=True)
+            if self._ticker_col is None:
+                self._append(date_dir, date_str_val, date_str_val,
+                             f"{date_str_val}.parquet", date_group.drop(["_date_str"]))
+                continue
+            groups = date_group.group_by(self._ticker_col, maintain_order=True)
+            for (ticker_val,), ticker_group in groups:
+                # Two display forms of one index code resolve to the same key and
+                # must land in the SAME file — the writer dict merges them for free.
+                key = str(_partition_value(ticker_val, self._code_lookup))
+                self._append(date_dir, date_str_val, key,
+                             f"ticker={key}.parquet", ticker_group.drop(["_date_str"]))
+
+    def _append(self, date_dir: Path, date_str: str, key: str, fname: str,
+                frame: pl.DataFrame) -> None:
+        wkey = (date_str, key)
+        table = frame.to_arrow()
+        writer = self._writers.get(wkey)
+        if writer is None:
+            fpath = date_dir / fname
+            tmp = date_dir / f".{fname}.{os.getpid()}.tmp"
+            writer = pq.ParquetWriter(str(tmp), table.schema, compression=self._compression)
+            self._writers[wkey] = writer
+            self._targets[wkey] = (tmp, fpath)
+        elif table.schema != writer.schema:
+            # Defensive: the cleaned schema is stable across morsels/parts, but a
+            # chunk whose arrow types drift would otherwise abort the whole day.
+            table = table.cast(writer.schema)
+        writer.write_table(table)
+        self.rows_written += frame.height
+
+    def commit(self) -> str:
+        """Close every writer, then publish each file with an atomic replace."""
+        for writer in self._writers.values():
+            writer.close()
+        self._writers.clear()
+        for tmp, fpath in self._targets.values():
+            os.replace(tmp, fpath)
+        self._targets.clear()
+        return str(self._type_dir)
+
+    def abort(self) -> None:
+        """Close and delete every pending temp file; publish nothing."""
+        for writer in self._writers.values():
+            try:
+                writer.close()
+            except Exception:
+                pass
+        self._writers.clear()
+        for tmp, _ in self._targets.values():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        self._targets.clear()
 
 
 def write_partitioned_parquet(

@@ -2,6 +2,52 @@
 
 ## [Unreleased]
 
+## [0.14.6] - 2026-07-15
+
+A ticker-filtered ingest's peak memory no longer scales with the trading day's size.
+The worst real day measured drops from **24.52 GB to 2.40 GB — 10x** — and the store it
+writes is **byte-identical** (verified on real data: `20250409` / 7203+9984 / 4,673,760
+rows, both `ticker=` files `frames_equal`). Rows/day keep growing (raw TICST120: 2017 =
+101.9 GB → 2025 = 351.9 GB; largest month 202504 = 42.0 GB), so this is what stops the
+ingest OOMing again as volume rises. Design + prior art:
+`plans/round20-morsel-bounded-ingest-plan.md`. No re-ingest needed.
+
+### Fixed
+- **The parse no longer materialises a whole part as one all-String frame.** `create_df`
+  handed the entire filtered part to a single `pl.read_csv`, so the all-String frame
+  (~243M string cells) stayed alive while `clean_data` cast it — a measured **4.6x**
+  transient over the result (9.03 GB peak for a 1.95 GB / 2,563,684-row frame). The
+  already-filtered bytes are now read and cleaned in newline-aligned **morsels**
+  (`_MORSEL_BYTES`, 64 MB ≈ 180k rows), and only the cleaned (4.6x smaller) frames are
+  kept. Part-level peak **9.03 → 4.54 GB**.
+- **A filtered ingest no longer holds the day.** `_ingest_date_group` accumulated every
+  cleaned part, `pl.concat`-ed the day, then copied it again per ticker — so one April-2025
+  day (4.67M rows for two codes) needed **24.5 GB**, and no `max_workers` value fit it.
+  Each cleaned morsel is now appended straight to its `(date, ticker)` Parquet writer as a
+  row group via the new `PartitionedParquetAppender`, so neither the part's frame nor the
+  day's is ever materialised: peak is **~one morsel**, independent of the day's size.
+  NEEDS size-splits parts at ~55 MB, so a busier day means *more* parts, not bigger ones,
+  and the bound holds as volume grows. Day-level peak **24.52 → 2.40 GB (10x)**; 8 workers
+  now fit on a 34 GB box where 6 previously OOM'd.
+  Same layout and the same two-phase atomicity as `write_partitioned_parquet` (hidden
+  pid-suffixed `.tmp` + `os.replace`, all-or-nothing cleanup), so a failed day publishes
+  nothing and stays fully re-ingestable. Applies to `individual_stock` with a filter of up
+  to `_MAX_STREAM_TICKERS` (64) codes; full-frame days (thousands of ticker files) and the
+  summary/index types keep the proven concat path.
+- **The worker-RAM guard stops guessing.** With a streamed day bounded, the per-code
+  scaling added in 0.14.5 is superseded by a constant (`_STREAM_WORKER_GB`) for the
+  streaming path. This retires a heuristic that could never be made correct — file bytes do
+  not predict filtered rows (an extreme day keeps ~100% of a pruned part, a normal one
+  ~15%), which is why it mis-sized workers twice. A filter too wide to stream still scales
+  per code, clamped by the day's full frame.
+
+### Notes
+Output identity rests on `clean_data`/`set_columns` being purely element-wise (no
+`group_by`/`over`/`sort`/`join`/window/aggregation), so
+`concat(finalize(morsel_i)) == finalize(concat(morsel_i))`; morsels are newline-aligned and
+processed in file order. Asserted directly by tests, and proved on real data against the
+0.14.5 output rather than assumed.
+
 ## [0.14.5] - 2026-07-14
 
 Two defects that together killed a parallel `ingest_period` over 2023–2025 with a bare

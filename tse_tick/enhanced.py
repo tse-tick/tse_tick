@@ -10,7 +10,7 @@ import warnings
 from collections import defaultdict
 from itertools import groupby
 from pathlib import Path
-from typing import Optional, Literal, Tuple, List, Dict, Union
+from typing import Callable, Optional, Literal, Tuple, List, Dict, Union
 
 import polars as pl
 
@@ -648,6 +648,47 @@ def _read_individual_stock_matches(
     return bytes(out)
 
 
+_MORSEL_BYTES = 64 * 1024 * 1024  # ~64 MB of filtered CSV ~= 180k rows @ ~350 B/row
+
+
+def _iter_raw_morsels(raw_bytes: bytes, morsel_bytes: Optional[int] = None):
+    """Yield ``raw_bytes`` as newline-aligned slices of at most ``morsel_bytes``.
+
+    Reading a whole filtered part in one :func:`polars.read_csv` materialises an
+    all-String frame that stays alive while ``clean_data`` casts it — a measured
+    **4.6x** transient over the final frame (9.03 GB peak for a 1.95 GB /
+    2,563,684-row result). Slicing the already-filtered bytes and cleaning each
+    slice bounds that transient to one morsel, so peak stops scaling with the
+    day's size. This is the classic vectorised/morsel argument (MonetDB/X100,
+    CIDR 2005; morsel-driven parallelism, SIGMOD 2014 — which measures ~100k
+    tuples as a good unit) applied at CSV-parse granularity; see
+    ``plans/round20-morsel-bounded-ingest-plan.md``.
+
+    Slices always end on a record boundary, so concatenating the yielded morsels
+    reproduces ``raw_bytes`` exactly. Splitting on newlines is sound here because
+    :func:`_read_individual_stock_matches`, which produced these bytes, already
+    filters the part line-by-line — "no embedded newlines in a record" is an
+    assumption this input already satisfies.
+    """
+    size = morsel_bytes if morsel_bytes is not None else _MORSEL_BYTES
+    size = max(1, int(size))
+    total = len(raw_bytes)
+    start = 0
+    while start < total:
+        end = start + size
+        if end >= total:
+            yield raw_bytes[start:]
+            return
+        # Extend to the end of the record that straddles the cut. If no newline
+        # remains, the tail is one unterminated record — emit it whole.
+        nl = raw_bytes.find(b"\n", end - 1)
+        if nl == -1:
+            yield raw_bytes[start:]
+            return
+        yield raw_bytes[start:nl + 1]
+        start = nl + 1
+
+
 def _read_zip_member(
     zf: "zipfile.ZipFile",
     file_name: str,
@@ -656,6 +697,8 @@ def _read_zip_member(
     rows_to_read: Optional[int],
     ticker_filter: Optional[set],
     schema_override: dict,
+    finalize: Optional[Callable[[pl.DataFrame], pl.DataFrame]] = None,
+    on_morsel: Optional[Callable[[pl.DataFrame], None]] = None,
 ) -> pl.DataFrame:
     """Parse one ZIP member into a raw string-typed frame (era/type dispatch).
 
@@ -663,7 +706,22 @@ def _read_zip_member(
     loop can read every file member of a ZIP rather than only ``namelist()[0]``
     (audit finding M4). ``rows_to_read`` caps the rows taken from this member;
     ``None`` reads it whole.
+
+    ``finalize``, when given, makes this return an already-**cleaned** frame from
+    every branch. On the ``individual_stock`` ticker fast path it is applied **per
+    morsel** (see :func:`_iter_raw_morsels`), so the all-String frame for the whole
+    member is never materialised — that is what keeps peak memory independent of
+    the day's size. Other branches simply apply it once at the end, which is
+    exactly what the caller used to do, so the contract is unconditional rather
+    than coupled to which branch ran.
     """
+    def _done(df: pl.DataFrame) -> pl.DataFrame:
+        # An empty (schema-less) frame means "this member contributed nothing";
+        # the caller drops it, and finalize would reject its zero columns.
+        if finalize is None or df.is_empty():
+            return df
+        return finalize(df)
+
     with zf.open(file_name) as f:
         if (year == 2016) and (kind == "indices_summary"):
             parsed_rows = []
@@ -673,7 +731,7 @@ def _read_zip_member(
                     break
                 parsed_rows.append(parse_line(line))
                 n_lines += 1
-            return _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
+            return _done(_guard_polars_oom(lambda: pl.DataFrame(parsed_rows)))
 
         if (year == 2016) and (kind == "indices"):
             parsed_rows = []
@@ -683,7 +741,7 @@ def _read_zip_member(
                     break
                 parsed_rows.append(parse_line(line, kind="indices"))
                 n_lines += 1
-            return _guard_polars_oom(lambda: pl.DataFrame(parsed_rows))
+            return _done(_guard_polars_oom(lambda: pl.DataFrame(parsed_rows)))
 
         if ticker_filter is not None and kind == "individual_stock":
             # ``is not None`` (not truthiness): an *empty* set is a real filter that
@@ -696,17 +754,51 @@ def _read_zip_member(
             raw_bytes = _read_individual_stock_matches(f, ticker_filter)
             if not raw_bytes:
                 return pl.DataFrame()
-            df_chunk = _guard_polars_oom(
-                lambda: pl.read_csv(
-                    io.BytesIO(raw_bytes),
-                    has_header=False,
-                    schema_overrides=schema_override,
-                    truncate_ragged_lines=True,
+
+            def _read_morsel(buf: bytes) -> pl.DataFrame:
+                return _guard_polars_oom(
+                    lambda: pl.read_csv(
+                        io.BytesIO(buf),
+                        has_header=False,
+                        schema_overrides=schema_override,
+                        truncate_ragged_lines=True,
+                    )
                 )
-            )
-            if rows_to_read is not None:
-                df_chunk = df_chunk.slice(0, rows_to_read)
-            return df_chunk
+
+            if finalize is None:
+                df_chunk = _read_morsel(raw_bytes)
+                if rows_to_read is not None:
+                    df_chunk = df_chunk.slice(0, rows_to_read)
+                return df_chunk
+
+            # Bounded path: clean each morsel and keep only the cleaned (measured
+            # ~4.6x smaller) frame, so the member's all-String frame never exists.
+            # With ``on_morsel`` the cleaned morsel is handed straight to the sink
+            # and dropped, so not even the member's cleaned frame is materialised —
+            # that is what lets an ingest's peak stay at ~one morsel.
+            cleaned: List[pl.DataFrame] = []
+            taken = 0
+            for buf in _iter_raw_morsels(raw_bytes):
+                part = finalize(_read_morsel(buf))
+                if rows_to_read is not None:
+                    remaining = rows_to_read - taken
+                    if remaining <= 0:
+                        break
+                    if part.height > remaining:
+                        part = part.slice(0, remaining)
+                taken += part.height
+                if on_morsel is not None:
+                    on_morsel(part)
+                    del part
+                else:
+                    cleaned.append(part)
+                if rows_to_read is not None and taken >= rows_to_read:
+                    break
+            if on_morsel is not None:
+                return pl.DataFrame()   # streamed; the sink owns the rows
+            if not cleaned:
+                return pl.DataFrame()
+            return _guard_polars_oom(lambda: pl.concat(cleaned, how="vertical"))
 
         df_chunk = _guard_polars_oom(
             lambda: pl.read_csv(
@@ -718,7 +810,7 @@ def _read_zip_member(
         )
         if rows_to_read is not None:
             df_chunk = df_chunk.slice(0, rows_to_read)
-        return df_chunk
+        return _done(df_chunk)
 
 
 def get_1y_dataframe(
@@ -728,7 +820,18 @@ def get_1y_dataframe(
     rows: Optional[int] = None,
     ticker_filter: Optional[set] = None,
     max_oneshot_bytes: Optional[int] = None,
+    finalize: Optional[Callable[[pl.DataFrame], pl.DataFrame]] = None,
+    on_morsel: Optional[Callable[[pl.DataFrame], None]] = None,
 ) -> pl.DataFrame:
+    """Read raw NEEDS ZIP(s) into one frame (raw string-typed by default).
+
+    ``finalize`` switches on the **bounded** read used by the ``individual_stock``
+    ticker fast path: it is applied per morsel inside :func:`_read_zip_member`, so
+    a member's all-String frame is never materialised and peak memory stops
+    scaling with the day's size (see :func:`_iter_raw_morsels`). When it is given
+    the returned frame is already **cleaned** — including the typed-empty
+    no-match result — so the caller must not clean it again.
+    """
     path = Path(folder_path)
 
     if not path.exists():
@@ -809,7 +912,7 @@ def get_1y_dataframe(
                         rows_to_read = remaining_rows
                     df_chunk = _read_zip_member(
                         zf, file_name, year, kind, rows_to_read,
-                        ticker_filter, schema_override,
+                        ticker_filter, schema_override, finalize, on_morsel,
                     )
 
                     if not df_chunk.is_empty():
@@ -837,9 +940,13 @@ def get_1y_dataframe(
             # fully-typed empty result, instead of raising as a genuinely unfiltered
             # read with no data does. ``is not None`` (not truthiness) is what routes
             # the empty set here rather than to the raise below.
-            return pl.DataFrame(
+            empty_raw = pl.DataFrame(
                 schema={f"column_{i + 1}": pl.String for i in range(_raw_width(kind, year))}
             )
+            # The bounded path's contract is "returns cleaned frames", so a no-match
+            # result must be cleaned here too — otherwise the caller (which skips
+            # cleaning) would hand back a raw string-typed empty frame.
+            return finalize(empty_raw) if finalize is not None else empty_raw
         raise ValueError("No data was successfully read")
 
     result = _guard_polars_oom(lambda: pl.concat(dfs, how="vertical"))
@@ -1060,6 +1167,7 @@ def create_df(
     year: Optional[int] = None,
     ticker_filter: Optional[set] = None,
     max_oneshot_bytes: Optional[int] = _DEFAULT_ONESHOT,
+    on_morsel: Optional[Callable[[pl.DataFrame], None]] = None,
 ) -> pl.DataFrame:
     """Read raw NEEDS ZIP(s) into a cleaned Polars DataFrame.
 
@@ -1119,19 +1227,32 @@ def create_df(
             )
         logger.debug("Manual: %s, Year: %s", data_type, year)
 
-    df_raw = get_1y_dataframe(
+    # Root each requested code to its 4-char family (72031 -> 7203) so the
+    # field-5 fast path — which compares 4-char codes — matches it; a raw
+    # 5-char request used to silently return nothing.
+    resolved_filter = (
+        _stock_family_roots(ticker_filter) if data_type == "individual_stock" else None
+    )
+
+    # Only the individual_stock ticker fast path takes the bounded read: cleaning
+    # per morsel (instead of once, over a whole member's all-String frame) is what
+    # keeps peak memory independent of the day's size — that transient measured
+    # 4.6x the final frame, so a busy day's 4.67M rows needed ~24.5 GB. Every other
+    # path keeps its existing "concat raw, clean once" behaviour untouched.
+    bounded = resolved_filter is not None
+    df_read = get_1y_dataframe(
         folder_path,
         year,
         data_type,
         rows,
-        # Root each requested code to its 4-char family (72031 -> 7203) so the
-        # field-5 fast path — which compares 4-char codes — matches it; a raw
-        # 5-char request used to silently return nothing.
-        ticker_filter=_stock_family_roots(ticker_filter) if data_type == "individual_stock" else None,
+        ticker_filter=resolved_filter,
         max_oneshot_bytes=_resolve_oneshot_bytes(max_oneshot_bytes),
+        finalize=(lambda raw: _finalize_raw(raw, data_type, language)) if bounded else None,
+        on_morsel=on_morsel if bounded else None,
     )
 
-    df_final = _finalize_raw(df_raw, data_type, language)
+    # On the bounded read get_1y_dataframe already returned cleaned frames.
+    df_final = df_read if bounded else _finalize_raw(df_read, data_type, language)
     logger.debug("Data successfully created")
     return df_final
 
