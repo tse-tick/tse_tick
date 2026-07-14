@@ -211,6 +211,90 @@ def test_cli_export_two_stage_store(tmp_path, monkeypatch, capsys):
     assert df.height == 20                       # 7203 rows from BOTH parts captured
 
 
+# ---------------------------------------------------------------------------
+# CLI presentation: friendly errors/notes instead of raw tracebacks / warning
+# chrome for novice mistakes and expected no-data cases (QA papercuts #1, #2).
+# ---------------------------------------------------------------------------
+
+def test_export_time_filter_on_summary_prints_clean_error(tmp_path, monkeypatch, capsys):
+    """A summary type rejects start/end-time with a friendly one-line CLI error,
+    not a Python traceback exposing internal module paths (QA papercut #1)."""
+    inroot = tmp_path / "NEEDS"
+    inroot.mkdir()
+    monkeypatch.setattr("sys.argv", [
+        "tse-tick", "export", "--data-type", "indices_summary",
+        "--tickers", "101", "--period", "202305",
+        "--input-root", str(inroot), "--start-time", "09:00:00",
+        "--output", str(tmp_path / "o.csv"),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 1                       # failure still signalled
+    err = capsys.readouterr().err
+    assert "Error:" in err
+    assert "start_time/end_time are not supported" in err   # the friendly message
+    assert "Traceback" not in err                    # no internal traceback
+    assert "constants.py" not in err                 # no internal file paths leak
+
+
+def test_export_missing_input_root_prints_clean_error(tmp_path, monkeypatch, capsys):
+    """A nonexistent --input-root surfaces as a one-line error, not a traceback
+    (same FileNotFoundError family as papercut #1)."""
+    monkeypatch.setattr("sys.argv", [
+        "tse-tick", "export", "--data-type", "individual_stock",
+        "--tickers", "7203", "--period", "20230504",
+        "--input-root", str(tmp_path / "does_not_exist"),
+        "--output", str(tmp_path / "o.csv"),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Error:" in err
+    assert "does not exist" in err
+    assert "Traceback" not in err
+
+
+def test_ingest_bad_period_prints_clean_error(tmp_path, monkeypatch, capsys):
+    """A malformed --period surfaces as a clean CLI error for `ingest` too — the
+    ValueError from parse_period must not reach the user as a traceback."""
+    monkeypatch.setattr("sys.argv", [
+        "tse-tick", "ingest", "--data-type", "individual_stock",
+        "--period", "notaperiod",
+        "--input-root", str(tmp_path), "--output-root", str(tmp_path / "out"),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Error:" in err
+    assert "Invalid period" in err
+    assert "Traceback" not in err
+
+
+def test_export_no_data_prints_clean_note(tmp_path, monkeypatch, capsys):
+    """A no-data (holiday) read prints a clean note on stdout, not Python's raw
+    NoDataWarning chrome with an internal file:line and source-line echo
+    (QA papercut #2). The empty output file is still written (exit 0)."""
+    month = tmp_path / "NEEDS" / "個別株式2023" / "TICST120" / "202305"
+    month.mkdir(parents=True)                        # valid root, no ZIPs -> no data
+    out = tmp_path / "goldenweek.csv"
+    monkeypatch.setattr("sys.argv", [
+        "tse-tick", "export", "--data-type", "individual_stock",
+        "--tickers", "7203", "--period", "20230504-20230505",
+        "--input-root", str(tmp_path / "NEEDS"), "--output", str(out),
+    ])
+    main()                                           # no crash, exit 0
+    result = capsys.readouterr()
+    assert "Warning:" in result.out                  # clean note, on stdout
+    assert "no ZIP files found" in result.out        # the friendly message survives
+    assert "Wrote 0 rows" in result.out              # empty file still written
+    assert out.exists()
+    # None of Python's default warning chrome leaks through:
+    assert "NoDataWarning" not in result.out and "NoDataWarning" not in result.err
+    assert "cli.py:" not in result.out and "cli.py:" not in result.err
+
+
 def test_cli_export_two_stage_store_multi_ticker(tmp_path, monkeypatch):
     """`export --store` with several --tickers goes through extract_to_store
     (multi-ticker since 0.12.0) — it used to silently fall back to a one-shot
