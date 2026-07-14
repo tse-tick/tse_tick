@@ -27,7 +27,11 @@ from typing import Iterable, Optional, Union, cast
 import polars as pl
 
 from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, NoDataWarning, OneShotMemoryError, PartialIngestWarning, IngestWorkerError
-from tse_tick.io.parquet import write_partitioned_parquet, write_event_window_parquet
+from tse_tick.io.parquet import (
+    PartitionedParquetAppender,
+    write_partitioned_parquet,
+    write_event_window_parquet,
+)
 from tse_tick.event_window import _filter_ticks_for_events
 from tse_tick.constants import validate_data_type, validate_time_filter_support
 
@@ -48,7 +52,16 @@ _FILTERED_WORKER_GB = 0.5    # summary / index (small daily frames), and the sma
 # was a flat 0.5 for ANY filter, so the RAM cap never bound and the 16-worker Jupyter
 # default overcommitted a 34 GB box -> a killed worker (BrokenProcessPool).
 _TICKER_WORKER_GB = 1.5
+# A STREAMING filtered day (morsel -> per-ticker row group) peaks at ~one morsel
+# plus writer buffers, not at the day: measured 2.40 GB for the worst real day
+# seen (7203+9984 on 20250409, 4,673,760 rows — 24.52 GB before). It does not grow
+# with the day's rows or the number of codes kept, so this is a constant with
+# headroom rather than an estimate of the data.
+_STREAM_WORKER_GB = 3.0
 _FULLFRAME_EXPANSION = 8.0   # compressed part bytes -> peak per-worker RAM (full-frame day)
+# Above this many codes a filtered day would hold too many concurrent Parquet
+# writers (a full-frame day is thousands), so it keeps the concat write path.
+_MAX_STREAM_TICKERS = 64
 _LARGE_EXTRACT_ROWS = 10_000_000  # extract_to_store warns before materializing more rows
 
 
@@ -163,12 +176,19 @@ def _filtered_worker_gb(full_gb: float, n_tickers: int) -> float:
     how many codes are kept — but it can never exceed the whole day's frame, hence
     the ``full_gb`` clamp (which also keeps a small day's estimate small).
 
-    This used to be a flat 0.5 GB for any filter, which made the RAM-aware
-    :func:`_cap_workers` never bind on a filtered ingest: the Jupyter default of one
-    worker per core ran 16 x a measured ~2.2 GB (7203+9984, one day) on a 34 GB box,
-    and a killed worker surfaced as ``BrokenProcessPool``. One active code's day
-    measures ~1.1 GB, so scale by :data:`_TICKER_WORKER_GB` per code.
+    A **streaming** day (the usual filtered case — see :data:`_MAX_STREAM_TICKERS`)
+    no longer scales at all: it writes morsel-sized row groups, so its peak is the
+    bounded :data:`_STREAM_WORKER_GB` whatever the day's size or the number of codes
+    kept. That is the point of round-20 — the estimate stops being a guess about the
+    data, which is what could never be made right (bytes do not predict filtered
+    rows: an extreme day keeps ~100% of a pruned part, a normal one ~15%).
+
+    A wider filter still takes the concat write path, where the worker does hold the
+    day: there, scale by :data:`_TICKER_WORKER_GB` per code (~1.1 GB measured for one
+    active code's day), clamped by the whole day's frame.
     """
+    if n_tickers <= _MAX_STREAM_TICKERS:
+        return min(full_gb, _STREAM_WORKER_GB)
     return min(full_gb, _TICKER_WORKER_GB * max(1, n_tickers))
 
 
@@ -811,33 +831,94 @@ def _ingest_date_group(date_str, zip_paths, output_dir, data_type, year, languag
     # groups by day internally, so per-date pruning selects the identical parts.
     if ticker_filter and data_type == "individual_stock":
         zip_paths = _prune_parts_by_ticker(zip_paths, ticker_filter)
+    # Stream each part straight into the store when a ticker filter bounds how many
+    # output files a day can have. Holding every part and concatenating the day is
+    # what made a 4.67M-row day (7203+9984, 20250409) peak at 24.5 GB and OOM a
+    # 34 GB box; appending part-by-part keeps the peak at ~one part, and NEEDS
+    # size-splits parts at ~55 MB, so that bound holds as volume grows. Everything
+    # else — full-frame days (thousands of ticker files, one writer each) and the
+    # summary/index types (small daily frames) — keeps the proven concat path.
+    streaming = (
+        data_type == "individual_stock"
+        and bool(ticker_filter)
+        and len(ticker_filter) <= _MAX_STREAM_TICKERS
+    )
+    appender = (
+        PartitionedParquetAppender(output_dir, data_type, compression=compression)
+        if streaming
+        else None
+    )
     parts: list = []
     errors: list = []
-    for zp in zip_paths:
-        try:
-            df = create_df(
-                str(zp), language=language, auto_detect=False,
-                data_type=data_type, year=year, ticker_filter=ticker_filter,
-            )
-        except (zipfile.BadZipFile, EOFError) as exc:
-            logger.error("Corrupt zip %s: %s", Path(zp).name, exc)
-            errors.append({"zip_path": str(zp), "error": str(exc)})
-            continue
-        except OneShotMemoryError:
-            # A one-shot OOM must abort the date group, not silently write a partial
-            # day that resume then marks complete (alpha-review finding 1).
-            raise
-        except Exception as exc:
-            logger.error("Error reading %s: %s", Path(zp).name, exc)
-            errors.append({"zip_path": str(zp), "error": str(exc)})
-            continue
-        # create_df's ticker_filter only drives the individual_stock raw-byte fast
-        # path; for the other types prune here so ingest honors ticker_filter too.
-        if ticker_filter and data_type != "individual_stock":
-            df = _filter_codes(df, data_type, {str(t).strip() for t in ticker_filter})
-        if not df.is_empty():
-            parts.append(df)
-        del df
+    try:
+        for zp in zip_paths:
+            try:
+                df = create_df(
+                    str(zp), language=language, auto_detect=False,
+                    data_type=data_type, year=year, ticker_filter=ticker_filter,
+                    # Streaming: each cleaned morsel goes straight to its ticker's
+                    # Parquet writer and is dropped, so neither the part's frame nor
+                    # the day's ever exists. create_df then returns a typed-empty
+                    # frame (the sink owns the rows) and `rows` comes from the
+                    # appender. This is the whole point: peak ~= one morsel.
+                    on_morsel=(appender.write if appender is not None else None),
+                )
+            except (zipfile.BadZipFile, EOFError) as exc:
+                logger.error("Corrupt zip %s: %s", Path(zp).name, exc)
+                errors.append({"zip_path": str(zp), "error": str(exc)})
+                continue
+            except OneShotMemoryError:
+                # A one-shot OOM must abort the date group, not silently write a partial
+                # day that resume then marks complete (alpha-review finding 1).
+                raise
+            except Exception as exc:
+                logger.error("Error reading %s: %s", Path(zp).name, exc)
+                errors.append({"zip_path": str(zp), "error": str(exc)})
+                continue
+            # create_df's ticker_filter only drives the individual_stock raw-byte fast
+            # path; for the other types prune here so ingest honors ticker_filter too.
+            if ticker_filter and data_type != "individual_stock":
+                df = _filter_codes(df, data_type, {str(t).strip() for t in ticker_filter})
+            if appender is not None:
+                # on_morsel already streamed this part's rows to the writers; the
+                # returned frame is the typed-empty placeholder, never the data.
+                pass
+            elif not df.is_empty():
+                parts.append(df)
+            del df
+    except BaseException:
+        # Publish nothing on the way out: the temp files are dropped, so a failed
+        # day stays fully re-ingestable rather than half-written.
+        if appender is not None:
+            appender.abort()
+        raise
+
+    if appender is not None:
+        rows = appender.rows_written
+        if rows == 0:
+            appender.abort()
+        else:
+            out_path = appender.commit()
+        gc.collect()
+        if rows == 0:
+            meta = {"date": date_str, "parts": len(zip_paths), "rows": 0, "output_path": None}
+            if errors:
+                meta["errors"] = errors
+            else:
+                date_dir = Path(output_dir) / data_type / f"date={date_str}"
+                date_dir.mkdir(parents=True, exist_ok=True)
+                _write_coverage_marker(date_dir, ticker_filter, complete=True)
+            return meta
+        _write_coverage_marker(
+            Path(output_dir) / data_type / f"date={date_str}",
+            ticker_filter,
+            complete=not errors,
+        )
+        meta = {"date": date_str, "parts": len(zip_paths), "rows": rows, "output_path": out_path}
+        if errors:
+            meta["errors"] = errors
+        return meta
+
     if not parts:
         gc.collect()
         meta = {"date": date_str, "parts": len(zip_paths), "rows": 0, "output_path": None}

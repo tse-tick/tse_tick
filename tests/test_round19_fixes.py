@@ -167,11 +167,19 @@ def test_ingest_worker_error_is_importable_and_catchable():
 def test_filtered_worker_estimate_scales_with_ticker_count():
     """The guard assumed ANY ticker_filter meant 0.5 GB/worker, so it never
     clamped: 16 Jupyter workers x a measured ~2.2 GB (7203+9984, one real day)
-    overcommitted a 34 GB box and a worker was killed. It must grow per code."""
+    overcommitted a 34 GB box and a worker was killed.
+
+    Round-19 fixed that by scaling per kept code. Round-20 **supersedes** that for
+    the streaming path — a streamed day's peak is a bounded constant, so it no
+    longer scales with codes at all — and the per-code scaling now applies only to
+    a filter too wide to stream, which still holds the whole day.
+    """
     full = 11.8  # a real 2024 day: 1.47 GB compressed x _FULLFRAME_EXPANSION
-    assert _filtered_worker_gb(full, 1) == _TICKER_WORKER_GB
-    assert _filtered_worker_gb(full, 2) == 2 * _TICKER_WORKER_GB
+    wide = ingest_mod._MAX_STREAM_TICKERS + 1
+    assert _filtered_worker_gb(full, wide) == min(full, _TICKER_WORKER_GB * wide)
     assert _TICKER_WORKER_GB >= 1.0, "measured ~1.1 GB/code; the old flat 0.5 caused the OOM"
+    # The streaming path (the common case) is bounded, not data-dependent.
+    assert _filtered_worker_gb(full, 1) == _filtered_worker_gb(full, 2) == ingest_mod._STREAM_WORKER_GB
 
 
 def test_filtered_worker_estimate_never_exceeds_the_whole_day():
