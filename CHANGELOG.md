@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-07-14
+
+A CLI presentation pass from a normal-user (non-coder) QA acceptance test: `tse-tick
+export`/`ingest` now show plain-language errors and no-data notices instead of raw
+Python tracebacks and warning chrome. **CLI-only** — no change to parsed/cleaned output
+or the library's `warnings`-based API contract; the full synthetic + real-data suite is
+green (551 passed) and `flake8`/`mypy` show no new findings on `cli.py`.
+
 ### Fixed
 - **CLI errors are one-liners, not Python tracebacks.** `tse-tick export`/`ingest`
   let the library's deliberate user-facing errors — an unsupported

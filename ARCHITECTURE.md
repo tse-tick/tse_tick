@@ -127,7 +127,7 @@ tse_tick/                          # Project root
 
 ## 4. Key Changes (CHANGELOG Summary)
 
-### [Unreleased] — CLI presentation: friendly errors & no-data notes (normal-user QA)
+### v0.14.4 — CLI presentation: friendly errors & no-data notes (normal-user QA) (2026-07-14)
 
 | Change | Detail |
 |--------|--------|
