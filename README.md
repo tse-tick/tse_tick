@@ -547,6 +547,12 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
   `Execution Time` but a real `Update Time`; `read_ticks` / `query_ticks` time windows fall back to
   `Update Time` for those rows, so a session filter retains in-window quote updates (not just
   trade-coincident snapshots) — what `compute_depth` / `compute_spread` / `compute_flow_imbalance` need.
+  Stores now persist that effective time as an internal `Effective Time` key so a time window can skip
+  Parquet row groups instead of scanning them (a 1-minute slice measured **7.64x** faster on real data,
+  a 09:00–11:30 session window **1.27x**, for +0.52% store bytes). It is an index, not data: it is
+  excluded from every result, so `individual_stock` still returns its **95** columns. Purely additive —
+  **older stores keep working unchanged, with no re-ingest**; they simply fall back to the old
+  (unpruned) expression, so re-ingest only if you want the speedup.
 - **Index codes are raw codes.** `indices` and `indices_summary` both return `Index Code` as the raw
   numeric code (e.g. `"101"`), matching what you pass to `ticker_filter` and the `ticker=` partition;
   `ticker_filter` also accepts the display name (`"Nikkei 225"`). (Stores written before 0.7.0 held

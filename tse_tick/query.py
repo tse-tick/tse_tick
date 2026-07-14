@@ -17,6 +17,7 @@ from .enhanced import (
     _code_matches_family,
     parse_period,
 )
+from .io.parquet import EFFECTIVE_TIME_COL
 
 # Column names are interpolated as double-quoted identifiers (f'"{c}"'), so the
 # only injection risk is a character that closes the quote (") or escapes it
@@ -35,6 +36,71 @@ _QUERY_MEMORY_GUIDANCE = (
     "a month or day, pass a smaller limit=, or loop query_ticks over sub-periods "
     "(per day / per month) and process each slice before reading the next."
 )
+
+
+# The pre-#65 effective-time expression. Stores written before the materialized
+# column existed keep working on this fallback — the store change is additive, so
+# no re-ingest is required (same compatibility contract as the coverage marker).
+_EFFECTIVE_TIME_CASE = (
+    'CASE WHEN "Execution Time" IS NULL OR "Execution Time" = \'\' '
+    'THEN substr("Update Time", 1, 6) ELSE "Execution Time" END'
+)
+
+
+def _store_has_effective_time(sample_file: Optional[str]) -> bool:
+    """Does this store carry the materialized ``Effective Time`` column?
+
+    Read from one file's Parquet footer (schema only, no row groups) so a store
+    written before the column existed transparently keeps the CASE fallback.
+    Any unreadable footer answers "no": the fallback is always correct, just
+    slower — the same never-less-correct degradation contract ``partscan`` uses
+    when it cannot confirm the ascending layout.
+    """
+    if sample_file is None:
+        return False
+    try:
+        return EFFECTIVE_TIME_COL in pq.ParquetFile(sample_file).schema_arrow.names
+    except Exception:
+        return False
+
+
+def _time_expr_for(data_type: str, stored: bool) -> str:
+    """The SQL expression a time predicate / ORDER BY should use."""
+    if data_type != "individual_stock":
+        # The other types never blank Execution Time, so it is already a stored,
+        # prunable column for them.
+        return '"Execution Time"'
+    return f'"{EFFECTIVE_TIME_COL}"' if stored else _EFFECTIVE_TIME_CASE
+
+
+def _time_literal(hhmmss: str, stored: bool, data_type: str) -> str:
+    """Render a ``"HHMMSS"`` bound to match the column the predicate compares.
+
+    The materialized column is ``Int32`` HHMMSS; the string forms compare
+    lexicographically (equivalent for fixed-width digits).
+    """
+    if stored and data_type == "individual_stock":
+        return str(int(hhmmss))
+    return f"'{hhmmss}'"
+
+
+def _select_clause(col_select: str, stored: bool) -> str:
+    """Keep the materialized key out of the projection.
+
+    ``Effective Time`` is an internal index, not data: individual_stock's output
+    is a locked 95 columns, and a whole-day query with no time filter would
+    otherwise pay to read a column it never uses.
+    """
+    if col_select == "*" and stored:
+        return f'* EXCLUDE ("{EFFECTIVE_TIME_COL}")'
+    return col_select
+
+
+def _drop_effective_time(df: pl.DataFrame) -> pl.DataFrame:
+    """Drop the stored key from a frame read outside the SQL builders."""
+    if EFFECTIVE_TIME_COL in df.columns:
+        return df.drop(EFFECTIVE_TIME_COL)
+    return df
 
 
 def _duckdb_connect() -> "duckdb.DuckDBPyConnection":
@@ -279,6 +345,10 @@ def query_ticks(
     # 225"), which would defeat a value-based filter.
     summary = data_type in SUMMARY_TYPES
     code_condition: Optional[str] = None
+    # One file of the selected set answers whether this store carries the
+    # materialized time key (issue #65); every file of a store is written by the
+    # same writer, so any of them is representative.
+    sample_file: Optional[str] = None
     if ticker is not None:
         ticker_token = _normalize_ticker(ticker)
         if summary:
@@ -307,76 +377,98 @@ def query_ticks(
                 any_file = next(type_dir.glob("**/*.parquet"), None)
                 if any_file is None:
                     return pl.DataFrame()
-                empty = pl.read_parquet(any_file, n_rows=0)
+                # The stored time key is not part of the output schema, so the
+                # typed-empty frame must not expose it either.
+                empty = _drop_effective_time(pl.read_parquet(any_file, n_rows=0))
                 if columns:
                     empty = empty.select([c for c in columns if c in empty.columns])
                 return empty
             source = "[" + ", ".join(f"'{f}'" for f in ticker_files) + "]"
+            sample_file = ticker_files[0]
     else:
         glob_pattern = str(type_dir / "**" / "*.parquet").replace("\\", "/")
         source = f"'{glob_pattern}'"
+        any_file = next(type_dir.glob("**/*.parquet"), None)
+        sample_file = str(any_file) if any_file is not None else None
 
     # individual_stock quote-only book rows have a blank Execution Time but a real
     # Update Time (stored "HHMMSSssssss"); fall back to its first 6 chars so a time
     # window keeps in-window order-book rows, not just trade-coincident snapshots
     # (~94% of a liquid day is quotes). Scoped to individual_stock: the other types
     # have no Update Time column (and indices' Execution Time is never blank).
-    if data_type == "individual_stock":
-        time_expr = (
-            'CASE WHEN "Execution Time" IS NULL OR "Execution Time" = \'\' '
-            'THEN substr("Update Time", 1, 6) ELSE "Execution Time" END'
-        )
-    else:
-        time_expr = '"Execution Time"'
+    # Stores written since #65 materialize that value as an Int32 column, so the
+    # predicate hits row-group statistics instead of a per-row CASE; older stores
+    # fall back to the CASE and keep working unchanged.
+    stored_time = data_type == "individual_stock" and _store_has_effective_time(sample_file)
 
-    conditions: list[str] = []
+    base_conditions: list[str] = []
     if date is not None:
         lo, hi = _date_range_bounds(date)
-        conditions.append(
+        base_conditions.append(
             f"date = '{lo}'" if lo == hi else f"date >= '{lo}' AND date <= '{hi}'"
         )
     if code_condition is not None:
-        conditions.append(code_condition)
-    # Execution Time is stored as a 6-digit "HHMMSS" string; the public API
-    # accepts validated "HH:MM:SS" values, so strip the colons before the
-    # lexicographic comparison so it matches the stored format.
+        base_conditions.append(code_condition)
     if start_time is not None:
         _validate_time(start_time)
-        conditions.append(f"{time_expr} >= '{start_time.replace(':', '')}'")
     if end_time is not None:
         _validate_time(end_time)
-        conditions.append(f"{time_expr} <= '{end_time.replace(':', '')}'")
-
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     # Fetch one row beyond the cap so an exact-fit result (height == limit, nothing
     # dropped) isn't mistaken for truncation — only a genuine overflow warns
     # (alpha-review finding 7).
     limit_clause = f"LIMIT {limit + 1}" if limit is not None else ""
 
-    # Summary types are daily aggregates with no "Execution Time" column, so order
-    # only by the columns this data_type actually has (a hard-coded ORDER BY
-    # "Execution Time" makes query_ticks unusable for both summaries).
-    # individual_stock orders by the same effective time so quote rows interleave
-    # chronologically rather than all sorting first on a blank Execution Time.
-    order_cols = ['"Data Date"']
-    if data_type == "individual_stock":
-        order_cols.append(time_expr)
-    elif data_type == "indices":
-        order_cols.append('"Execution Time"')
-    order_clause = "ORDER BY " + ", ".join(order_cols)
+    def _build(stored: bool, exclude_key: bool, union: bool) -> str:
+        time_expr = _time_expr_for(data_type, stored)
+        conditions = list(base_conditions)
+        # Execution Time is stored as a 6-digit "HHMMSS" string; the public API
+        # accepts validated "HH:MM:SS" values, so strip the colons before the
+        # comparison so it matches the stored format (the materialized key
+        # compares as the equivalent Int32).
+        if start_time is not None:
+            lit = _time_literal(start_time.replace(":", ""), stored, data_type)
+            conditions.append(f"{time_expr} >= {lit}")
+        if end_time is not None:
+            lit = _time_literal(end_time.replace(":", ""), stored, data_type)
+            conditions.append(f"{time_expr} <= {lit}")
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-    sql = (
-        f"SELECT {col_select} "
-        f"FROM read_parquet({source}, hive_partitioning=true) "
-        f"{where_clause} "
-        f"{order_clause} "
-        f"{limit_clause}"
-    )
+        # Summary types are daily aggregates with no "Execution Time" column, so
+        # order only by the columns this data_type actually has (a hard-coded
+        # ORDER BY "Execution Time" makes query_ticks unusable for both
+        # summaries). individual_stock orders by the same effective time so quote
+        # rows interleave chronologically rather than all sorting first on a
+        # blank Execution Time.
+        order_cols = ['"Data Date"']
+        if data_type == "individual_stock":
+            order_cols.append(time_expr)
+        elif data_type == "indices":
+            order_cols.append('"Execution Time"')
+        union_arg = ", union_by_name=true" if union else ""
+        return (
+            f"SELECT {_select_clause(col_select, exclude_key)} "
+            f"FROM read_parquet({source}, hive_partitioning=true{union_arg}) "
+            f"{where_clause} "
+            f"ORDER BY {', '.join(order_cols)} "
+            f"{limit_clause}"
+        )
 
     con = _duckdb_connect()
     try:
-        df = _execute_to_polars(con, sql)
+        try:
+            df = _execute_to_polars(con, _build(stored_time, stored_time, False))
+        except duckdb.InvalidInputException:
+            # A store can be MIXED: resume ingests new dates (which carry the
+            # key) into a store whose older dates predate it, and DuckDB rejects
+            # a file list whose first file has a column a later one lacks. Only
+            # the fast path can trip this — retry on the CASE, unioning the
+            # schemas by name so the key is simply null on the older files (the
+            # CASE never reads it) and EXCLUDE-ing it from the output. Correct,
+            # just unaccelerated; re-ingest the older dates to get the speedup.
+            if not stored_time:
+                raise
+            df = _execute_to_polars(con, _build(False, True, True))
     finally:
         con.close()
 
@@ -597,30 +689,10 @@ def _query_extract_batch(
     ordered_codes = [_normalize_ticker(t) for t in sorted(tickers)]
     summary = data_type in SUMMARY_TYPES
 
-    # Effective time column — individual_stock falls back to Update Time for quote-only
-    # rows (blank Execution Time); identical to query_ticks.
-    if data_type == "individual_stock":
-        time_expr = (
-            'CASE WHEN "Execution Time" IS NULL OR "Execution Time" = \'\' '
-            'THEN substr("Update Time", 1, 6) ELSE "Execution Time" END'
-        )
-    else:
-        time_expr = '"Execution Time"'
-
     if date_from is not None:
         _validate_date(date_from)
     if date_to is not None:
         _validate_date(date_to)
-
-    conditions: list[str] = []
-    if start_time is not None:
-        _validate_time(start_time)
-        conditions.append(f"{time_expr} >= '{start_time.replace(':', '')}'")
-    if end_time is not None:
-        _validate_time(end_time)
-        conditions.append(f"{time_expr} <= '{end_time.replace(':', '')}'")
-
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     if summary:
         # Summary stores partition by date only; the code lives in a column. One scan of
@@ -632,7 +704,9 @@ def _query_extract_batch(
         code_col = "Index Code" if data_type == "indices_summary" else "Stock Code"
         code_sql = f'substr("{code_col}", 1, 4)'
         in_list = ", ".join(f"'{c}'" for c in ordered_codes)
-        conds = conditions + [f"{code_sql} IN ({in_list})"]
+        # validate_time_filter_support above rejects start_time/end_time for the
+        # summary types, so there is never a time condition to carry here.
+        conds = [f"{code_sql} IN ({in_list})"]
         # Summary partitions are one file per date with the Hive `date` column
         # carrying YYYYMMDD — bound it to the requested period (B5).
         if date_from is not None:
@@ -703,7 +777,17 @@ def _query_extract_batch(
         any_file = next(type_dir.glob("**/*.parquet"), None)
         if any_file is None:
             return pl.DataFrame()
-        return pl.read_parquet(any_file, n_rows=0)
+        # The stored time key is an internal index, not part of the output schema.
+        return _drop_effective_time(pl.read_parquet(any_file, n_rows=0))
+
+    # Effective time — identical resolution to query_ticks: the materialized Int32
+    # column on stores written since #65, the CASE fallback on older ones.
+    stored_time = data_type == "individual_stock" and _store_has_effective_time(files[0])
+
+    if start_time is not None:
+        _validate_time(start_time)
+    if end_time is not None:
+        _validate_time(end_time)
 
     source = "[" + ", ".join(f"'{f}'" for f in files) + "]"
     # Order by the 4-char FAMILY root of the filename code: a family (7203 +
@@ -711,20 +795,43 @@ def _query_extract_batch(
     # what a per-ticker query_ticks("7203") returns for it. Ordering by the full
     # stem would split the family into per-class blocks.
     code_sql = "substr(regexp_extract(filename, 'ticker=([A-Za-z0-9]+)\\.parquet', 1), 1, 4)"
-    order_cols = [code_sql, '"Data Date"']
-    if data_type == "individual_stock":
-        order_cols.append(time_expr)
-    elif data_type == "indices":
-        order_cols.append('"Execution Time"')
-    sql = (
-        f"SELECT * EXCLUDE (filename) "
-        f"FROM read_parquet({source}, hive_partitioning=true, filename=true) "
-        f"{where_clause} "
-        f"ORDER BY {', '.join(order_cols)}"
-    )
+
+    def _build(stored: bool, exclude_key: bool, union: bool) -> str:
+        time_expr = _time_expr_for(data_type, stored)
+        conditions: list[str] = []
+        if start_time is not None:
+            lit = _time_literal(start_time.replace(":", ""), stored, data_type)
+            conditions.append(f"{time_expr} >= {lit}")
+        if end_time is not None:
+            lit = _time_literal(end_time.replace(":", ""), stored, data_type)
+            conditions.append(f"{time_expr} <= {lit}")
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        order_cols = [code_sql, '"Data Date"']
+        if data_type == "individual_stock":
+            order_cols.append(time_expr)
+        elif data_type == "indices":
+            order_cols.append('"Execution Time"')
+        # `filename` drives the code ordering and the stored key drives the time
+        # ordering; neither is output — EXCLUDE keeps the columns byte-identical
+        # to the pre-#65 result.
+        excluded = "filename" + (f', "{EFFECTIVE_TIME_COL}"' if exclude_key else "")
+        union_arg = ", union_by_name=true" if union else ""
+        return (
+            f"SELECT * EXCLUDE ({excluded}) "
+            f"FROM read_parquet({source}, hive_partitioning=true, filename=true{union_arg}) "
+            f"{where_clause} "
+            f"ORDER BY {', '.join(order_cols)}"
+        )
+
     con = _duckdb_connect()
     try:
-        tick_result = _execute_to_polars(con, sql)
+        try:
+            tick_result = _execute_to_polars(con, _build(stored_time, stored_time, False))
+        except duckdb.InvalidInputException:
+            # Mixed store (older dates predate the key) — see query_ticks.
+            if not stored_time:
+                raise
+            tick_result = _execute_to_polars(con, _build(False, True, True))
     finally:
         con.close()
     return _drop_partition_ticker_column(tick_result)

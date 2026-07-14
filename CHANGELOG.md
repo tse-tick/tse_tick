@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+Time-window queries on `individual_stock` now prune Parquet row groups instead of
+scanning every one: a 1-minute slice is **7.64x** faster, a 5-minute window **5.65x**,
+the README's 09:00–11:30 session window **1.27x**, for **+0.52%** store bytes. The
+change is **additive — no re-ingest**: stores written before it keep working unchanged
+on the old expression. Closes #65.
+
+### Added
+- **A stored `Effective Time` key (`Int32` `HHMMSS`) on `individual_stock` partitions.**
+  `query_ticks` / `_query_extract_batch` filtered and ordered on a CASE over two columns
+  (`Execution Time`, falling back to `substr("Update Time", 1, 6)` for the quote-only
+  book rows that are ~94% of a liquid day). A scalar expression cannot be matched against
+  Parquet row-group min/max statistics, so a time predicate could never skip a row group —
+  every selected file was read in full and filtered row-by-row. The value is now
+  materialized at write time by both writers (`write_partitioned_parquet` and 0.14.6's
+  streaming `PartitionedParquetAppender`), so the predicate hits row-group statistics.
+  It is computed element-wise, so appending it per morsel is identical to computing it on
+  a whole concatenated day.
+
+  Measured against a pre-#65 store on real NEEDS data (7203 + 9984, `20250409`; the 7203
+  day is 2,564,238 rows in 19 row groups), interleaved A/B, median of 9–11:
+
+  | query | before | after | speedup |
+  |---|---|---|---|
+  | 1-minute slice (09:30–09:31) | 915.2 ms | 119.8 ms | **7.64x** (36.7σ) |
+  | narrow window (09:00–09:05) | 956.4 ms | 169.3 ms | **5.65x** (27.2σ) |
+  | session window (09:00–11:30) | 2645.4 ms | 2088.7 ms | **1.27x** (5.4σ) |
+  | whole day, no time filter | 3817.2 ms | 4130.5 ms | unchanged (0.9σ — noise) |
+  | store bytes | 55,193,678 | 55,479,881 | **+0.52%** |
+
+  The win scales with the window's selectivity — it skips row groups, so a window that
+  keeps most of the day has little left to skip. All six real-data filter shapes returned
+  frames identical to the pre-#65 store.
+
+### Changed
+- **Both SQL builders lose the duplicated CASE.** `query_ticks` and `_query_extract_batch`
+  resolve the effective-time expression once, from the store: the materialized column when
+  present, the CASE otherwise. Detection reads one Parquet footer (schema only); an
+  unreadable footer answers "no" and takes the fallback, so the degradation is never less
+  correct — the same contract `partscan` uses when it cannot confirm the ascending layout.
+- **The key is stored, never returned.** It is an internal index, so it is excluded from
+  every documented output: `individual_stock` keeps its locked **95** columns from
+  `query_ticks`, `_query_extract_batch`, `export_query`, `read_parquet_partition`, and the
+  typed-empty frames. An unfiltered whole-day query therefore never pays to read it (hence
+  "unchanged" above). The `query_sql` escape hatch still exposes the raw store, so its
+  `ticks` view shows the column — use it for fast hand-written time predicates.
+- **Mixed stores keep working.** Resume ingests new dates into an existing store, so a
+  pre-#65 store gains keyed dates while its older dates lack the column — and DuckDB
+  rejects a file list whose first file carries a column a later one does not. Both
+  builders now fall back to the CASE with `union_by_name=true` when that happens, so a
+  half-upgraded store reads correctly (just unaccelerated for those dates; re-ingest the
+  older dates to accelerate them). Detection reads a single Parquet footer per query —
+  probing every file would cost ~2.4 ms each (~1.8 s on a 750-file ticker-year), which is
+  why the fast path is optimistic with a correct fallback rather than an up-front scan.
+
 ## [0.14.6] - 2026-07-15
 
 A ticker-filtered ingest's peak memory no longer scales with the trading day's size.
