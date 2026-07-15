@@ -5,7 +5,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import polars as pl
 
@@ -31,6 +31,11 @@ _DEFAULT_PARTITION_COLS: dict[str, list[str]] = {
 
 _INDEX_DATA_TYPES = INDEX_TYPES
 _UNKNOWN_CODE_RE = re.compile(r"^Unknown \((.+)\)$")
+
+# The materialized effective-time key (issue #65). Stored, never returned: the
+# query layer filters/orders on it and EXCLUDEs it from the projection, so
+# individual_stock keeps its locked 95-column output.
+EFFECTIVE_TIME_COL = "Effective Time"
 
 # Per-date ticker-file fan-out: write concurrently only when a date produces at
 # least this many files (a full-frame individual_stock day writes thousands;
@@ -136,6 +141,58 @@ def _coerce_time_cols(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(exprs) if exprs else df
 
 
+def _add_effective_time(df: pl.DataFrame, data_type: str) -> pl.DataFrame:
+    """Materialize the effective-time filter/sort key as a stored ``Int32``.
+
+    ``query_ticks`` / ``_query_extract_batch`` used to filter and order
+    ``individual_stock`` on a CASE over two columns (``Execution Time``, falling
+    back to ``substr(Update Time, 1, 6)`` for the ~94% of a liquid day that is
+    quote-only book rows). A scalar expression cannot be matched against Parquet
+    row-group min/max statistics, so a time window read every row group of every
+    selected file and filtered row-by-row. Storing the value lets the predicate
+    prune. Measured against a pre-#65 store on real NEEDS data (7203 + 9984,
+    2025-04-09; the 7203 day is 2,564,238 rows in 19 row groups), interleaved
+    A/B: a 1-minute slice **7.64x**, a 09:00-09:05 window **5.65x**, the README's
+    09:00-11:30 session window **1.27x**, and an unfiltered whole day unchanged
+    (0.9 sigma — within noise), for **+0.52%** store bytes. The win scales with
+    how selective the window is: it prunes row groups, so a window that keeps
+    most of the day has little left to skip.
+
+    ``HHMMSS`` as an integer keeps time order (fixed-width digits compare
+    identically either way) while narrowing the key from a 6-byte string to 4
+    bytes, and delta-encodes well because ingest writes each day in raw NEEDS
+    order, which is already time-ordered (measured: 1 inversion in 2.56M rows).
+
+    Scoped to ``individual_stock``: it is the only type with the fallback. The
+    other three already filter on a stored ``Execution Time`` column, so they
+    prune today and gain nothing from a duplicate.
+
+    Element-wise, so it is identical whether applied per morsel (the streaming
+    :class:`PartitionedParquetAppender` path) or to a whole concatenated day.
+
+    Args:
+        df: The cleaned frame about to be written.
+        data_type: The NEEDS type being written.
+
+    Returns:
+        ``df`` with the ``Effective Time`` column appended, or unchanged when the
+        type is not ``individual_stock`` or the source columns are absent.
+    """
+    if data_type != "individual_stock" or EFFECTIVE_TIME_COL in df.columns:
+        return df
+    if "Execution Time" not in df.columns or "Update Time" not in df.columns:
+        return df
+    return df.with_columns(
+        pl.when(pl.col("Execution Time").is_null() | (pl.col("Execution Time") == ""))
+        .then(pl.col("Update Time").str.slice(0, 6))
+        .otherwise(pl.col("Execution Time"))
+        # Non-strict: a malformed time yields null, which no >=/<= predicate
+        # matches — the same rows the old CASE dropped on an unparseable value.
+        .cast(pl.Int32, strict=False)
+        .alias(EFFECTIVE_TIME_COL)
+    )
+
+
 class PartitionedParquetAppender:
     """Append cleaned frames to the Hive store incrementally, bounding memory.
 
@@ -174,6 +231,7 @@ class PartitionedParquetAppender:
         compression: str = "zstd",
     ) -> None:
         validate_data_type(data_type)
+        self._data_type = data_type
         self._pcols = (
             partition_cols if partition_cols is not None else _DEFAULT_PARTITION_COLS[data_type]
         )
@@ -195,6 +253,7 @@ class PartitionedParquetAppender:
             if col not in df.columns:
                 raise ValueError(f"Partition column {col!r} not in DataFrame")
         df = _coerce_time_cols(df)
+        df = _add_effective_time(df, self._data_type)
         if df.schema[self._date_col].is_temporal():
             df = df.with_columns(pl.col(self._date_col).dt.strftime("%Y%m%d").alias("_date_str"))
         else:
@@ -312,6 +371,7 @@ def write_partitioned_parquet(
     type_dir.mkdir(parents=True, exist_ok=True)
 
     df = _coerce_time_cols(df)
+    df = _add_effective_time(df, data_type)
 
     date_col = pcols[0]
     ticker_col = pcols[1] if len(pcols) > 1 else None
@@ -457,7 +517,15 @@ def read_parquet_partition(
         expr = ticker_expr if expr is None else (expr & ticker_expr)
 
     table = dataset.to_table(filter=expr, columns=columns)
-    df = pl.from_arrow(table)
+    df = cast(pl.DataFrame, pl.from_arrow(table))
+
+    # "Effective Time" is a stored index for the query layer's time predicates,
+    # not part of any data type's documented output (individual_stock is a locked
+    # 95 columns). An explicit `columns` projection already excludes it unless it
+    # was asked for by name; drop it from the select-all case so this reader and
+    # query_ticks return the same shape.
+    if not columns and EFFECTIVE_TIME_COL in df.columns:
+        df = df.drop(EFFECTIVE_TIME_COL)
 
     return df
 
