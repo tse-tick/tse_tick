@@ -127,7 +127,7 @@ tse_tick/                          # Project root
 
 ## 4. Key Changes (CHANGELOG Summary)
 
-### Unreleased — materialized effective-time key: time windows prune row groups (issue #65)
+### v0.15.0 — materialized effective-time key: time windows prune row groups (issue #65) (2026-07-15)
 
 | Change | Detail |
 |--------|--------|

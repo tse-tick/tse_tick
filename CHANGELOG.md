@@ -2,11 +2,26 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-15
+
 Time-window queries on `individual_stock` now prune Parquet row groups instead of
 scanning every one: a 1-minute slice is **7.64x** faster, a 5-minute window **5.65x**,
 the README's 09:00–11:30 session window **1.27x**, for **+0.52%** store bytes. The
 change is **additive — no re-ingest**: stores written before it keep working unchanged
 on the old expression. Closes #65.
+
+Minor bump rather than a patch because the **store gains a column**: partitions written
+by 0.15.0 carry an internal `Effective Time` key. Nothing a caller sees changes —
+`individual_stock` still returns its locked **95** columns — and old stores keep
+reading, so the bump signals the on-disk addition, not a break.
+
+Three sibling proposals from the same pipeline review were **closed on measured
+evidence** rather than implemented — see #64 (the per-file ingest sort is a no-op: real
+data is already time-ordered, 1 inversion in 2,564,238 rows, and sorting would undo
+0.14.6's memory bound), #67 (the "~10³ rows per ticker-day file" premise is false —
+the real median is 14,260), and #66 → #70 (Float32 quote columns perturb 737,074 rows
+on round-trip; the safe Int32/Enum narrowing is deferred to its own schema-versioned
+release).
 
 ### Added
 - **A stored `Effective Time` key (`Int32` `HHMMSS`) on `individual_stock` partitions.**
