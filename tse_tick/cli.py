@@ -81,10 +81,18 @@ def _parse_parallel(value: str):
 
 
 def _parse_tickers(tickers_str: str) -> set[str]:
+    """Parse ``--tickers``: a comma-separated list, or ``@file`` (one per line).
+
+    The file is read as UTF-8 whatever the platform's locale says. Left to the
+    locale default, the same file parsed differently per OS (UTF-8 on Linux,
+    cp1252 on Windows) — which matters because ``ticker_filter`` legitimately
+    accepts Japanese index display names. ``utf-8-sig`` additionally strips the
+    BOM that Windows editors prepend, and reads plain UTF-8 unchanged.
+    """
     ticker_str = tickers_str.strip()
     if ticker_str.startswith("@"):
         filepath = ticker_str[1:]
-        with open(filepath, "r") as f:
+        with open(filepath, "r", encoding="utf-8-sig") as f:
             return {line.strip() for line in f if line.strip()}
     return {t.strip() for t in ticker_str.split(",") if t.strip()}
 

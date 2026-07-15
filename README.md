@@ -47,6 +47,12 @@ pip install -e ".[dev]"      # + everything for development (tests, linters, jup
 
 Requires Python ≥3.9. Core dependencies are polars and pyarrow; the `query` extra adds DuckDB (see `pyproject.toml`).
 
+**On Linux**, three prerequisites bite before tse_tick itself does: Python **≥3.9** (Ubuntu 20.04's
+system 3.8 won't resolve the package); a fresh Debian/Ubuntu needs `apt install python3-venv`
+(matching your minor version, e.g. `python3.12-venv`) before `python3 -m venv` works; and the polars
+wheel needs **AVX2** and a reasonably modern glibc — on an older CPU, install `polars-lts-cpu`
+instead. See **[Linux and WSL notes](#linux-and-wsl-notes)** for runtime behavior.
+
 ---
 
 ## Quick Start
@@ -592,6 +598,40 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
 
 ---
 
+## Linux and WSL notes
+
+tse_tick is developed on Windows and verified on Linux (WSL2 Ubuntu 24.04, Python 3.12, polars
+1.42, DuckDB 1.5). Stores are **fully portable across the two** — all four data types written on
+either OS read correctly on the other, including over `\\wsl$`. The points below are the ones that
+actually differ, or that surprise people coming from a fork-based mental model.
+
+- **The `if __name__ == "__main__":` guard is required on Linux too.** tse_tick forces the `spawn`
+  start method on every platform (fork deadlocks Polars: it copies the mutex state of the rayon
+  thread pool but not the threads holding it, so the child hangs on its first Polars call). Linux
+  users used to fork semantics don't expect this. Spawn re-imports your script in each worker, so an
+  unguarded top-level parallel ingest would re-run itself — tse_tick raises a designed error rather
+  than hanging. From a `.py` script the default is serial (with a hint); Jupyter and the REPL have
+  nothing to re-import, so they parallelize automatically.
+- **Worker sizing reads `MemAvailable`.** `_cap_workers` fits `N × per-worker estimate` inside 70% of
+  available RAM, and on Linux "available" means `/proc/meminfo`'s `MemAvailable` — *not* `MemFree`.
+  This matters on a long-running research box, where the page cache holds most of idle RAM: `MemFree`
+  can read ~1 GB on a 128 GB machine and would throttle a parallel ingest toward serial for no
+  reason. A `Limiting workers N -> M` notice is normal and expected; it means the cap engaged.
+- **Filenames match case-insensitively on every platform.** A `HTICST120.20230104.1.ZIP` delivery is
+  discovered on Linux exactly as it always was on Windows. Two files whose names differ **only** by
+  case (possible on Linux, not on Windows) resolve to one file, with a logged warning naming the one
+  ignored — reading both would double-count that trading day.
+- **Cross-machine exports are multiset-equal, not byte-identical.** Same-timestamp tick order is
+  non-deterministic (accepted; see the note above and PR #45), so a Linux export and a Windows export
+  of the same slice can order same-second ties differently. Compare as sets/sorted frames, not with
+  `diff` or a file hash. This is not a Linux bug.
+- **WSL specifics.** The WSL2 VM gets ~half the host's RAM by default, so a low worker cap there
+  (e.g. `Limiting workers 16 -> 3` at 3.0 GB/worker on a 15.5 GB VM) is normal — raise it in
+  `.wslconfig` if you want more. Reading raw ZIPs over `/mnt/g` (9p) works and was only mildly slower
+  than native in our runs. Put virtualenvs on ext4 (`~`), not under `/mnt/*`.
+
+---
+
 ## Contributing
 
 Contributions are welcome. Please open an issue or submit a pull request.
@@ -609,20 +649,34 @@ pytest tests/ -v
 ## Testing
 
 ```bash
-pytest tests/ -v
+pip install -e ".[query,dev]"                   # [query] is required by the tests, not optional
+export TSE_TICK_DATA_ROOT=/path/to/needs_root   # optional; enables the data-gated tests
+pytest --no-cov
 ```
 
-The suite collects **603 tests**. Without a local NEEDS store, **555 pass** and **48 skip**; with a complete NEEDS store, **all 603 pass**. Stage-1
-(ingestion) and Stage-2 (query, order-book features, and
-event-window-from-Parquet) both run with no proprietary data — a session-scoped
-pytest fixture builds a tiny Hive-partitioned Parquet store at test time by
-feeding synthetic, obviously-fake `individual_stock` (TICST120) ZIPs through the
-real ingest pipeline (`tests/synthetic_data.py`, `tests/conftest.py`).
+The suite collects **634 tests**. Stage-1 (ingestion) and Stage-2 (query, order-book features, and
+event-window-from-Parquet) both run with no proprietary data — a session-scoped pytest fixture
+builds a tiny Hive-partitioned Parquet store at test time by feeding synthetic, obviously-fake
+`individual_stock` (TICST120) ZIPs through the real ingest pipeline (`tests/synthetic_data.py`,
+`tests/conftest.py`).
 
-The 48 skips load **real NEEDS files** from local paths
-(`test_real_data.py` and the real-ZIP cases in `test_ingest.py`). They run
-automatically once a local NEEDS store is present (override the default root
-with `TSE_TICK_DATA_ROOT`).
+| Profile | Result | Skips are |
+|---------|--------|-----------|
+| Linux, no data root | 584 pass / 50 skip / **0 fail** | 48 data-gated + 2 platform-gated |
+| Linux, `TSE_TICK_DATA_ROOT` set | 633 pass / 1 skip / **0 fail** | 1 platform-gated |
+| Windows, no data root | 584 pass / 50 skip / **0 fail** | 48 data-gated + 2 platform-gated |
+| Windows, `TSE_TICK_DATA_ROOT` set | 632 pass / 2 skip / **0 fail** | 2 platform-gated |
+
+**Nothing fails on either OS.** Every skip is deliberate, and its reason names what would run it:
+
+- **48 data-gated tests** load **real NEEDS files** (`test_real_data.py` and the real-ZIP cases in
+  `test_ingest.py`). They run automatically once `TSE_TICK_DATA_ROOT` points at a local NEEDS store.
+  The default root is a **Windows** path, so off Windows they skip until you set the variable — and
+  because a suite of skips still looks green, the reasons say so explicitly rather than leaving you
+  to conclude the real-data half ran.
+- **A few platform-gated tests** skip on the OS they don't apply to, which is why the two
+  `TSE_TICK_DATA_ROOT` rows differ by one: the cp1252-console fix is Windows-only (skips on Linux),
+  while the case-variant-filename tests need a case-sensitive filesystem (skip on Windows).
 
 ---
 

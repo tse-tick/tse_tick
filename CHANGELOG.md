@@ -2,7 +2,53 @@
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-15
+
+**Linux portability.** The package core already ran correctly on Linux at 0.15.0 — `spawn` is
+forced explicitly, coverage markers are portable JSON, DuckDB globs are normalized, the Windows
+console shim no-ops elsewhere, and Windows-built stores of all four data types read correctly from
+Linux (and back). What did not hold up was everything around it: the test suite showed two
+failures that looked like package breakage, parallel ingest under-parallelized on any box with a
+warm page cache, an oddly-cased NEEDS delivery was **silently invisible**, and a Japanese ticker
+file decoded differently per OS. Verified on WSL2 Ubuntu 24.04 / Python 3.12 / polars 1.42 /
+DuckDB 1.5 against real NEEDS data, and re-verified on Windows. Closes #72.
+
+No re-ingest, no API change, no new dependencies (`/proc/meminfo` is stdlib).
+
+### Fixed
+- **Discovery now matches filenames case-insensitively on every platform.** Python's `glob` is
+  case-insensitive on Windows but case-sensitive everywhere else, so a `HTICST120.20230104.1.ZIP`
+  delivery — from a re-zip, a backup tool, or a one-off NEEDS drop — was invisible on Linux while
+  Windows ingested it. **The dangerous part was that a *partial* miss is silent:** the
+  zero-discovery `NoDataWarning` only fires when *nothing* matches, so a single odd-cased file
+  meant Linux quietly dropped days that Windows kept, and two machines disagreed about the same
+  data with no error on either. Measured on a synthetic mixed-case directory, Linux found
+  `['…20230105.1.zip']` where Windows found both days; it now finds both everywhere. Applied at
+  all nine discovery sites (both `discover_zips` fast paths, the recursive fallback, the flat-dir
+  read/`create_df`/`read_ticks` paths, `ingest_directory`, `ingest_year`, and the event-window
+  glob). Paths differing **only** by case — which can coexist on Linux but not Windows — now
+  resolve to one deterministically chosen file with a logged warning, because reading both would
+  concatenate one trading day's data twice. Windows behavior is unchanged. The single-file
+  argument path already lowercased its suffix; the codebase is now consistent.
+- **`--tickers @file` is read as UTF-8 on every platform.** It used the locale default, so the same
+  file parsed differently per OS — and `ticker_filter` legitimately accepts Japanese index display
+  names. Measured on Windows (cp1252): a UTF-8 file of Japanese names raised `UnicodeDecodeError`,
+  and a BOM-prefixed file yielded the ticker `'ï»¿7203'`, which silently matches nothing. Now
+  `utf-8-sig` — plain UTF-8 reads unchanged, and the BOM Windows editors prepend is stripped.
+
 ### Changed
+- **Parallel ingest sizes workers from `MemAvailable` on Linux, not `MemFree`.**
+  `_available_ram_gb()` read `sysconf(SC_AVPHYS_PAGES)`, which tracks **MemFree** and excludes the
+  reclaimable page cache, while the Windows branch (`GlobalMemoryStatusEx.ullAvailPhys`) includes
+  standby memory — i.e. the two platforms disagreed, and Linux under-reported. On a long-running
+  research box the page cache holds most of idle RAM, so `MemFree` can sit near ~1 GB on a 128 GB
+  machine; `_cap_workers()` then silently degraded a parallel ingest toward serial and warned about
+  an absurdly small "available RAM". Measured on WSL with 6 GB of warm page cache: `MemFree` 8.94 GB
+  vs `MemAvailable` 15.93 GB, and the cap for a 3.0 GB/worker streaming ingest went **2 → 3
+  workers** — 3 being what the same box already gave with a cold cache. Falls back to the old
+  arithmetic when the field or file is missing, which also keeps macOS on its existing path; the
+  Windows branch is untouched. Failure direction was always safe (under-parallelize, never OOM), so
+  this is performance/UX, not correctness.
 - **The parallel-ingest RAM messages no longer claim every worker holds a whole trading
   day.** 0.14.6 made a ticker-filtered ingest (≤ `_MAX_STREAM_TICKERS`, 64 codes) stream,
   bounding each worker at `_STREAM_WORKER_GB` (3.0 GB) *independent of the day's size* —
@@ -22,6 +68,33 @@
   ">10M rows/month" fact, matching the README.
 
 ### Docs
+- **README documents Linux/WSL behavior and the `TSE_TICK_DATA_ROOT` test knob.** A new "Linux and
+  WSL notes" section covers the things that cost a verification session real time: the
+  `if __name__ == "__main__":` guard applies on Linux too (`spawn` is forced there — fork deadlocks
+  Polars — which nobody coming from fork semantics expects); worker sizing reads `MemAvailable`, so
+  a `Limiting workers N -> M` notice is normal; a Linux and a Windows export of the same slice are
+  multiset-equal but **not** byte-identical, because same-timestamp tie order is non-deterministic
+  (accepted — PR #45 — so compare as sorted frames, not with `diff`); and WSL's ~half-host-RAM VM
+  makes a low worker cap expected. Installation gains the Linux prerequisites (Python ≥3.9,
+  `python3-venv`, and AVX2 → `polars-lts-cpu` on older CPUs). Testing now documents all four
+  profiles and states that **nothing fails on either OS** — every skip is deliberate.
+
+### Testing
+- **The CLI tests no longer spawn a literal `"python"`.** `tests/test_real_data.py::TestCLI` ran
+  `subprocess.run(["python", …])`; stock Debian/Ubuntu ships only `python3`, so both tests died
+  with `FileNotFoundError` on Linux unless a venv happened to be activated — two failures that read
+  as package breakage to anyone running `venv/bin/python -m pytest`. Now `sys.executable`, which is
+  portable **and** pins the subprocess to the interpreter running pytest. A source-scanning guard
+  keeps it from coming back, in the style of `test_consolidation.py`.
+- **Data-gated skip reasons name `TSE_TICK_DATA_ROOT`.** The default root is a Windows path, so off
+  Windows all 48 data-gated tests skipped and the suite looked green while the real-data half never
+  ran — and nothing on screen named the knob that runs it. The reasons now say so, in
+  `test_real_data.py`, `test_ingest.py`, and `test_field5_filter.py`. No behavior change when the
+  variable is set.
+- **`tests/test_linux_portability.py`** — 31 synthetic-first regression tests covering all of the
+  above: `MemAvailable` parsing and the worker cap it feeds, case-insensitive discovery across the
+  fast paths / recursive fallback / flat-dir reads / `ingest_directory`, case-variant dedupe, and
+  UTF-8 `@file` decoding.
 - **Fixed the documented contributor setup, which could not run the test suite.**
   `CONTRIBUTING.md` and `README.md` both said `pip install -e ".[dev]"`; `[dev]` carries no
   DuckDB, `query.py` imports it at module level, and the query tests import

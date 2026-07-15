@@ -781,8 +781,17 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**603 tests.** Without proprietary data (the CI profile): **555 pass / 48 skip**.
-With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 603 pass**.
+**634 tests. Nothing fails on either OS** — every skip is deliberate and names its own remedy.
+
+| Profile | Result | Skips |
+|---------|--------|-------|
+| No proprietary data (the CI profile), either OS | **584 pass / 50 skip** | 48 data-gated + 2 platform-gated |
+| Linux + `TSE_TICK_DATA_ROOT` | **633 pass / 1 skip** | the Windows-only cp1252 console test |
+| Windows + `TSE_TICK_DATA_ROOT` | **632 pass / 2 skip** | the 2 case-variant filename tests (need a case-sensitive FS) |
+
+The default data root is a **Windows** path, so off Windows the 48 data-gated tests skip until
+`TSE_TICK_DATA_ROOT` is set; their reasons say so (a green-looking suite whose real-data half never
+ran is the failure mode being guarded against here).
 
 | Area | Coverage |
 |------|----------|
@@ -799,6 +808,7 @@ With a complete local NEEDS store (`TSE_TICK_DATA_ROOT`): **all 603 pass**.
 | Round-N regression suites | `test_round16_fixes` (18), `test_round17_fixes` (14), `test_round18_fixes` (7), `test_round19_fixes` (8), `test_round20_fixes` (13: morsel-bounded parse/ingest), `test_round21_fixes` (27: the materialized `Effective Time` key) — each locks one review round |
 | Paper examples | `test_paper_examples` (5) — locks the technical paper's API listings |
 | Real data | `test_real_data` (64) + real-ZIP cases in `test_ingest` — all 4 types across the 2016 fixed-width and 2017+ CSV eras; **gated on local NEEDS files** (these are the 48 no-data skips: 40 + 8) |
+| Linux portability (0.15.1) | `test_linux_portability` (31) — issue #72: `MemAvailable` parsing + the worker cap it feeds (C14), case-insensitive discovery across both fast paths / the recursive fallback / flat-dir reads / `ingest_directory` + case-variant dedupe (C13), UTF-8 `@file` decoding, and a source guard against re-introducing a bare `"python"` subprocess |
 
 `test_schemas.py` is a 1-line stub and `test_core.py` holds only 3 tests — cleaning and
 schema correctness are exercised mainly by `test_real_data.py` and the synthetic-fixture
@@ -834,6 +844,8 @@ tests. The earlier "Stage 2 has zero coverage" gap is **resolved**.
 | C10 | Query row limit: 10M | `query.py` |
 | C11 | Partition writes are atomic (hidden temp file + `os.replace`); resume validates Parquet footer magic before skipping a date | `io/parquet.py`, `ingest.py` |
 | C12 | Parallel ingest pools use the `spawn` start method (never `fork`); a user's `max_workers>1` script call must sit under `if __name__ == "__main__":` (an unguarded top-level call gets an actionable `RuntimeError`) | `ingest.py` |
+| C13 | **Discovery matches filenames case-insensitively on every platform**, and paths differing only by case resolve to one file (logged, deterministic). Windows glob has always been case-insensitive; matching strictly elsewhere made an oddly-cased delivery invisible on Linux — *silently*, since a partial miss never trips the zero-discovery warning. Converging on the Windows semantics is what keeps two machines agreeing about one dataset | `enhanced.py` (`_ci_glob`, `_dedupe_ci`), applied at all nine ZIP-discovery sites in `enhanced.py` / `ingest.py` |
+| C14 | Available RAM means **MemAvailable**, not MemFree: `/proc/meminfo` on Linux, `ullAvailPhys` on Windows, `SC_AVPHYS_PAGES` only as the macOS / old-kernel fallback. Free-page counts exclude the reclaimable page cache, so a cache-warm box under-reports and C9 throttles a parallel ingest toward serial | `ingest.py` (`_meminfo_available_gb`, `_available_ram_gb`) |
 
 ---
 
