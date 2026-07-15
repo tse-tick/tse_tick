@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+### Changed
+- **The parallel-ingest RAM messages no longer claim every worker holds a whole trading
+  day.** 0.14.6 made a ticker-filtered ingest (≤ `_MAX_STREAM_TICKERS`, 64 codes) stream,
+  bounding each worker at `_STREAM_WORKER_GB` (3.0 GB) *independent of the day's size* —
+  but the docs and messages never caught up. `_cap_workers`'s "Limiting workers N -> M …"
+  warning still told users "Each worker holds a whole trading day" and advised them to
+  "ticker-filter" when they already had — the exact case where the claim is false. Fixed
+  everywhere it was asserted: the `--parallel` **CLI help**, the `IngestWorkerError` class
+  docstring, the four public `ingest_*` `max_workers:` docstrings, `_worker_died_error`'s
+  OOM message, and the `_cap_workers` / `_estimate_worker_gb` docstrings. All now
+  attribute the whole-day hold to the **full-frame** path (no ticker filter, or >64
+  codes), which is where it is still true. The 70% RAM cap itself
+  (`_RAM_SAFETY_FRACTION = 0.7`) is unchanged — only the wording. No behaviour change; no
+  re-ingest.
+- **`read_ticks`'s docstring no longer cites an unsourced row count.** It claimed "7203 +
+  9984 for one January is ~25M rows" — a number backed by no `results_*.csv` and no
+  CHANGELOG, reaching users through `help(read_ticks)`. Replaced with the sourced
+  ">10M rows/month" fact, matching the README.
+
+### Docs
+- **Fixed the documented contributor setup, which could not run the test suite.**
+  `CONTRIBUTING.md` and `README.md` both said `pip install -e ".[dev]"`; `[dev]` carries no
+  DuckDB, `query.py` imports it at module level, and the query tests import
+  `tse_tick.query` directly — 9 collection errors. Both now say `.[query,dev]` (CI uses
+  `.[query,test]`). The package itself was never affected: `__init__.py` guards the import
+  and raises an actionable "install tse-tick[query]" instead.
+- **`Effective Time` is excluded from every *documented* output — not from `query_sql`.**
+  The README claimed it was "excluded from every result, so `individual_stock` still
+  returns its 95 columns". `query_sql` registers its `ticks` view as a bare `SELECT * FROM
+  read_parquet(..., hive_partitioning=true)`, so it neither excludes the key nor drops the
+  Hive partition column: on a 0.15.0 store `SELECT *` returns **97** (95 NEEDS +
+  `Effective Time` + `date`), against `query_ticks`'s 96 (95 + `date`). That is by design —
+  it is what lets a caller write a fast hand-written time predicate against the key — and
+  the 0.15.0 entry below already scoped it correctly; the README now matches.
+- **Test counts corrected to a measured 603 / 555 pass / 48 skip.** README said 430/382/48
+  and ARCHITECTURE said both 414/366/48 and 430/382/48 in the same file. Each was true when
+  written. The 48 skips and their 40 + 8 attribution were already right and are unchanged.
+- **ARCHITECTURE's reference sections no longer describe superseded designs as current.**
+  §5.1 (morsel-bounded parse; all 27 price columns cast `Float64`, not "mostly String";
+  the `individual_stock` output-subset step is skipped, not applied), §5.3 (the streaming
+  vs concat write paths; resume reads a coverage marker, not mere file existence), §6.1
+  (the resolved effective-time expression, the `limit + 1` probe, the mixed-store
+  `union_by_name` fallback, `export_query`), §7 (`PartitionedParquetAppender`,
+  `_add_effective_time`, and the summary types' date-only layout), and §12's C2.
+- **Version stamps.** `CITATION.cff` 0.11.4 → 0.15.0 (+ `date-released`); ARCHITECTURE's
+  three disagreeing stamps (0.14.3 / 0.14.0 / 0.13.0) → 0.15.0.
+- **Perf claims re-scoped to what was actually measured.** The Performance preamble
+  attributed every row to "one day … 4.78 M rows", but the 694.1x query row was measured on
+  1.5 M rows and the engine/storage rows use one ZIP *part*, not a whole day. The storage
+  headline advertised Snappy (22x) when the default since 0.14 is zstd — now both are
+  listed, with zstd's **31x** first. The unsourced "~25M rows" was replaced with the
+  sourced ">10M rows/month" fact (see Changed — it shipped in `read_ticks`'s docstring too).
+- Audit plan and the full finding list: `plans/doc-accuracy-audit-plan.md`.
+
 ## [0.15.0] - 2026-07-15
 
 Time-window queries on `individual_stock` now prune Parquet row groups instead of

@@ -7,8 +7,12 @@ Thank you for your interest in contributing.
 ```bash
 git clone https://github.com/tse-tick/tse_tick.git
 cd tse_tick
-pip install -e ".[dev]"
+pip install -e ".[query,dev]"
 ```
+
+The `[query]` extra is **required to run the test suite**, not optional: it pulls in DuckDB, and
+the query tests import `tse_tick.query` directly. Installing only `[dev]` leaves the suite unable
+to collect.
 
 ## Code Style
 

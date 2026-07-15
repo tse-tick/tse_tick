@@ -195,13 +195,13 @@ def _filtered_worker_gb(full_gb: float, n_tickers: int) -> float:
 def _estimate_worker_gb(units, data_type, ticker_filter) -> float:
     """Rough peak RAM (GB) one worker needs for its largest unit of work.
 
-    A worker holds one whole date's frame in memory. The summary / index types have
-    small daily frames; a **full-frame** ``individual_stock`` day is the whole day —
-    every part, decompressed and cleaned — estimated from the largest day's total
-    compressed part bytes times an expansion factor. A ticker-filtered
-    ``individual_stock`` day sits between the two and scales with the number of codes
-    kept (see :func:`_filtered_worker_gb`). ``units`` is an iterable of
-    ``(label, [part paths])`` (one entry per date group, or per ZIP for the flat path).
+    The summary / index types have small daily frames; a **full-frame**
+    ``individual_stock`` day is the whole day — every part, decompressed and cleaned,
+    held at once — estimated from the largest day's total compressed part bytes times an
+    expansion factor. A ticker-filtered ``individual_stock`` day does **not** hold the
+    day: the usual case streams and is bounded flat (see :func:`_filtered_worker_gb`).
+    ``units`` is an iterable of ``(label, [part paths])`` (one entry per date group, or
+    per ZIP for the flat path).
     """
     if data_type not in (None, "individual_stock"):
         return _FILTERED_WORKER_GB
@@ -225,14 +225,16 @@ def _worker_died_error(done: int, total: int, workers: int) -> IngestWorkerError
     """Build the actionable error for a killed pool worker (see IngestWorkerError).
 
     ``BrokenProcessPool`` says only "terminated abruptly" — no cause, no remedy —
-    so name the usual cause (memory: N workers x one trading day's frame each),
-    say the finished dates are resume-safe, and point at ``max_workers``.
+    so name the usual cause (memory: a full-frame ingest holds one trading day's
+    frame in each worker), say the finished dates are resume-safe, and point at
+    ``max_workers``.
     """
     return IngestWorkerError(
         f"A parallel ingest worker was terminated abruptly after {done} of {total} "
-        f"unit(s) completed. The usual cause is running out of memory: {workers} "
-        f"worker(s) each hold one trading day's frame, and a day whose part-pruning "
-        f"cannot be confirmed is read in full (several GB). The completed dates are "
+        f"unit(s) completed. The usual cause is running out of memory: a full-frame "
+        f"ingest holds one trading day's frame in each of its {workers} worker(s), and "
+        f"a day whose part-pruning cannot be confirmed is read in full (several GB). "
+        f"The completed dates are "
         f"already written and resume-safe — re-run the same call with a lower "
         f"max_workers (e.g. max_workers=2, or max_workers=1 to go serial) and it "
         f"continues where it stopped."
@@ -242,15 +244,17 @@ def _worker_died_error(done: int, total: int, workers: int) -> IngestWorkerError
 def _cap_workers(requested: int, per_worker_gb: Optional[float] = None) -> int:
     """Clamp a requested worker count by what this machine's cores AND RAM allow.
 
-    **Cores:** never more workers than logical cores. **RAM:** each worker process holds a
-    whole trading day's frame, so N workers must fit in available RAM — a naive
-    core-count cap ignores this and can OOM a full-frame parallel ingest, where one busy
-    ``individual_stock`` day is many GB (this is why the old flat cap of 8 was NOT simply
-    raised to ``os.cpu_count()``). When ``per_worker_gb`` is given and available RAM can be
-    read, workers are capped so ``N x per_worker_gb`` stays within
-    ``_RAM_SAFETY_FRACTION`` of available RAM; when RAM can't be read, a heavy per-worker
-    estimate only warns. Filtered / summary ingests estimate a small per-worker frame and
-    parallelize freely.
+    **Cores:** never more workers than logical cores. **RAM:** N workers must fit in
+    available RAM — a naive core-count cap ignores this and can OOM a full-frame parallel
+    ingest, where one busy ``individual_stock`` day is many GB held whole per worker (this
+    is why the old flat cap of 8 was NOT simply raised to ``os.cpu_count()``). What a
+    worker actually holds depends on the path (see :func:`_filtered_worker_gb`): a
+    **streaming** ticker-filtered day is bounded at :data:`_STREAM_WORKER_GB` whatever the
+    day's size, while a **full-frame** day really does hold every part at once. When
+    ``per_worker_gb`` is given and available RAM can be read, workers are capped so
+    ``N x per_worker_gb`` stays within ``_RAM_SAFETY_FRACTION`` of available RAM; when RAM
+    can't be read, a heavy per-worker estimate only warns. Filtered / summary ingests
+    estimate a small per-worker frame and parallelize freely.
     """
     cap = _cpu_cap()
     workers = max(1, min(requested, cap))
@@ -266,10 +270,11 @@ def _cap_workers(requested: int, per_worker_gb: Optional[float] = None) -> int:
             if ram_cap < workers:
                 logger.warning(
                     "Limiting workers %d -> %d: ~%.1f GB/worker x %d would exceed %d%% of "
-                    "%.1f GB available RAM. Each worker holds a whole trading day; lower "
-                    "max_workers, ticker-filter, or run serially for a full-frame ingest.",
+                    "%.1f GB available RAM. Lower max_workers or run serially if this is "
+                    "still too high; a full-frame ingest (no ticker filter, or more than "
+                    "%d codes) holds a whole trading day per worker and is the usual cause.",
                     workers, ram_cap, per_worker_gb, workers,
-                    int(_RAM_SAFETY_FRACTION * 100), avail,
+                    int(_RAM_SAFETY_FRACTION * 100), avail, _MAX_STREAM_TICKERS,
                 )
                 workers = ram_cap
         elif per_worker_gb > _FILTERED_WORKER_GB:
@@ -645,7 +650,8 @@ def ingest_directory(
             ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
             session (Jupyter/REPL — spawn-safe there), and serially from a
             script. Parallel workers are capped by the machine's logical cores
-            AND available RAM (each worker holds a whole day's frame).
+            AND available RAM (a ticker-filtered ingest streams at a flat
+            ~3 GB/worker; a full-frame one holds a whole day's frame).
             **When running parallel from a script, the call must be inside
             ``if __name__ == "__main__":`` — workers are started with the
             ``spawn`` method, which re-imports your script in every worker.**
@@ -1041,7 +1047,7 @@ def _ingest_grouped(zip_paths, output_dir, data_type, year, language, resume, ti
             len(groups) - len(tasks), len(groups),
         )
 
-    # RAM-aware: each worker holds one whole date's frame. Estimate the largest day's
+    # RAM-aware: a full-frame worker holds one whole date's frame. Estimate the largest day's
     # per-worker peak (from its part sizes for a full-frame individual_stock ingest; small
     # for filtered / summary / index) and let _cap_workers clamp to what RAM allows.
     workers = _cap_workers(
@@ -1118,7 +1124,8 @@ def ingest_year_from_root(
             ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
             session (Jupyter/REPL — spawn-safe there), and serially from a
             script. Parallel workers are capped by the machine's logical cores
-            AND available RAM (each worker holds a whole day's frame).
+            AND available RAM (a ticker-filtered ingest streams at a flat
+            ~3 GB/worker; a full-frame one holds a whole day's frame).
             **When running parallel from a script, the call must be inside
             ``if __name__ == "__main__":`` — worker processes are started with
             the ``spawn`` method (a Polars ``fork`` deadlock workaround), which
@@ -1177,7 +1184,8 @@ def ingest_period(
             ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
             session (Jupyter/REPL — spawn-safe there), and serially from a
             script. Parallel workers are capped by the machine's logical cores
-            AND available RAM (each worker holds a whole day's frame).
+            AND available RAM (a ticker-filtered ingest streams at a flat
+            ~3 GB/worker; a full-frame one holds a whole day's frame).
             Wired through every granularity (year / month / date). **When
             running parallel from a script, the call must be inside
             ``if __name__ == "__main__":`` — worker processes are started with
@@ -1318,7 +1326,8 @@ def extract_to_store(
             ``TSE_TICK_MAX_WORKERS`` env var, runs auto in an interactive
             session (Jupyter/REPL — spawn-safe there), and serially from a
             script. Parallel workers are capped by the machine's logical cores
-            AND available RAM (each worker holds a whole day's frame).
+            AND available RAM (a ticker-filtered ingest streams at a flat
+            ~3 GB/worker; a full-frame one holds a whole day's frame).
             **When running parallel from a script, the call must be inside
             ``if __name__ == "__main__":`` — workers are started with the
             ``spawn`` method, which re-imports your script in every worker.**

@@ -299,9 +299,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Parallel worker processes for per-date ingest: a positive int, or "
              "'auto' (the default) for the machine's logical core count, RAM-capped "
-             "(each worker holds one trading day's frame). Applies to --period and "
-             "--year (structured root) and --flat; not to --filter-csv event windows. "
-             "Pass 1 to force a serial ingest.",
+             "(a --tickers-filtered ingest streams at ~3 GB/worker whatever the day's "
+             "size; a full-frame one holds a whole trading day per worker). Applies to "
+             "--period and --year (structured root) and --flat; not to --filter-csv "
+             "event windows. Pass 1 to force a serial ingest.",
     )
     ingest_parser.add_argument(
         "--no-resume",
