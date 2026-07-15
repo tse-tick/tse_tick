@@ -276,9 +276,9 @@ df = tse_tick.read_ticks(
 > **⚠️ Reading a lot at once? Mind the 10M-row cap.** `read_ticks` **and** `query_ticks`
 > both return at most **10,000,000 rows** per call by default — on hitting it, the
 > result is truncated and a capturable `tse_tick.TruncationWarning` is emitted. A whole
-> **month** of a couple of *active* tickers can exceed this: e.g. Toyota (7203) +
-> SoftBank (9984) for one January is ~25M rows, so a single
-> `read_ticks(..., date="202201")` stops at ~10M (about 10 of 19 days). To get
+> **month** of a couple of *active* tickers can exceed this: SoftBank (9984) alone runs
+> **>10M rows/month**, so a single `read_ticks(..., date="YYYYMM")` over 9984 plus another
+> active name truncates partway through the month rather than erroring. To get
 > **everything**, pick one:
 >
 > - **Two-stage (recommended for scale)** — `ingest_period(...)` → `query_ticks(...)`
@@ -345,15 +345,16 @@ No user action needed — if your ZIP filename contains `2016`, the fixed-width 
 
 ## Performance
 
-`tse_tick` is built on Polars (CSV parsing, vectorized cleaning) and DuckDB over Hive-partitioned Parquet (queries). Measured on one day of HTICST120 (4.78 M rows, 95 columns, 2.16 GB raw CSV) on an Intel Core i5-14400F (10-core / 16-thread) with 32 GB RAM, Python 3.11, Polars 1.40, pandas 2.2.
+`tse_tick` is built on Polars (CSV parsing, vectorized cleaning) and DuckDB over Hive-partitioned Parquet (queries). Hardware for every row below: an Intel Core i5-14400F (10-core / 16-thread) with 32 GB RAM, Python 3.11, Polars 1.40, pandas 2.2. The engine and storage rows are measured on **one ZIP part** of HTICST120 (`HTICST120.20170104.1.zip` — 4.78 M rows, 95 columns, 2.16 GB raw CSV); a full trading day is 1–27 such parts. The query row uses a different, smaller input — see its note.
 
 | Comparison | Speedup | Source |
 |------------|---------|--------|
 | Polars (16T) vs pandas (Python engine) | **55.5×** | `benchmarks/results_engine_summary.csv` |
 | Polars (16T) vs pandas (C engine, fair baseline) | **22.8×** | `benchmarks/results_engine_summary.csv` |
 | Polars (1 thread) vs pandas (C engine) | **6.2×** | `benchmarks/results_engine_summary.csv` |
-| DuckDB + Hive Parquet vs pandas CSV scan (single-ticker hour slice) | **694.1×** | `benchmarks/results_query.csv` |
-| Parquet (Snappy) storage size vs raw CSV | **22× smaller** (100 MB vs 2.2 GB) | `benchmarks/results_format.csv` |
+| DuckDB + Hive Parquet vs pandas CSV scan (single-ticker hour slice; measured on 1.5 M rows) | **694.1×** | `benchmarks/results_query.csv` |
+| Parquet (zstd, the default) storage size vs raw CSV | **31× smaller** (70.8 MB vs 2.2 GB) | `benchmarks/results_format.csv` |
+| Parquet (snappy, pre-0.14 stores) storage size vs raw CSV | **22× smaller** (99.7 MB vs 2.2 GB) | `benchmarks/results_format.csv` |
 
 The three Polars speedup numbers are deliberately reported together: against the original pandas Python-engine prototype, against a fair C-engine baseline (all-string dtypes, forced column count), and at single-thread parity to isolate the contribution of threading from the engine itself. Polars wins on all three.
 
@@ -424,7 +425,7 @@ Event-window filtered ingest writes per-date files:
 | `--output-root` (required) | Root directory for Parquet output |
 | `--period` | Date range: `YYYY`, `YYYY-YYYY`, `YYYYMM-YYYYMM`, or `YYYYMMDD-YYYYMMDD` |
 | `--language` | Column name language: `en` (default) or `jp` |
-| `--parallel` | Parallel worker processes for per-date ingest: a positive int or `auto` (**default**: the machine's logical cores). Applies to `--period`, `--year`, and `--flat`; not to `--filter-csv` event windows. Capped by the machine's logical cores **and** available RAM (each worker holds a whole trading day's frame). Pass `1` to force serial. |
+| `--parallel` | Parallel worker processes for per-date ingest: a positive int or `auto` (**default**: the machine's logical cores). Applies to `--period`, `--year`, and `--flat`; not to `--filter-csv` event windows. Capped by the machine's logical cores **and** available RAM. A ticker-filtered ingest (≤64 codes) streams, so each worker is bounded at ~3 GB whatever the day's size; a full-frame ingest holds the whole day per worker and is what the RAM cap mainly binds on. Pass `1` to force serial. |
 | `--no-resume` | Disable resume (reprocess dates even if output exists) |
 | `--compression` | Parquet codec: `zstd` (default — smaller, faster reads) or `snappy` (matches pre-0.14 stores). Mixed-codec stores read fine, so no re-ingest is needed. |
 | `--tickers` | Comma-separated codes or `@file.txt` with one per line. Keeps only these stocks. |
@@ -453,7 +454,7 @@ For after-hours events, `reaction_anchor_dt` shifts to the next trading day's 09
 
 ## Python API Reference
 
-### `create_df(folder_path, language="en", rows=None, auto_detect=True, data_type=None, year=None, ticker_filter=None, max_oneshot_bytes=<5 GB>)`
+### `create_df(folder_path, language="en", rows=None, auto_detect=True, data_type=None, year=None, ticker_filter=None, max_oneshot_bytes=<5 GB>, on_morsel=None)`
 
 Load and clean tick data from a ZIP file or directory of ZIP files.
 
@@ -465,6 +466,7 @@ Load and clean tick data from a ZIP file or directory of ZIP files.
 - `year` — data year (e.g., 2023)
 - `ticker_filter` — optional `set` of 4-digit stock codes to pre-filter at line level
 - `max_oneshot_bytes` — cumulative decompressed-size ceiling for the one-shot read (default 5 GB; `None` disables). Crossing it raises a catchable `OneShotMemoryError`; use the two-stage `ingest_* → query_ticks` path instead.
+- `on_morsel` — advanced/internal. A callable invoked with each cleaned ~64 MB morsel as it is parsed, instead of accumulating the whole frame; `create_df` then returns an **empty** frame and the morsels are the output. This is what the ingest engine uses to bound memory (see `--parallel`). **Only honoured on the bounded read** — `data_type="individual_stock"` *with* a `ticker_filter`. On any other path it is silently ignored and you get the whole frame back, so do not rely on it alone to cap memory. Leave as `None` for normal reads.
 
 Returns a Polars DataFrame with English or Japanese column names.
 
@@ -498,7 +500,7 @@ Built-in protections for local data processing:
 | ZIP bomb detection (max decompressed) | 5 GB |
 | ZIP compression ratio cap | 100:1 |
 | Max ZIP entries | 5 |
-| Parallel worker cap | RAM-aware: ≤ logical cores, and N × per-worker frame ≤ 70% of available RAM |
+| Parallel worker cap | RAM-aware: ≤ logical cores, and N × per-worker estimate ≤ 70% of available RAM (~3 GB/worker when streaming a ticker-filtered ingest; the whole day's frame when full-frame) |
 | Query row limit | 10,000,000 |
 | Path traversal prevention | Resolved path validation |
 | SQL injection prevention | Identifier/date/time format validation |
@@ -550,7 +552,12 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
   Stores now persist that effective time as an internal `Effective Time` key so a time window can skip
   Parquet row groups instead of scanning them (a 1-minute slice measured **7.64x** faster on real data,
   a 09:00–11:30 session window **1.27x**, for +0.52% store bytes). It is an index, not data: it is
-  excluded from every result, so `individual_stock` still returns its **95** columns. Purely additive —
+  excluded from every *documented output* — `query_ticks`, `export_query`, `read_parquet_partition`
+  and the typed-empty frames — so `individual_stock` still returns its **95** NEEDS columns (plus the
+  Hive `date` partition column = 96 from the store). The one exception is the `query_sql` escape
+  hatch, which by design exposes the store as-is: its `ticks` view shows the key, so `SELECT *` there
+  returns **97** (95 + `Effective Time` + `date`). That is what lets you write your own fast time
+  predicates against it. Purely additive —
   **older stores keep working unchanged, with no re-ingest**; they simply fall back to the old
   (unpruned) expression, so re-ingest only if you want the speedup.
 - **Index codes are raw codes.** `indices` and `indices_summary` both return `Index Code` as the raw
@@ -589,15 +596,11 @@ See [`CHANGELOG.md`](https://github.com/tse-tick/tse_tick/blob/main/CHANGELOG.md
 
 Contributions are welcome. Please open an issue or submit a pull request.
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit your changes (`git commit -m 'Add your feature'`)
-4. Push to the branch (`git push origin feature/your-feature`)
-5. Open a Pull Request
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the development setup, code style (`black` /
+`flake8` / `mypy`), PR guidelines, and how to add a name-translation mapping.
 
-Development setup:
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[query,dev]"   # [query] is required to run the tests, not optional
 pytest tests/ -v
 ```
 
@@ -609,7 +612,7 @@ pytest tests/ -v
 pytest tests/ -v
 ```
 
-The suite collects **430 tests**. Without a local NEEDS store, **382 pass** and **48 skip**; with a complete NEEDS store, **all 430 pass**. Stage-1
+The suite collects **603 tests**. Without a local NEEDS store, **555 pass** and **48 skip**; with a complete NEEDS store, **all 603 pass**. Stage-1
 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped
 pytest fixture builds a tiny Hive-partitioned Parquet store at test time by

@@ -129,8 +129,8 @@ class IngestWorkerError(RuntimeError):
     """Raised when a worker process of a parallel ``ingest_*`` is terminated abruptly.
 
     A ``ProcessPoolExecutor`` worker that is *killed* — most often by the OS for
-    memory (each worker holds one whole trading day's frame, and a day whose
-    part-pruning cannot be confirmed is read in full), or by a native crash — never
+    memory (a full-frame ingest holds one whole trading day's frame per worker, and a
+    day whose part-pruning cannot be confirmed is read in full), or by a native crash — never
     gets to raise: the pool surfaces only ``BrokenProcessPool`` ("A process in the
     process pool was terminated abruptly"), which names neither a cause nor a remedy
     and aborts a multi-hour ingest at ``future.result()``.
@@ -1561,8 +1561,8 @@ def read_ticks(
             lands exactly on the cap with ZIPs still unread (detected by reading
             one row past the cap, as :func:`tse_tick.query_ticks` does); an
             exact-fit result with nothing left unread does not warn. A whole **month** of a couple
-            of *active* tickers can exceed 10M (e.g. 7203 + 9984 for one January is
-            ~25M rows), so a single monthly call would stop partway. To read it all,
+            of *active* tickers can exceed 10M (SoftBank ``9984`` alone runs >10M
+            rows/month), so a single monthly call would stop partway. To read it all,
             use the two-stage ``ingest_period`` -> :func:`tse_tick.query_ticks` path
             (or :func:`tse_tick.extract_to_store` for a single ticker), loop
             per-day, or pass ``rows=None`` (bounded only by memory).
