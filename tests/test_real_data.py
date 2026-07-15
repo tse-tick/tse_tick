@@ -1,10 +1,15 @@
 # tests/test_real_data.py
-"""Tests against real NEEDS data files on G:\\ drive.
+"""Tests against real NEEDS data files.
 
 These tests verify create_df(), export_to_csv(), detect_data_type_and_year(),
 and schema correctness for all 4 data types across 2016 and 2021/2023 files.
+
+The data root defaults to ``G:\\flash_crash`` and is overridden with the
+``TSE_TICK_DATA_ROOT`` environment variable (required off Windows). Every test
+here skips when its files are absent, so the suite is green without the data.
 """
 import os
+import sys
 import tempfile
 
 import polars as pl
@@ -25,9 +30,17 @@ from tse_tick.schemas import (
 # Expected layout: TICST120 parts under raw_{year}/{yearmonth}/; stock-summary
 # and index files under raw_other/. Each test class skips on its own file set,
 # so whatever data is present locally still gets tested.
+#
+# The default is Kevin's Windows root; off Windows it never exists, so set
+# TSE_TICK_DATA_ROOT (see the "Testing" section of the README).
 # ---------------------------------------------------------------------------
 
 DATA_ROOT = os.environ.get("TSE_TICK_DATA_ROOT", r"G:\flash_crash")
+
+DATA_ROOT_HINT = (
+    f"Real NEEDS data not found under {DATA_ROOT!r}; set TSE_TICK_DATA_ROOT to "
+    f"your NEEDS data root to run the data-gated tests"
+)
 
 TICST120_2016 = os.path.join(DATA_ROOT, "raw_2016", "201601", "HTICST120.20160104.1.zip")
 TICST120_2021 = os.path.join(DATA_ROOT, "raw_2021", "202104", "HTICST120.20210401.1.zip")
@@ -47,11 +60,16 @@ TICIS_2023 = os.path.join(DATA_ROOT, "raw_other", "HTICIS110.202301.zip")
 
 
 def requires_files(*paths):
-    """Skip a test class unless every listed real-data file exists."""
+    """Skip a test class unless every listed real-data file exists.
+
+    The reason names ``TSE_TICK_DATA_ROOT`` because the default root is a Windows
+    path: on any other OS all of these skip and the suite looks green while the
+    real-data half never ran, and nothing on screen said which knob turns it on.
+    """
     missing = [p for p in paths if not os.path.exists(p)]
     return pytest.mark.skipif(
         bool(missing),
-        reason=f"Real NEEDS data files not available: {missing}",
+        reason=f"{DATA_ROOT_HINT}. Missing: {missing}",
     )
 
 
@@ -420,10 +438,13 @@ class TestInternalColumnLeak:
 # ===================================================================
 
 class TestCLI:
+    # sys.executable, not "python": stock Debian/Ubuntu ships only `python3`, so a
+    # bare "python" is a FileNotFoundError there unless a venv happens to be
+    # activated. It also pins the subprocess to the interpreter running pytest.
     def test_cli_help(self):
         import subprocess
         result = subprocess.run(
-            ["python", "-m", "tse_tick.cli", "ingest", "--help"],
+            [sys.executable, "-m", "tse_tick.cli", "ingest", "--help"],
             capture_output=True, text=True, timeout=15,
         )
         assert result.returncode == 0
@@ -432,7 +453,7 @@ class TestCLI:
     def test_cli_no_command(self):
         import subprocess
         result = subprocess.run(
-            ["python", "-m", "tse_tick.cli"],
+            [sys.executable, "-m", "tse_tick.cli"],
             capture_output=True, text=True, timeout=15,
         )
         assert result.returncode != 0

@@ -10,7 +10,7 @@ import warnings
 from collections import defaultdict
 from itertools import groupby
 from pathlib import Path
-from typing import Callable, Optional, Literal, Tuple, List, Dict, Union
+from typing import Callable, Iterable, Optional, Literal, Tuple, List, Dict, Union
 
 import polars as pl
 
@@ -354,7 +354,8 @@ def _detect_data_type_from_path(folder_path: str) -> str:
         return "indices_summary"
 
     if path.exists() and path.is_dir():
-        files = list(path.glob("*.zip")) + list(path.glob("*.csv"))
+        # Sorted so the sample is deterministic (glob returns directory order).
+        files = sorted(path.glob(_ci_glob("*.zip"))) + sorted(path.glob(_ci_glob("*.csv")))
         if files:
             sample_file = files[0].name.upper()
             if "TICST" in sample_file:
@@ -427,6 +428,63 @@ def _prune_parts_by_ticker(zips: List[Path], ticker_filter: set) -> List[Path]:
     return out
 
 
+def _ci_glob(name_pattern: str) -> str:
+    """Case-insensitive form of a *filename* glob (``*.zip`` -> ``*.[zZ][iI][pP]``).
+
+    Python's :mod:`glob` is case-insensitive on Windows but case-sensitive
+    everywhere else, so an oddly-cased delivery (``HTICST120.20230104.1.ZIP`` from
+    a re-zip, a backup tool, or a one-off NEEDS drop) is invisible on Linux while
+    Windows ingests it. That divergence is worse than a hard error: a *partial*
+    miss is silent, because :func:`tse_tick.ingest._warn_zero_discovery` only fires
+    when **nothing** matches — so a Linux run quietly drops days a Windows run
+    keeps, and two machines disagree about the same data. Expanding each cased
+    character into an ``[aA]`` class makes every platform match the way Windows
+    always has. Characters with no case (digits, dots, glob metacharacters, the
+    Japanese in NEEDS tree names) pass through untouched.
+
+    Apply to the filename only — never to a whole path, whose directories are
+    matched as-is.
+    """
+    out = []
+    for ch in name_pattern:
+        lower, upper = ch.lower(), ch.upper()
+        out.append(f"[{lower}{upper}]" if lower != upper else ch)
+    return "".join(out)
+
+
+def _dedupe_ci(paths: Iterable[Path]) -> List[Path]:
+    """Sort paths, then drop any that differ from an earlier one only by case.
+
+    Two spellings of one name are the same file on Windows but can genuinely
+    coexist on Linux, where ingesting both would feed one trading day's data in
+    twice (dates are grouped and concatenated) — a wrong answer, where dropping
+    one is merely incomplete. So the case-folded path is the identity, the
+    collision is logged rather than swallowed, and sorting first makes the
+    survivor deterministic: ``glob`` returns directory order, which is arbitrary
+    on ext4.
+
+    Exact-duplicate paths (one file matched by two fast-path patterns) are the
+    normal case and are dropped quietly.
+    """
+    seen: Dict[str, Path] = {}
+    unique: List[Path] = []
+    for p in sorted(paths, key=str):
+        key = str(p).casefold()
+        if key in seen:
+            if p != seen[key]:  # Path equality is case-insensitive on Windows
+                logger.warning(
+                    "Ignoring %s: it differs only by letter case from %s, which was "
+                    "already found. Two case-variant copies of one NEEDS file would be "
+                    "read as two parts of the same trading day, double-counting it; "
+                    "remove or rename one of them.",
+                    p, seen[key],
+                )
+            continue
+        seen[key] = p
+        unique.append(p)
+    return unique
+
+
 def _discover_zips_recursive(
     root: Path,
     prefixes: Union[str, List[str]],
@@ -446,7 +504,8 @@ def _discover_zips_recursive(
     date_set = set(dates) if dates else None
     out: List[Path] = []
     for prefix in prefixes:
-        for p in glob.glob(str(root / "**" / f"{prefix}.*.zip"), recursive=True):
+        fname = _ci_glob(f"{prefix}.*.zip")  # match ….ZIP too — see _ci_glob
+        for p in glob.glob(str(root / "**" / fname), recursive=True):
             tok = _zip_date_token(Path(p).name)
             if tok is None or tok[:4] not in year_set or tok[4:6] not in month_set:
                 continue
@@ -454,7 +513,7 @@ def _discover_zips_recursive(
             if date_set is not None and len(tok) == 8 and tok not in date_set:
                 continue
             out.append(Path(p))
-    return sorted(out)
+    return _dedupe_ci(out)
 
 
 def discover_zips(
@@ -474,6 +533,10 @@ def discover_zips(
     record prefix (e.g. ``HTICST120`` for ``individual_stock``); for the two
     index types both the current ``…110`` and the legacy 2016 ``…010``
     record-code prefixes are searched, so pre-2017 index deliveries are found.
+
+    Filenames match **case-insensitively on every platform** (a ``….ZIP``
+    delivery is found on Linux, as it always was on Windows), and paths that
+    differ only by case resolve to one file — see :func:`_ci_glob`.
 
     Args:
         input_root: Root of (or a folder above) the NEEDS delivery tree.
@@ -514,7 +577,9 @@ def discover_zips(
                 for date_str in targets:
                     for pfx in prefixes:
                         fname = f"{pfx}.{date_str}.*.zip" if date_str else f"{pfx}.*.zip"
-                        all_zips.extend(Path(p) for p in glob.glob(str(root / sub / fname)))
+                        all_zips.extend(
+                            Path(p) for p in glob.glob(str(root / sub / _ci_glob(fname)))
+                        )
 
     # The fast paths cover the common deliveries; if none matched, fall back to a
     # full recursive search so deeper nested trees still work
@@ -523,13 +588,7 @@ def discover_zips(
         all_zips = _discover_zips_recursive(root, prefixes, years, months, dates)
 
     # Dedupe (a file can match more than one fast-path subdir) and natural-sort.
-    seen: set = set()
-    unique: List[Path] = []
-    for z in all_zips:
-        if str(z) not in seen:
-            seen.add(str(z))
-            unique.append(z)
-    return sorted(unique, key=_zip_sort_key)
+    return sorted(_dedupe_ci(all_zips), key=_zip_sort_key)
 
 
 def _raw_width(kind: str, year: int) -> int:
@@ -840,7 +899,7 @@ def get_1y_dataframe(
     if path.is_file() and path.suffix.lower() == ".zip":
         zip_files = [path]
     elif path.is_dir():
-        zip_files = sorted(path.glob("*.zip"), key=_zip_sort_key)
+        zip_files = sorted(_dedupe_ci(path.glob(_ci_glob("*.zip"))), key=_zip_sort_key)
     else:
         raise ValueError(
             f"Path must be either a directory containing ZIP files or a ZIP file: {folder_path}"
@@ -1404,7 +1463,7 @@ def _resolve_source_zips(source: str, data_type: str, date: Optional[str]) -> Li
         # With no date, a flat folder reads all its ZIPs (a structured root needs a
         # date — the call below then raises a clear message).
         if date is None:
-            direct = sorted(p.glob("*.zip"), key=_zip_sort_key)
+            direct = sorted(_dedupe_ci(p.glob(_ci_glob("*.zip"))), key=_zip_sort_key)
             if direct:
                 return direct
         # With a date, resolve via discover_zips for BOTH a flat folder and a

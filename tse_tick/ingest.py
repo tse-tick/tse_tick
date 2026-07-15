@@ -10,7 +10,6 @@ the functions re-exported at the top level: :func:`ingest_period` (a structured
 """
 import calendar
 import gc
-import glob as _glob
 import json
 import logging
 import multiprocessing
@@ -26,7 +25,7 @@ from typing import Iterable, Optional, Union, cast
 
 import polars as pl
 
-from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, NoDataWarning, OneShotMemoryError, PartialIngestWarning, IngestWorkerError
+from tse_tick.enhanced import create_df, detect_data_type_and_year, discover_zips, parse_period, _ci_glob, _dedupe_ci, _zip_date_token, _zip_sort_key, _detect_data_type_from_path, _filter_codes, _prune_parts_by_ticker, _normalize_ticker_filter, _stock_family_roots, _code_matches_family, LargeResultWarning, NoDataWarning, OneShotMemoryError, PartialIngestWarning, IngestWorkerError
 from tse_tick.io.parquet import (
     PartitionedParquetAppender,
     write_partitioned_parquet,
@@ -141,6 +140,31 @@ def _resolve_max_workers(max_workers, allow_default_auto: bool = True) -> int:
     return max(1, int(max_workers))
 
 
+_MEMINFO_PATH = "/proc/meminfo"
+
+
+def _meminfo_available_gb(path: str = _MEMINFO_PATH) -> float:
+    """Linux ``MemAvailable`` in GB read from ``/proc/meminfo``; ``0.0`` if unreadable.
+
+    ``MemAvailable`` (kernel 3.14+) is the kernel's own estimate of how much a new
+    workload can allocate *without swapping*, reclaimable page cache included. That
+    is the same thing the Windows branch of :func:`_available_ram_gb` reports, so
+    reading it here is what makes the two platforms agree.
+
+    Returns ``0.0`` — never raises — for a missing file, a kernel too old to have
+    the field, or a malformed line, which lets the caller fall back.
+    """
+    try:
+        with open(path, "r", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    # Format: "MemAvailable:   15641744 kB" (the unit is really KiB).
+                    return int(line.split()[1]) * 1024 / 1e9
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
+
+
 def _available_ram_gb() -> float:
     """Best-effort available physical RAM in GB; ``0.0`` if it can't be determined."""
     if sys.platform == "win32":
@@ -163,7 +187,17 @@ def _available_ram_gb() -> float:
         except Exception:
             pass
         return 0.0
-    try:  # Linux / macOS: available physical pages
+    if sys.platform.startswith("linux"):
+        # SC_AVPHYS_PAGES tracks MemFree, which EXCLUDES the reclaimable page cache.
+        # A long-running research box keeps most of idle RAM in that cache, so free
+        # can read ~1 GB on a 128 GB machine; _cap_workers() would then size the pool
+        # off that and silently degrade a parallel ingest toward serial (and warn
+        # about an absurdly small "available RAM"). MemAvailable counts the cache the
+        # kernel would hand back, matching what Windows already reports here.
+        gb = _meminfo_available_gb()
+        if gb > 0:
+            return gb
+    try:  # macOS, and any Linux whose kernel predates MemAvailable: free pages
         return (os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")) / 1e9
     except (ValueError, OSError, AttributeError):
         return 0.0
@@ -674,7 +708,7 @@ def ingest_directory(
     if not in_path.exists():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    day_units, singles = _flat_day_units(list(in_path.glob("*.zip")))
+    day_units, singles = _flat_day_units(_dedupe_ci(in_path.glob(_ci_glob("*.zip"))))
     total = len(day_units) + len(singles)
     results: list[dict] = []
 
@@ -790,7 +824,7 @@ def ingest_year(
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     year_zips = [
-        f for f in in_path.glob("*.zip")
+        f for f in _dedupe_ci(in_path.glob(_ci_glob("*.zip")))
         if (_zip_date_token(f.name) or "")[:4] == str(year)
     ]
     day_units, _singles = _flat_day_units(year_zips)  # token filter leaves no singles
@@ -1573,10 +1607,10 @@ def ingest_event_windows_period(
                 skipped_by_resume += 1
                 continue
 
-            zip_pattern = str(
-                Path(input_root) / zip_year / yearmonth / f"HTICST120.{date_str}.*.zip"
-            )
-            zip_files = sorted(_glob.glob(zip_pattern))
+            zip_dir = Path(input_root) / zip_year / yearmonth
+            zip_name = f"HTICST120.{date_str}.*.zip"
+            zip_pattern = str(zip_dir / zip_name)  # readable form, for the warning below
+            zip_files = [str(p) for p in _dedupe_ci(zip_dir.glob(_ci_glob(zip_name)))]
 
             if not zip_files:
                 logger.warning("No ZIPs found for %s: %s", date_str, zip_pattern)

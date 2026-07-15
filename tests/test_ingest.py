@@ -9,6 +9,8 @@ import pytest
 
 from tse_tick.ingest import ingest_single_zip, ingest_directory, ingest_year, ingest_event_windows_period
 
+# Kevin's Windows root by default; off Windows it never exists, so set
+# TSE_TICK_DATA_ROOT (see the README's "Testing" section).
 _DATA_ROOT = os.environ.get("TSE_TICK_DATA_ROOT", r"G:\flash_crash")
 REAL_TICST120_ZIP = os.path.join(
     _DATA_ROOT, "raw_2022", "202202", "HTICST120.20220201.1.zip",
@@ -22,6 +24,20 @@ REAL_TICIS110_ZIP = os.path.join(_DATA_ROOT, "raw_other", "HTICIS110.201701.zip"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _skip_without(zip_path: str) -> None:
+    """Skip the calling test unless a real NEEDS ZIP is present.
+
+    Names ``TSE_TICK_DATA_ROOT`` in the reason: the default root is a Windows path,
+    so off Windows every data-gated test skips and the suite looks green while the
+    real-data half never ran — with nothing on screen naming the knob that runs it.
+    """
+    if not os.path.exists(zip_path):
+        pytest.skip(
+            f"Real ZIP not found: {zip_path}. Set TSE_TICK_DATA_ROOT to your NEEDS "
+            f"data root to run the data-gated tests (current root: {_DATA_ROOT!r})."
+        )
+
 
 def _make_corrupt_zip(path: Path) -> None:
     """Write a file that has a .zip extension but is not a valid ZIP."""
@@ -139,8 +155,7 @@ def test_ingest_directory_missing_dir_raises(tmp_path):
 
 
 def test_ingest_single_zip_returns_metadata(tmp_path):
-    if not os.path.exists(REAL_TICST120_ZIP):
-        pytest.skip(f"Real ZIP not found: {REAL_TICST120_ZIP}")
+    _skip_without(REAL_TICST120_ZIP)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     meta = ingest_single_zip(REAL_TICST120_ZIP, str(out_dir))
@@ -155,8 +170,7 @@ def test_ingest_single_zip_returns_metadata(tmp_path):
 
 
 def test_ingest_single_zip_detects_individual_stock(tmp_path):
-    if not os.path.exists(REAL_TICST120_ZIP):
-        pytest.skip(f"Real ZIP not found: {REAL_TICST120_ZIP}")
+    _skip_without(REAL_TICST120_ZIP)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     meta = ingest_single_zip(REAL_TICST120_ZIP, str(out_dir))
@@ -166,8 +180,7 @@ def test_ingest_single_zip_detects_individual_stock(tmp_path):
 
 def test_ingest_single_zip_detects_stock_summary(tmp_path):
     """HTICSS110.*.zip auto-detects as stock_summary and ingests to Parquet."""
-    if not os.path.exists(REAL_TICSS110_ZIP):
-        pytest.skip(f"Real ZIP not found: {REAL_TICSS110_ZIP}")
+    _skip_without(REAL_TICSS110_ZIP)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     meta = ingest_single_zip(REAL_TICSS110_ZIP, str(out_dir))
@@ -178,8 +191,7 @@ def test_ingest_single_zip_detects_stock_summary(tmp_path):
 
 def test_ingest_single_zip_detects_indices(tmp_path):
     """HTICIT110.*.zip auto-detects as indices and ingests to Parquet."""
-    if not os.path.exists(REAL_TICIT110_ZIP):
-        pytest.skip(f"Real ZIP not found: {REAL_TICIT110_ZIP}")
+    _skip_without(REAL_TICIT110_ZIP)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     meta = ingest_single_zip(REAL_TICIT110_ZIP, str(out_dir))
@@ -190,8 +202,7 @@ def test_ingest_single_zip_detects_indices(tmp_path):
 
 def test_ingest_single_zip_detects_indices_summary(tmp_path):
     """HTICIS110.*.zip auto-detects as indices_summary and ingests to Parquet."""
-    if not os.path.exists(REAL_TICIS110_ZIP):
-        pytest.skip(f"Real ZIP not found: {REAL_TICIS110_ZIP}")
+    _skip_without(REAL_TICIS110_ZIP)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     meta = ingest_single_zip(REAL_TICIS110_ZIP, str(out_dir))
@@ -201,8 +212,7 @@ def test_ingest_single_zip_detects_indices_summary(tmp_path):
 
 
 def test_ingest_single_zip_creates_parquet_file(tmp_path):
-    if not os.path.exists(REAL_TICST120_ZIP):
-        pytest.skip(f"Real ZIP not found: {REAL_TICST120_ZIP}")
+    _skip_without(REAL_TICST120_ZIP)
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     ingest_single_zip(REAL_TICST120_ZIP, str(out_dir))
@@ -217,8 +227,7 @@ def test_ingest_single_zip_missing_file_raises():
 
 
 def test_ingest_directory_processes_all_zips(tmp_path):
-    if not os.path.exists(REAL_TICST120_ZIP):
-        pytest.skip(f"Real ZIP not found: {REAL_TICST120_ZIP}")
+    _skip_without(REAL_TICST120_ZIP)
     # Copy the real zip into a temp directory
     in_dir = tmp_path / "in"
     in_dir.mkdir()
@@ -244,8 +253,7 @@ def test_ingest_directory_returns_error_key_on_failure(tmp_path):
 
 
 def test_ingest_directory_with_explicit_data_type(tmp_path):
-    if not os.path.exists(REAL_TICST120_ZIP):
-        pytest.skip(f"Real ZIP not found: {REAL_TICST120_ZIP}")
+    _skip_without(REAL_TICST120_ZIP)
     in_dir = tmp_path / "in"
     in_dir.mkdir()
     shutil.copy(REAL_TICST120_ZIP, in_dir / "HTICST120.20220201.1.zip")

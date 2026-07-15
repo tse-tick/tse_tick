@@ -229,7 +229,11 @@ def test_get_1y_dataframe_vectorized_equals_reference(tmp_path):
 # Real-data gate: byte-identity on real multi-part TICST120 (issue #38 requirement)
 # ---------------------------------------------------------------------------
 def _find_multipart_day() -> list[Path] | None:
-    """Return the parts of one real multi-part TICST120 trading day, or None."""
+    """Return the parts of one real multi-part TICST120 trading day, or None.
+
+    The two fallback roots are Kevin's Windows drives; anywhere else this needs
+    ``TSE_TICK_DATA_ROOT`` (see the README's "Testing" section).
+    """
     roots = [
         os.environ.get("TSE_TICK_DATA_ROOT"),
         r"G:\needs",
@@ -257,7 +261,13 @@ def _find_multipart_day() -> list[Path] | None:
 _PARTS = _find_multipart_day()
 
 
-@pytest.mark.skipif(_PARTS is None, reason="No real multi-part TICST120 data available")
+@pytest.mark.skipif(
+    _PARTS is None,
+    reason=(
+        "No real multi-part TICST120 data available; set TSE_TICK_DATA_ROOT to your "
+        "NEEDS data root to run the data-gated tests"
+    ),
+)
 def test_real_part_byte_identity_and_speed():
     parts = _PARTS
     mid = parts[len(parts) // 2]
