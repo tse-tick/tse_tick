@@ -695,7 +695,7 @@ If you use this software in your research, please cite it using the `CITATION.cf
 ## Authors
 
 - **Kazumi Li** — Schema definitions, package architecture, current maintainer
-- **Masataka Hayashi** — Initial pandas-based prototype
+- **Masataka Hayashi** — Initial pandas-based prototype, alpha testing
 - **Peter Romero** — Original concept and initial project design
 
 Developed at Keio University, Nakatsuma Seminar.
@@ -704,5 +704,4 @@ Developed at Keio University, Nakatsuma Seminar.
 
 ## Acknowledgements
 
-- **Masataka Hayashi** — Alpha testing
 - **Yutaka Ozeki** — Beta testing and validation
