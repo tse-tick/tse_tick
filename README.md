@@ -699,3 +699,10 @@ If you use this software in your research, please cite it using the `CITATION.cf
 - **Peter Romero** — Original concept and initial project design
 
 Developed at Keio University, Nakatsuma Seminar.
+
+---
+
+## Acknowledgements
+
+- **Masataka Hayashi** — Alpha testing
+- **Yutaka Ozeki** — Beta testing and validation
