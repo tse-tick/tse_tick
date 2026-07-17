@@ -694,7 +694,7 @@ If you use this software in your research, please cite it using the `CITATION.cf
 
 ## Authors
 
-- **Kazumi Li** — Schema definitions, package architecture, current maintainer
+- **Kazumi Li** — Technical lead, package architecture and implementation, current maintainer
 - **Masataka Hayashi** — Initial pandas-based prototype, alpha testing
 - **Peter Romero** — Original concept and initial project design
 
