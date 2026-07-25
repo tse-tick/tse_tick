@@ -1,4 +1,4 @@
 method,median_s,rows_returned,total_rows,speedup_vs_pandas_scan
-DuckDB+Hive Parquet,0.0135,52,1500000,694.1
-DuckDB+CSV scan,0.8126,52,1500000,11.5
-pandas CSV scan,9.37,52,1500000,1.0
+DuckDB+Hive Parquet,0.0169,52,1500000,409.6
+DuckDB+CSV scan,0.8123,52,1500000,8.5
+pandas CSV scan,6.9223,52,1500000,1.0

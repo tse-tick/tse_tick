@@ -781,13 +781,13 @@ reference machine and package versions.
 
 ## 10. Test Status
 
-**634 tests. Nothing fails on either OS** — every skip is deliberate and names its own remedy.
+**637 tests. Nothing fails on either OS** — every skip is deliberate and names its own remedy.
 
 | Profile | Result | Skips |
 |---------|--------|-------|
-| No proprietary data (the CI profile), either OS | **584 pass / 50 skip** | 48 data-gated + 2 platform-gated |
-| Linux + `TSE_TICK_DATA_ROOT` | **633 pass / 1 skip** | the Windows-only cp1252 console test |
-| Windows + `TSE_TICK_DATA_ROOT` | **632 pass / 2 skip** | the 2 case-variant filename tests (need a case-sensitive FS) |
+| No proprietary data (the CI profile), either OS | **587 pass / 50 skip** | 48 data-gated + 2 platform-gated |
+| Linux + `TSE_TICK_DATA_ROOT` | **636 pass / 1 skip** | the Windows-only cp1252 console test |
+| Windows + `TSE_TICK_DATA_ROOT` | **635 pass / 2 skip** | the 2 case-variant filename tests (need a case-sensitive FS) |
 
 The default data root is a **Windows** path, so off Windows the 48 data-gated tests skip until
 `TSE_TICK_DATA_ROOT` is set; their reasons say so (a green-looking suite whose real-data half never

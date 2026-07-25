@@ -351,20 +351,20 @@ No user action needed — if your ZIP filename contains `2016`, the fixed-width 
 
 ## Performance
 
-`tse_tick` is built on Polars (CSV parsing, vectorized cleaning) and DuckDB over Hive-partitioned Parquet (queries). Hardware for every row below: an Intel Core i5-14400F (10-core / 16-thread) with 32 GB RAM, Python 3.11, Polars 1.40, pandas 2.2. The engine and storage rows are measured on **one ZIP part** of HTICST120 (`HTICST120.20170104.1.zip` — 4.78 M rows, 95 columns, 2.16 GB raw CSV); a full trading day is 1–27 such parts. The query row uses a different, smaller input — see its note.
+`tse_tick` is built on Polars (CSV parsing, vectorized cleaning) and DuckDB over Hive-partitioned Parquet (queries). Hardware for every row below: an Intel Core i5-14400F (10-core / 16-thread) with 32 GB RAM, Python 3.11, Polars 1.42, pandas 2.3 (re-measured 2026-07-18 on 0.15.1). The engine and storage rows are measured on **one ZIP part** of HTICST120 (`HTICST120.20170104.1.zip` — 4.78 M rows, 95 columns, 2.16 GB raw CSV); a full trading day is 1–27 such parts. The query row uses a different, smaller input — see its note.
 
 | Comparison | Speedup | Source |
 |------------|---------|--------|
-| Polars (16T) vs pandas (Python engine) | **55.5×** | `benchmarks/results_engine_summary.csv` |
-| Polars (16T) vs pandas (C engine, fair baseline) | **22.8×** | `benchmarks/results_engine_summary.csv` |
-| Polars (1 thread) vs pandas (C engine) | **6.2×** | `benchmarks/results_engine_summary.csv` |
-| DuckDB + Hive Parquet vs pandas CSV scan (single-ticker hour slice; measured on 1.5 M rows) | **694.1×** | `benchmarks/results_query.csv` |
-| Parquet (zstd, the default) storage size vs raw CSV | **31× smaller** (70.8 MB vs 2.2 GB) | `benchmarks/results_format.csv` |
-| Parquet (snappy, pre-0.14 stores) storage size vs raw CSV | **22× smaller** (99.7 MB vs 2.2 GB) | `benchmarks/results_format.csv` |
+| Polars (16T) vs pandas (Python engine) | **59.8×** | `benchmarks/results_engine_summary.csv` |
+| Polars (16T) vs pandas (C engine, fair baseline) | **34.3×** | `benchmarks/results_engine_summary.csv` |
+| Polars (1 thread) vs pandas (C engine) | **7.2×** | `benchmarks/results_engine_summary.csv` |
+| DuckDB + Hive Parquet vs pandas CSV scan (single-ticker hour slice; measured on 1.5 M rows) | **409.6×** | `benchmarks/results_query.csv` |
+| Parquet (zstd, the default) storage size vs the cleaned frame as CSV | **34× smaller** (68.9 MB vs 2.4 GB) | `benchmarks/results_format.csv` |
+| Parquet (snappy, pre-0.14 stores) storage size vs the cleaned frame as CSV | **17× smaller** (139.9 MB vs 2.4 GB) | `benchmarks/results_format.csv` |
 
 The three Polars speedup numbers are deliberately reported together: against the original pandas Python-engine prototype, against a fair C-engine baseline (all-string dtypes, forced column count), and at single-thread parity to isolate the contribution of threading from the engine itself. Polars wins on all three.
 
-`tse_tick` defaults to Polars because the ingest workload (multi-GB daily CSVs, mostly columnar transformations) hits exactly the case where lazy expression planning and parallel CSV parsing dominate; pandas-on-DataFrame's row-oriented model leaves throughput on the table even with the C engine. For querying, the Parquet store + DuckDB combination converts repeated single-ticker / single-date filters from full file scans into partition pruning, which is the source of the ~700× query speedup.
+`tse_tick` defaults to Polars because the ingest workload (multi-GB daily CSVs, mostly columnar transformations) hits exactly the case where lazy expression planning and parallel CSV parsing dominate; pandas-on-DataFrame's row-oriented model leaves throughput on the table even with the C engine. For querying, the Parquet store + DuckDB combination converts repeated single-ticker / single-date filters from full file scans into partition pruning, which is the source of the ~400× query speedup.
 
 To reproduce: `python benchmarks/run_all.py` (see `benchmarks/ENVIRONMENT.md`).
 
@@ -654,7 +654,7 @@ export TSE_TICK_DATA_ROOT=/path/to/needs_root   # optional; enables the data-gat
 pytest --no-cov
 ```
 
-The suite collects **634 tests**. Stage-1 (ingestion) and Stage-2 (query, order-book features, and
+The suite collects **637 tests**. Stage-1 (ingestion) and Stage-2 (query, order-book features, and
 event-window-from-Parquet) both run with no proprietary data — a session-scoped pytest fixture
 builds a tiny Hive-partitioned Parquet store at test time by feeding synthetic, obviously-fake
 `individual_stock` (TICST120) ZIPs through the real ingest pipeline (`tests/synthetic_data.py`,
@@ -662,10 +662,10 @@ builds a tiny Hive-partitioned Parquet store at test time by feeding synthetic, 
 
 | Profile | Result | Skips are |
 |---------|--------|-----------|
-| Linux, no data root | 584 pass / 50 skip / **0 fail** | 48 data-gated + 2 platform-gated |
-| Linux, `TSE_TICK_DATA_ROOT` set | 633 pass / 1 skip / **0 fail** | 1 platform-gated |
-| Windows, no data root | 584 pass / 50 skip / **0 fail** | 48 data-gated + 2 platform-gated |
-| Windows, `TSE_TICK_DATA_ROOT` set | 632 pass / 2 skip / **0 fail** | 2 platform-gated |
+| Linux, no data root | 587 pass / 50 skip / **0 fail** | 48 data-gated + 2 platform-gated |
+| Linux, `TSE_TICK_DATA_ROOT` set | 636 pass / 1 skip / **0 fail** | 1 platform-gated |
+| Windows, no data root | 587 pass / 50 skip / **0 fail** | 48 data-gated + 2 platform-gated |
+| Windows, `TSE_TICK_DATA_ROOT` set | 635 pass / 2 skip / **0 fail** | 2 platform-gated |
 
 **Nothing fails on either OS.** Every skip is deliberate, and its reason names what would run it:
 

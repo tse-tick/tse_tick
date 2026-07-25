@@ -222,9 +222,10 @@ def generate_figure(engine_rows, format_rows):
     bars = ax1.bar(labels, times, color=colors_eng, edgecolor="white", width=0.6)
     ax1.set_ylabel("Median time (s)")
     ax1.set_title("Parse + Clean: HTICST120")
+    ax1.tick_params(axis="x", labelsize=9)
     for bar, t in zip(bars, times):
         ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(times) * 0.02,
-                 f"{t:.1f}s", ha="center", va="bottom", fontsize=8)
+                 f"{t:.1f}s", ha="center", va="bottom", fontsize=9)
 
     # Panel 2: Format size vs read latency
     fmt_names = []
@@ -245,16 +246,17 @@ def generate_figure(engine_rows, format_rows):
     bars1 = ax2.bar(x - w/2, read_times_full, w, label="Read all 95 cols", color="#3D405B")
     bars2 = ax2.bar(x + w/2, read_times_sel, w, label="Read 3/95 cols", color="#81B29A")
     ax2.set_xticks(x)
-    ax2.set_xticklabels(fmt_names, fontsize=7)
+    ax2.set_xticklabels(fmt_names, fontsize=9)
     ax2.set_ylabel("Median read time (s)")
     ax2.set_title("Storage Format: Read Latency")
-    ax2.legend(fontsize=8)
 
     ax2_twin = ax2.twinx()
     ax2_twin.plot(x, sizes, "D-", color="#E07A5F", markersize=5, linewidth=1.2, label="Size (MB)")
     ax2_twin.set_ylabel("File size (MB)", color="#E07A5F")
     ax2_twin.tick_params(axis="y", labelcolor="#E07A5F")
-    ax2_twin.legend(loc="upper left", fontsize=8)
+    h1, l1 = ax2.get_legend_handles_labels()
+    h2, l2 = ax2_twin.get_legend_handles_labels()
+    ax2.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=9)
 
     plt.tight_layout()
     path = ASSETS / "benchmark_figure.pdf"
