@@ -28,6 +28,11 @@ Benchmarks and docs only — no package behavior change.
   superseding the 2026-06-15 numbers (55.5× / 22.8× / 6.2×, 694×, 22.2×), which remain in git
   history. `generate_assets.py` now draws one merged figure legend and 9 pt tick labels; the two
   overlapping legends it used to emit were a latent trap for the next regeneration.
+- **The benchmark figure leaves headroom above its tallest bars.** Both panels auto-scaled to the
+  data, so the `285.6s` value label on `pandas (Python engine)` collided with the top spine and the
+  CSV.gz bar ran flush into it — in print both read as a rendering fault rather than a design
+  choice. Panel 1 now sets `ylim` to 1.12× the tallest bar, panel 2 to 1.10× (its legend sits
+  upper-left, so the space was free). Plotted values are unchanged.
 
 ## [0.15.1] - 2026-07-15
 

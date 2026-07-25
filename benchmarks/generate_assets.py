@@ -223,6 +223,9 @@ def generate_figure(engine_rows, format_rows):
     ax1.set_ylabel("Median time (s)")
     ax1.set_title("Parse + Clean: HTICST120")
     ax1.tick_params(axis="x", labelsize=9)
+    # Headroom for the value labels: without it the tallest bar's label collides
+    # with the top spine, which reads as a rendering fault in print.
+    ax1.set_ylim(0, max(times) * 1.12)
     for bar, t in zip(bars, times):
         ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(times) * 0.02,
                  f"{t:.1f}s", ha="center", va="bottom", fontsize=9)
@@ -249,6 +252,10 @@ def generate_figure(engine_rows, format_rows):
     ax2.set_xticklabels(fmt_names, fontsize=9)
     ax2.set_ylabel("Median read time (s)")
     ax2.set_title("Storage Format: Read Latency")
+    # Same headroom rule as panel 1: the tallest bar (CSV.gz) otherwise runs
+    # flush into the top spine and reads as clipped. The legend sits upper-left,
+    # so the extra space is free.
+    ax2.set_ylim(0, max(read_times_full) * 1.10)
 
     ax2_twin = ax2.twinx()
     ax2_twin.plot(x, sizes, "D-", color="#E07A5F", markersize=5, linewidth=1.2, label="Size (MB)")
