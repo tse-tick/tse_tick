@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+Benchmarks and docs only — no package behavior change.
+
+### Added
+- **Parallel-ingest scaling benchmark** (`benchmarks/run_parallel_ingest.py` +
+  `worker_parallel_ingest.py` → `results_parallel_ingest.csv`). Re-measures 0.13.0's worker-count
+  curve on the current engine: January 2023 of `individual_stock` filtered to 7203 (19 trading
+  days, 4,074,579 kept rows), one isolated subprocess per condition, conditions interleaved with
+  the second repetition reversed, and a fresh store per run so nothing can resume-skip work.
+  **1.90× at 2 workers, 3.25× at 4, and 3.59× when a request for 8 is clamped to 5** by the RAM
+  guard (the 3.0 GB/worker streaming estimate against 70% of available RAM on a 32 GB box; the
+  clamp fired in both repetitions). The serial and 8-worker stores are **byte-identical** across
+  all 19 partition files. Supersedes the 0.13.0 figures (2.3× / 3.6× at 4 / 8 workers), which
+  predate 0.14.5's alphanumeric-code pruning fix and 0.14.6's morsel-bounded streaming writes.
+- **The paper's remaining usage listings are test-locked.** `tests/test_paper_examples.py` grew
+  from 5 to 8 tests (suite **634 → 637**): `read_ticks` over a folder with a bare-string
+  `ticker_filter`, the `extract_to_store(..., max_workers="auto")` → `query_ticks` two-stage, the
+  enum and translation helpers, and the exact CLI flag set the manuscript prints. It previously
+  locked only `create_df`, `query_ticks`, the feature chain, and an `export_to_csv` listing the
+  manuscript no longer carries.
+
+### Changed
+- **Benchmark results and the README performance table carry the 2026-07-18 re-run on 0.15.1** —
+  engine 59.8× / 34.3× / 7.2×, query 409.6×, zstd 34.4× smaller with a 1002× selective read —
+  superseding the 2026-06-15 numbers (55.5× / 22.8× / 6.2×, 694×, 22.2×), which remain in git
+  history. `generate_assets.py` now draws one merged figure legend and 9 pt tick labels; the two
+  overlapping legends it used to emit were a latent trap for the next regeneration.
+
 ## [0.15.1] - 2026-07-15
 
 **Linux portability.** The package core already ran correctly on Linux at 0.15.0 — `spawn` is
