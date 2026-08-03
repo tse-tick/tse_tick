@@ -15,8 +15,30 @@ authors:
     affiliation: "Psychometrics Centre, University of Cambridge"
 repository-code: "https://github.com/tse-tick/tse_tick"
 license: MIT
-version: 0.15.0
+version: 0.15.1
 date-released: 2026-07-15
+# The paper describing the library. `authors` above is the SOFTWARE author list;
+# this block is the PAPER's byline, which additionally includes T. Nakatsuma.
+# The arXiv identifier is added here once the preprint is assigned one.
+preferred-citation:
+  type: article
+  title: "tse_tick: A Python Library for Parsing and Querying Nikkei NEEDS Tick Data from the Tokyo Stock Exchange"
+  authors:
+    - family-names: "Li"
+      given-names: "Kazumi"
+      affiliation: "Graduate School of Economics, Keio University"
+    - family-names: "Hayashi"
+      given-names: "Masataka"
+      affiliation: "Faculty of Economics, Keio University"
+    - family-names: "Nakatsuma"
+      given-names: "Teruo"
+      affiliation: "Faculty of Economics, Keio University"
+    - family-names: "Romero"
+      given-names: "Peter"
+      affiliation: "Psychometrics Centre, University of Cambridge"
+  year: 2026
+  journal: "arXiv"
+  notes: "Preprint; the arXiv identifier is added to this entry once assigned."
 keywords:
   - "tick data"
   - "Tokyo Stock Exchange"
