@@ -682,7 +682,17 @@ builds a tiny Hive-partitioned Parquet store at test time by feeding synthetic, 
 
 ## Citation
 
-If you use this software in your research, please cite it using the `CITATION.cff` file in the repository. A technical paper describing the library is in preparation.
+There are two things you may want to cite, and `CITATION.cff` in the repository carries both.
+
+- **The software** — cite the released version you actually ran. GitHub's "Cite this repository"
+  button renders `CITATION.cff` as BibTeX or APA; the `version` and `date-released` fields track
+  the current release.
+- **The paper** — a technical paper describing the library (Li, Hayashi, Nakatsuma, Romero) is
+  under submission as an arXiv preprint. It is recorded as the `preferred-citation` entry in
+  `CITATION.cff`, and the arXiv identifier is added there once assigned.
+
+Note that the paper's byline and the software author list differ by one author: T. Nakatsuma is an
+author of the paper, not of the package.
 
 ---
 
