@@ -5,7 +5,7 @@
 | Property | Value |
 |----------|-------|
 | Package | `tse_tick` |
-| Version | 0.15.0 (Beta) — on PyPI (`pip install tse-tick`) |
+| Version | 0.15.2 (Beta) — on PyPI (`pip install tse-tick`) |
 | Language | Python 3.9+ (tested on 3.9 / 3.11 / 3.13) |
 | Engine | **Polars** (migrated from pandas in v0.2.0) |
 | Dependencies | core: `polars>=1.0.0`, `pyarrow>=12.0.0`; optional `query` extra: `duckdb>=1.1.0` (both are hard floors — see v0.14.2 below) |
@@ -21,7 +21,7 @@
 ```
 tse_tick/                          # Project root
 ├── pyproject.toml                   # Package metadata, deps, black/pytest/coverage/mypy/flake8 configs
-├── CHANGELOG.md                     # version history (current: 0.15.0)
+├── CHANGELOG.md                     # version history (current: 0.15.2)
 ├── README.md                        # User-facing docs (installation, quick start, usage)
 ├── CONTRIBUTING.md                  # Dev setup & PR guidelines
 ├── ARCHITECTURE.md              # THIS FILE — package architecture reference
@@ -137,6 +137,25 @@ tse_tick/                          # Project root
 ---
 
 ## 4. Key Changes (CHANGELOG Summary)
+
+### v0.15.2 — the paper is published; citation metadata carries the arXiv identifier (2026-08-26)
+
+| Change | Detail |
+|--------|--------|
+| Package code | **Unchanged — byte-for-byte 0.15.1.** A patch bump so the citation metadata ships under a version number a reader can cite; nothing to re-ingest, no API change |
+| `CITATION.cff` | The `preferred-citation` entry gained `doi: 10.48550/arXiv.2608.23053`, its `url`, and an `arXiv:2608.23053` identifier, retiring the placeholder note that said the identifier would be added once assigned. The top-level entry stays the **software** citation — its author list still excludes T. Nakatsuma, who is an author of the paper only, which is the one asymmetry a reader trips on. Validated against CFF schema 1.2.0 (`cffconvert --validate`) |
+| `README.md` | An arXiv badge under the title (the file's first badge) and a ready-to-paste `@article` BibTeX entry in the **Citation** section, replacing the "under submission" wording |
+| The paper | *tse_tick: A Python Library for Parsing and Querying Nikkei NEEDS Tick Data from the Tokyo Stock Exchange* — Li, Hayashi, Nakatsuma, Romero, [arXiv:2608.23053](https://arxiv.org/abs/2608.23053). Its usage listings are locked by `tests/test_paper_examples.py` (8 tests), so a change that breaks a printed listing fails CI |
+
+### v0.15.1 — Linux portability: discovery case, RAM sizing, encodings, test suite (issue #72) (2026-07-15)
+
+| Change | Detail |
+|--------|--------|
+| Case-sensitive discovery (F3) | `glob` is case-insensitive on Windows and case-sensitive everywhere else, so a `….ZIP` delivery was **silently invisible** on Linux while Windows ingested it — and a *partial* miss stays silent, since `_warn_zero_discovery` only fires when nothing matches at all. Fixed at all nine discovery sites; case-variant paths resolve to one file (logged, deterministic), because reading both would double-count a trading day |
+| `MemAvailable` over `MemFree` (F2) | `_available_ram_gb()` read `SC_AVPHYS_PAGES` (MemFree) on Linux while the Windows branch reports a MemAvailable equivalent, so the platforms disagreed and Linux under-reported by excluding the reclaimable page cache — measured 8.94 GB vs 15.93 GB on a WSL box with 6 GB of warm cache, moving a 3.0 GB/worker streaming cap from 2 to 3 workers. Falls back to the old arithmetic when the field is missing (keeps macOS on its existing path); the Windows branch is untouched |
+| `sys.executable` (F1) | `TestCLI` spawned a literal `"python"`, which stock Debian/Ubuntu does not ship, so the suite showed 2 failures that read as package breakage. A source-scanning guard keeps the bare name from returning |
+| `utf-8-sig` for `@file` (F5) | `--tickers @file` used the locale default: on cp1252 a UTF-8 file of Japanese index names raised `UnicodeDecodeError`, and a BOM-prefixed file yielded the ticker `'﻿7203'`, which silently matches nothing |
+| Skip reasons name the switch (F4/F6) | The default data root is a Windows path, so off Windows the real-data half skipped while the suite still looked green. Each data-gated skip now names `TSE_TICK_DATA_ROOT` and the files it wants; README gained the Linux/WSL notes and the measured four-profile test table |
 
 ### v0.15.0 — materialized effective-time key: time windows prune row groups (issue #65) (2026-07-15)
 
