@@ -1,5 +1,7 @@
 # tse_tick
 
+[![arXiv](https://img.shields.io/badge/arXiv-2608.23053-b31b1b.svg)](https://arxiv.org/abs/2608.23053)
+
 A Python library for parsing, filtering, and querying Nikkei NEEDS tick data from the Tokyo Stock Exchange.
 
 **Who it's for:** Researchers working with NEEDS tick data who need to convert thousands of zipped CSVs into queryable Parquet stores, filter by ticker or event windows, and handle format changes across historical eras.
@@ -688,11 +690,27 @@ There are two things you may want to cite, and `CITATION.cff` in the repository 
   button renders `CITATION.cff` as BibTeX or APA; the `version` and `date-released` fields track
   the current release.
 - **The paper** — a technical paper describing the library (Li, Hayashi, Nakatsuma, Romero) is
-  under submission as an arXiv preprint. It is recorded as the `preferred-citation` entry in
-  `CITATION.cff`, and the arXiv identifier is added there once assigned.
+  published as an arXiv preprint, [arXiv:2608.23053](https://arxiv.org/abs/2608.23053)
+  ([doi:10.48550/arXiv.2608.23053](https://doi.org/10.48550/arXiv.2608.23053)). It is recorded as
+  the `preferred-citation` entry in `CITATION.cff`.
 
 Note that the paper's byline and the software author list differ by one author: T. Nakatsuma is an
 author of the paper, not of the package.
+
+BibTeX for the paper:
+
+```bibtex
+@article{li2026tsetick,
+  title         = {tse_tick: A Python Library for Parsing and Querying Nikkei NEEDS
+                   Tick Data from the Tokyo Stock Exchange},
+  author        = {Li, Kazumi and Hayashi, Masataka and Nakatsuma, Teruo and Romero, Peter},
+  year          = {2026},
+  eprint        = {2608.23053},
+  archivePrefix = {arXiv},
+  doi           = {10.48550/arXiv.2608.23053},
+  url           = {https://arxiv.org/abs/2608.23053}
+}
+```
 
 ---
 

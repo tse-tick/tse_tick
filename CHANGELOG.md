@@ -34,6 +34,24 @@ Benchmarks and docs only — no package behavior change.
   choice. Panel 1 now sets `ylim` to 1.12× the tallest bar, panel 2 to 1.10× (its legend sits
   upper-left, so the space was free). Plotted values are unchanged.
 
+## [0.15.2] - 2026-08-26
+
+**Citation metadata only — no code change.** The paper describing the library is published as an
+arXiv preprint, [arXiv:2608.23053](https://arxiv.org/abs/2608.23053)
+(doi:10.48550/arXiv.2608.23053): *tse_tick: A Python Library for Parsing and Querying Nikkei NEEDS
+Tick Data from the Tokyo Stock Exchange* (Li, Hayashi, Nakatsuma, Romero). The package itself is
+byte-for-byte the 0.15.1 code; only the citation and version strings move.
+
+### Added
+- **The arXiv identifier and DOI are recorded in `CITATION.cff`.** The `preferred-citation` entry
+  gained `doi`, `url`, and an `arXiv:2608.23053` identifier, replacing the placeholder note that
+  said the identifier would be added once assigned. The top-level entry remains the **software**
+  citation (its author list still excludes T. Nakatsuma, who is an author of the paper only).
+  Validated against CFF schema 1.2.0 with `cffconvert --validate`.
+- **README carries the paper.** An arXiv badge next to the title, and the **Citation** section now
+  prints a ready-to-paste `@article` BibTeX entry with the `eprint` / `archivePrefix` / `doi`
+  fields instead of describing the preprint as under submission.
+
 ## [0.15.1] - 2026-07-15
 
 **Linux portability.** The package core already ran correctly on Linux at 0.15.0 — `spawn` is
